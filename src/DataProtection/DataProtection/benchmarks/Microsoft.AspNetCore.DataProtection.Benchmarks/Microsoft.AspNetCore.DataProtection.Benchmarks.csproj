@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>$(DefaultNetCoreTargetFramework)</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.AspNetCore.DataProtection" />
+    <Reference Include="Microsoft.AspNetCore.DataProtection.Abstractions" />
+    <Reference Include="Microsoft.AspNetCore.DataProtection.Extensions" />
+    <Reference Include="Microsoft.Extensions.Logging" />
+    <Reference Include="Microsoft.Extensions.Logging.Console" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BenchmarkDotNet" />
+    <Compile Include="$(SharedSourceRoot)BenchmarkRunner\*.cs" />
+  </ItemGroup>
+</Project>
