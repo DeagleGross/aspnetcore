@@ -1,1 +1,3 @@
 #nullable enable
+Microsoft.AspNetCore.DataProtection.ITimeLimitedDataProtector.TryProtect(System.ReadOnlySpan<byte> plainText, System.Span<byte> destination, System.DateTimeOffset expiration, out int bytesWritten) -> bool
+Microsoft.AspNetCore.DataProtection.ITimeLimitedDataProtector.TryUnprotect(System.ReadOnlySpan<byte> protectedData, System.Span<byte> destination, System.DateTimeOffset expiration, out int bytesWritten) -> bool

@@ -90,6 +90,54 @@ internal sealed unsafe class KeyRingBasedDataProtector : IDataProtector, IPersis
         return retVal;
     }
 
+    public bool TryProtect(ReadOnlySpan<byte> plainText, Span<byte> destination, out int bytesWritten)
+    {
+        try
+        {
+            // Perform the encryption operation using the current default encryptor.
+            var currentKeyRing = _keyRingProvider.GetCurrentKeyRing();
+            var defaultKeyId = currentKeyRing.DefaultKeyId;
+            var defaultEncryptorInstance = currentKeyRing.DefaultAuthenticatedEncryptor;
+            CryptoUtil.Assert(defaultEncryptorInstance != null, "defaultEncryptorInstance != null");
+
+            if (_logger.IsDebugLevelEnabled())
+            {
+                _logger.PerformingProtectOperationToKeyWithPurposes(defaultKeyId, JoinPurposesForLog(Purposes));
+            }
+
+            // We'll need to apply the default key id to the template if it hasn't already been applied.
+            // If the default key id has been updated since the last call to Protect, also write back the updated template.
+            var aad = _aadTemplate.GetAadForKey(defaultKeyId, isProtecting: true);
+
+            var success = defaultEncryptorInstance.Encrypt(
+                plaintext: plainText,
+                additionalAuthenticatedData: aad,
+                destination: destination,
+                out bytesWritten);
+
+            CryptoUtil.Assert(destination.Length >= sizeof(uint) + sizeof(Guid), "destination.Length >= sizeof(uint) + sizeof(Guid)");
+
+            // At this point: retVal := { 000..000 || encryptorSpecificProtectedPayload },
+            // where 000..000 is a placeholder for our magic header and key id.
+
+            // Write out the magic header and key id
+            fixed (byte* pbRetVal = destination)
+            {
+                WriteBigEndianInteger(pbRetVal, MAGIC_HEADER_V0);
+                WriteGuid(&pbRetVal[sizeof(uint)], defaultKeyId);
+            }
+
+            // At this point, retVal := { magicHeader || keyId || encryptorSpecificProtectedPayload }
+            // And we're done!
+            return success;
+        }
+        catch (Exception ex) when (ex.RequiresHomogenization())
+        {
+            // homogenize all errors to CryptographicException
+            throw Error.Common_EncryptionFailed(ex);
+        }
+    }
+
     public byte[] Protect(byte[] plaintext)
     {
         ArgumentNullThrowHelper.ThrowIfNull(plaintext);
@@ -185,6 +233,11 @@ internal sealed unsafe class KeyRingBasedDataProtector : IDataProtector, IPersis
             ignoreRevocationErrors: false,
             requiresMigration: out _,
             wasRevoked: out _);
+    }
+
+    public bool TryUnprotect(ReadOnlySpan<byte> protectedData, Span<byte> destination, out int bytesWritten)
+    {
+        throw new NotImplementedException();
     }
 
     private byte[] UnprotectCore(byte[] protectedData, bool allowOperationsOnRevokedKeys, out UnprotectStatus status)

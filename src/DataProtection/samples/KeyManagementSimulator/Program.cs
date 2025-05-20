@@ -279,6 +279,20 @@ sealed class MockActivator(IXmlDecryptor decryptor, IAuthenticatedEncryptorDescr
 /// </summary>
 sealed class MockAuthenticatedEncryptor : IAuthenticatedEncryptor
 {
+    public bool TryDecrypt(ReadOnlySpan<byte> cipherText, ReadOnlySpan<byte> additionalAuthenticatedData, Span<byte> destination, out int bytesWritten)
+    {
+        bytesWritten = cipherText.Length;
+        cipherText.CopyTo(destination);
+        return true;
+    }
+
+    public bool TryEncrypt(ReadOnlySpan<byte> plaintText, ReadOnlySpan<byte> additionalAuthenticatedData, Span<byte> destination, out int bytesWritten)
+    {
+        bytesWritten = plaintText.Length;
+        plaintText.CopyTo(destination);
+        return true;
+    }
+
     byte[] IAuthenticatedEncryptor.Decrypt(ArraySegment<byte> ciphertext, ArraySegment<byte> _additionalAuthenticatedData) => ciphertext.ToArray();
     byte[] IAuthenticatedEncryptor.Encrypt(ArraySegment<byte> plaintext, ArraySegment<byte> _additionalAuthenticatedData) => plaintext.ToArray();
 }

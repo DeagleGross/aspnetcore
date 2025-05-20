@@ -125,4 +125,14 @@ internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
 
         return Unprotect(protectedData, out _);
     }
+
+    public bool TryProtect(ReadOnlySpan<byte> plainText, Span<byte> destination, out int bytesWritten)
+    {
+        return _innerProtector.TryProtect(plainText, destination, out bytesWritten);
+    }
+
+    public bool TryUnprotect(ReadOnlySpan<byte> protectedData, Span<byte> destination, out int bytesWritten)
+    {
+        return _innerProtector.TryUnprotect(protectedData, destination, out bytesWritten);
+    }
 }

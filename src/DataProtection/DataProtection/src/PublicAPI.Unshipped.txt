@@ -1,1 +1,3 @@
 #nullable enable
+Microsoft.AspNetCore.DataProtection.AuthenticatedEncryption.IAuthenticatedEncryptor.TryDecrypt(System.ReadOnlySpan<byte> cipherText, System.ReadOnlySpan<byte> additionalAuthenticatedData, System.Span<byte> destination, out int bytesWritten) -> bool
+Microsoft.AspNetCore.DataProtection.AuthenticatedEncryption.IAuthenticatedEncryptor.TryEncrypt(System.ReadOnlySpan<byte> plaintText, System.ReadOnlySpan<byte> additionalAuthenticatedData, System.Span<byte> destination, out int bytesWritten) -> bool
