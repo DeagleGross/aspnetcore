@@ -1,0 +1,20 @@
+name: "Monthly Selenium Dependency Update"
+description: "Automated monthly issue to update Selenium dependencies in eng/Versions.props."
+title: "Monthly: Update Selenium dependencies in Versions.props"
+labels:
+  - dependencies
+  - automation
+  - selenium
+assignees:
+  - Copilot
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Monthly Selenium Dependency Update
+
+        This automated issue requests updating the Selenium dependencies in `eng/Versions.props` to the latest available versions:
+        - `SeleniumSupportVersion`
+        - `SeleniumWebDriverVersion`
+
+        Please update these properties and open a pull request.
