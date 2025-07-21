@@ -16,5 +16,4 @@ jobs:
         run: |
           gh issue create \
             --assignee @copilot \
-            --title "Request Browser-Testing Dependencies Update" \
-            --template "Request Browser-Testing Dependencies Update"
+            --template "Request Dep Updates"
