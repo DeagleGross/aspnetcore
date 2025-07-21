@@ -6,8 +6,6 @@ labels:
   - automation
   - selenium
   - playwright
-assignees:
-  - copilot-swe-agent
 body:
   - type: markdown
     attributes:

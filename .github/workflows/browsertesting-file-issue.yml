@@ -1,19 +1,28 @@
-name: "Create Issue Every Minute"
+name: "Scheduled Issue Creation (GH CLI)"
 
 on:
   schedule:
-    # - cron: '0 0 1 * *' # At 00:00 UTC on the 1st of every month
-    - cron: "*/1 * * * *" # Every minute
-  workflow_dispatch:     # Allows manual runs for testing
+    - cron: '*/1 * * * *' # Every minute
+  workflow_dispatch:
 
 jobs:
-  open-issue:
+  create-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Create browser-testing update issue
-        uses: peter-evans/create-issue@v5
-        with:
-          title: "Request Browser-Testing Dependencies Update"
-          labels: dependencies, automation, selenium, playwright
-          assignees: Copilot
-          template: 70_browsertesting_update.yml
+      - name: Install GitHub CLI
+        run: sudo apt-get install gh
+
+      - name: Authenticate GH CLI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "$GH_TOKEN" | gh auth login --with-token
+
+      - name: Create Issue With Assignee
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo ${{ github.repository }} \
+            --assignee @copilot \
+            --template "Request Browser-Testing Dependencies Update"
