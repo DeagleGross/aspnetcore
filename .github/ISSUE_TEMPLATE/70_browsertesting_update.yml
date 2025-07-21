@@ -7,7 +7,7 @@ labels:
   - selenium
   - playwright
 assignees:
-  - Copilot
+  - copilot-swe-agent
 body:
   - type: markdown
     attributes:
