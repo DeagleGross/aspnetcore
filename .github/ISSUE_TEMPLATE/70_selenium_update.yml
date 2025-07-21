@@ -13,8 +13,16 @@ body:
       value: |
         ## Monthly Selenium Dependency Update
 
-        This automated issue requests updating the Selenium dependencies in `eng/Versions.props` to the latest available versions:
+        Please update the following Selenium dependencies in `eng/Versions.props` to the latest available versions:
         - `SeleniumSupportVersion`
         - `SeleniumWebDriverVersion`
 
-        Please update these properties and open a pull request.
+        After updating, open a pull request.
+
+        _This issue is created automatically each month and assigned to Copilot agent._
+  - type: textarea
+    id: update-notes
+    attributes:
+      label: Update Notes & Actions Taken
+      description: Please describe the extra actions / info if any
+      placeholder: There is a new Selenium version! https://www.selenium.dev/categories/releases/
