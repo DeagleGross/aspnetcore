@@ -17,5 +17,4 @@ jobs:
         run: |
           gh issue create \
             --template "70_browsertesting_update.yml" \
-            --title "Request Browser-Testing Dependencies Update" \
-            --body "This issue was created by a workflow to track browser-testing dependency updates."
+            --title "Request Browser-Testing Dependencies Update"
