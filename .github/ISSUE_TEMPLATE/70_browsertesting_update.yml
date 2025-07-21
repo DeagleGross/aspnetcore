@@ -1,0 +1,27 @@
+name: "Request Browser-Testing Dependencies Update"
+description: "Automated issue to update Browser-Testing dependencies"
+title: "Request Browser-Testing Dependencies Update"
+labels:
+  - dependencies
+  - automation
+  - selenium
+  - playwright
+assignees:
+  - Copilot
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is automatically generated to request an update of the Browser-Testing dependencies used in the project.
+        Copilot will automatically create a pull request to update the dependencies.
+        You can include more context to the issue description if you want to.
+  - type: textarea
+    id: update-notes
+    attributes:
+      label: Requested Browser-Testing Dependencies Update Notes
+      description: Adjust the description if you think it requires more context
+      placeholder: |
+        Please update the following Selenium dependencies in `eng/Versions.props` to the latest available versions:
+        - `SeleniumSupportVersion`
+        - `SeleniumWebDriverVersion`
+
