@@ -17,5 +17,4 @@ jobs:
           gh issue create \
             --assignee @copilot \
             --title "Request Browser-Testing Dependencies Update" \
-            --body "This issue is automatically generated to request an update of the Browser-Testing dependencies used in the project. Copilot will automatically create a pull request to update the dependencies. You can include more context to the issue description if you want to." \
             --template "Request Browser-Testing Dependencies Update"
