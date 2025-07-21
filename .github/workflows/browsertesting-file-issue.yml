@@ -18,4 +18,4 @@ jobs:
             --assignee @copilot \
             --title "Request Browser-Testing Dependencies Update" \
             --template "Request Dep Updates"
-            --body ""
+            --body "body test"
