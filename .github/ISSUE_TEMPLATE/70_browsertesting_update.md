@@ -1,0 +1,32 @@
+---
+name: "Request Browser-Testing Dependencies Update"
+about: "Automated issue to update Browser-Testing dependencies"
+title: "Request Browser-Testing Dependencies Update"
+labels: [dependencies, automation, selenium, playwright]
+assignees: []
+---
+
+This issue is automatically generated to request an update of the Browser-Testing dependencies used in the project.
+Copilot will automatically create a pull request to update the dependencies.
+You can include more context to the issue description if you want to.
+
+## Description
+
+Selenium is used in the aspnetcore repo for automated E2E integration testing.
+Playwright is used in the aspnetcore repo for some benchmarking apps. We need to ensure the docker file and the package version match.
+
+## Instructions
+
+To update the Selenium and Playwright versions, these files need to be updated:
+
+### Packages
+- [ ] [Selenium in `Versions.props`](eng/Versions.props) from NuGet:
+  - [ ] [Selenium.WebDriver](https://www.nuget.org/packages/Selenium.WebDriver/) (Config variable `SeleniumWebDriverVersion`)
+  - [ ] [Selenium.Support](https://www.nuget.org/packages/Selenium.Support/) (Config variable `SeleniumSupportVersion`)
+- [ ] Ensure Playwright versions match
+  - [ ] [Blazor Wasm benchmarks in `src/Components/benchmarkapps/Wasm.Performance/dockerfile`](src/Components/benchmarkapps/Wasm.Performance/dockerfile) (image starts with `mcr.microsoft.com/...`)
+  - [ ] [Playwright package version](eng/Versions.props) (Config variable `PlaywrightVersion`)
+
+## Actions
+
+Please, open the PR against `main` branch and include changes to the files listed above.
