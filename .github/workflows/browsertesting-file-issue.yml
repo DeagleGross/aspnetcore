@@ -17,4 +17,6 @@ jobs:
         run: |
           gh issue create \
             --template "70_browsertesting_update.yml" \
-            --title "Request Browser-Testing Dependencies Update"
+            --title "Request Browser-Testing Dependencies Update" \
+            --body-file ".github/ISSUE_TEMPLATE/70_browsertesting_update_body.md" \
+            --assignee "DeagleGross"
