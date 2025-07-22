@@ -20,7 +20,7 @@ jobs:
         run: |
           gh issue create \
             --title "Request Browser-Testing Dependencies Update" \
-            --assignee "@copilot" \
+
             --body "## Description
 
           Selenium is used in the aspnetcore repo for automated E2E integration testing.
