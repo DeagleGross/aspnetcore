@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>$(DefaultNetCoreTargetFramework)</TargetFramework>
+    <NoDefaultLaunchSettingsFile>true</NoDefaultLaunchSettingsFile>
+    <GenerateRazorAssemblyInfo>false</GenerateRazorAssemblyInfo>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="Microsoft.AspNetCore.Hosting" />
+    <Reference Include="Microsoft.AspNetCore.Hosting.Abstractions" />
+    <Reference Include="Microsoft.AspNetCore.Hosting.Server.Abstractions" />
+    <Reference Include="Microsoft.AspNetCore.Http" />
+    <Reference Include="Microsoft.AspNetCore.Http.Abstractions" />
+    <Reference Include="Microsoft.AspNetCore.Http.Extensions" />
+    <Reference Include="Microsoft.AspNetCore.Http.Features" />
+    <Reference Include="Microsoft.AspNetCore.Routing" />
+    <Reference Include="Microsoft.AspNetCore.Routing.Abstractions" />
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel" />
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Core" />
+    <Reference Include="Microsoft.Extensions.Hosting" />
+
+    <!-- Override Transport.Sockets to use our local build instead of shared framework -->
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets"
+               HintPath="$(ArtifactsBinDir)Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets/$(Configuration)/$(DefaultNetCoreTargetFramework)/Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.dll"
+               Private="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="server-p384.crt">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="server-p384.key">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="server-p384.pfx">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Copy native SSL library from Transport.Sockets to output -->
+  <PropertyGroup>
+    <NativeSslSourceDir>$(MSBuildThisFileDirectory)../../Transport.Sockets/src/DirectSsl/Native/</NativeSslSourceDir>
+    <NativeSslLibName>libnative_ssl.so</NativeSslLibName>
+    <NativeSslOutput>$(NativeSslSourceDir)$(NativeSslLibName)</NativeSslOutput>
+  </PropertyGroup>
+
+  <Target Name="CopyNativeSsl" AfterTargets="Build" Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <Copy SourceFiles="$(NativeSslOutput)" DestinationFolder="$(OutputPath)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
