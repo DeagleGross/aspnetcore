@@ -1,0 +1,4 @@
+# Generated test certificates - do not commit
+server-p384.key
+server-p384.pfx
+server-p384.crt
