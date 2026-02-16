@@ -56,9 +56,9 @@ var hostBuilder = new HostBuilder()
 
             webHost.UseDirectSslSockets(options =>
             {
-                options.CertificatePath = "server-p384.crt";
-                options.PrivateKeyPath = "server-p384.key";
-                options.WorkerCount = 4;
+                options.CertificatePath = "server-p256.crt";
+                options.PrivateKeyPath = "server-p256.key";
+                options.WorkerCount = 2; // 2 pump threads + 2 cores free for ThreadPool
             });
 
             webHost.ConfigureKestrel(options =>
@@ -77,7 +77,7 @@ var hostBuilder = new HostBuilder()
             {
                 options.ListenAnyIP(5001, listenOptions =>
                 {
-                    listenOptions.UseHttps(new X509Certificate2("server-p384.pfx", "testpassword"));
+                    listenOptions.UseHttps(new X509Certificate2("server-p256.pfx", "testpassword"));
                     listenOptions.Protocols = HttpProtocols.Http1;
                 });
             });

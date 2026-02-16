@@ -2,3 +2,7 @@
 server-p384.key
 server-p384.pfx
 server-p384.crt
+
+server-p256.key
+server-p256.pfx
+server-p256.crt
