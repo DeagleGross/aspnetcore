@@ -5,7 +5,6 @@
 // #define DIRECTSSL_DEBUG_COUNTERS
 
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
@@ -20,15 +19,18 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// SSL event pump that handles accept, handshake, and I/O events on a dedicated thread.
 /// Uses EPOLLEXCLUSIVE on the listen socket to distribute accept load across workers.
 /// </summary>
-internal sealed class SslEventPump : IDisposable
+internal sealed partial class SslEventPump : IDisposable
 {
     private readonly ILogger? _logger;
     private readonly int _id;
 
     private readonly int _epollFd;
 
-    // Established connections (handshake complete) - use fd as key
-    private readonly ConcurrentDictionary<int, SslConnectionState> _connections = new();
+    // Established connections (handshake complete) - flat array indexed by fd.
+    // Linux fds are small integers (typically < 65536), so direct indexing is O(1)
+    // with no hashing or locking - mirrors nginx's ngx_cycle->files[fd] pattern.
+    private const int MaxFd = 65536;
+    private readonly SslConnectionState?[] _connections = new SslConnectionState?[MaxFd];
 
     // Connections still handshaking - local to pump thread, no sync needed
     private readonly Dictionary<int, HandshakingConnection> _handshaking = new();
@@ -203,12 +205,12 @@ internal sealed class SslEventPump : IDisposable
 
     public void Unregister(int fd)
     {
-        var removed = _connections.TryRemove(fd, out _);
-#if DIRECTSSL_DEBUG_COUNTERS
-        if (removed)
+        if ((uint)fd < MaxFd)
         {
-            Interlocked.Increment(ref _totalUnregistered);
+            Volatile.Write(ref _connections[fd], null);
         }
+#if DIRECTSSL_DEBUG_COUNTERS
+        Interlocked.Increment(ref _totalUnregistered);
 #endif
 
         NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
@@ -237,6 +239,11 @@ internal sealed class SslEventPump : IDisposable
 
     private void PumpLoop()
     {
+        // Pin this pump thread to a specific CPU core (like nginx worker_cpu_affinity).
+        // This ensures the pump thread stays on one core, keeping CPU caches warm
+        // and reducing involuntary context switches from OS scheduler migration.
+        TrySetCpuAffinity(_id);
+
         const int MaxEvents = 256;
         var events = new EpollEvent[MaxEvents];
 
@@ -252,7 +259,7 @@ internal sealed class SslEventPump : IDisposable
             if ((now - _lastLogTime).TotalSeconds >= 5)
             {
                 _lastLogTime = now;
-                Console.WriteLine($"[Pump {_id}] Connections: {_connections.Count}, Handshaking: {_handshaking.Count}, Accepted: {_totalAccepted}");
+                Console.WriteLine($"[Pump {_id}] Handshaking: {_handshaking.Count}, Accepted: {_totalAccepted}");
                 Console.WriteLine($"[Pump {_id}] Handshake: Complete={_totalHandshakeComplete}, Failed={_totalHandshakeFailed}");
                 Console.WriteLine($"[Pump {_id}] Registered: {_totalRegistered}, Unregistered: {_totalUnregistered}, Errors: {_totalErrors}");
             }
@@ -293,8 +300,9 @@ internal sealed class SslEventPump : IDisposable
                     continue;
                 }
 
-                // Check if this is an established connection
-                if (!_connections.TryGetValue(fd, out var conn))
+                // Check if this is an established connection (direct array lookup - O(1), no hashing)
+                var conn = (uint)fd < MaxFd ? Volatile.Read(ref _connections[fd]) : null;
+                if (conn is null)
                 {
                     continue;
                 }
@@ -336,7 +344,10 @@ internal sealed class SslEventPump : IDisposable
                     if ((mask & NativeSsl.EPOLLIN) == 0)
                     {
                         // No data to read, peer closed - signal error
-                        _connections.TryRemove(fd, out _);
+                        if ((uint)fd < MaxFd)
+                        {
+                            Volatile.Write(ref _connections[fd], null);
+                        }
 #if DIRECTSSL_DEBUG_COUNTERS
                         Interlocked.Increment(ref _totalErrors);
 #endif
@@ -535,4 +546,54 @@ internal sealed class SslEventPump : IDisposable
         _pumpThread.Join(2000);
         NativeSsl.close(_epollFd);
     }
+
+    /// <summary>
+    /// Pin the current thread to a specific CPU core using sched_setaffinity.
+    /// Falls back gracefully if the core index exceeds available CPUs.
+    /// </summary>
+    private void TrySetCpuAffinity(int coreIndex)
+    {
+        try
+        {
+            int cpuCount = Environment.ProcessorCount;
+            int targetCore = coreIndex % cpuCount;
+
+            // cpu_set_t is a bitmask, we need at least 8 bytes (64 CPUs)
+            // For simplicity, use 128 bytes (1024 CPUs max)
+            const int CpuSetSize = 128;
+            Span<byte> cpuSet = stackalloc byte[CpuSetSize];
+            cpuSet.Clear();
+
+            // Set the bit for our target core
+            cpuSet[targetCore / 8] = (byte)(1 << (targetCore % 8));
+
+            unsafe
+            {
+                fixed (byte* ptr = cpuSet)
+                {
+                    // pid=0 means current thread
+                    int result = sched_setaffinity(0, (nuint)CpuSetSize, ptr);
+                    if (result == 0)
+                    {
+                        Console.WriteLine($"Pump {_id}: pinned to CPU core {targetCore}");
+                        _logger?.LogDebug("Pump {Id}: pinned to CPU core {Core}", _id, targetCore);
+                    }
+                    else
+                    {
+                        int errno = Marshal.GetLastWin32Error();
+                        Console.WriteLine($"Pump {_id}: failed to pin to core {targetCore}: errno={errno}");
+                        _logger?.LogDebug("Pump {Id}: failed to pin to core {Core}: errno={Errno}", _id, targetCore, errno);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Pump {_id}: CPU affinity not supported: {ex}");
+            _logger?.LogDebug(ex, "Pump {Id}: CPU affinity not supported", _id);
+        }
+    }
+
+    [LibraryImport("libc", SetLastError = true)]
+    private static unsafe partial int sched_setaffinity(int pid, nuint cpusetsize, byte* mask);
 }

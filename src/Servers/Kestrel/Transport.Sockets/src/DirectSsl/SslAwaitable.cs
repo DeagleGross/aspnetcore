@@ -8,73 +8,65 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// <summary>
 /// A reusable awaitable that avoids allocating TaskCompletionSource for each async operation.
 /// Uses ManualResetValueTaskSourceCore for zero-allocation async patterns.
-/// Thread-safe for concurrent TrySet* calls (first one wins).
+///
+/// Lock-free design using Interlocked.CompareExchange on an int state flag.
+/// This is critical because RunContinuationsAsynchronously = false (inline continuations),
+/// which means SetResult runs the continuation on the calling thread. If we held a lock
+/// during SetResult, the inline continuation calling Reset() would deadlock.
+///
+/// Inline continuations eliminate ThreadPool dispatch overhead — the pump thread runs
+/// the continuation directly, matching nginx's single-thread-per-worker model.
 /// </summary>
 internal sealed class SslAwaitable<T> : IValueTaskSource<T>
 {
     private ManualResetValueTaskSourceCore<T> _source;
-    private readonly object _lock = new();
-    private bool _isActive;
-    private Exception? _exception;
+
+    // 0 = inactive, 1 = active (waiting for result)
+    private volatile int _state;
 
     public SslAwaitable()
     {
-        // RunContinuationsAsynchronously to avoid stack dives and deadlocks.
-        // While this adds ThreadPool dispatch overhead, running inline caused crashes
-        // under high concurrency (c=500) and didn't improve performance at c=100.
-        _source.RunContinuationsAsynchronously = true;
+        // RunContinuationsAsynchronously = false: continuations run inline on the thread
+        // that calls TrySetResult/TrySetException. This is the pump thread, so the
+        // receive/send loop resumes directly on the pump without a ThreadPool hop.
+        _source.RunContinuationsAsynchronously = false;
     }
 
     /// <summary>
     /// Returns true if this awaitable is currently waiting for a result.
     /// </summary>
-    public bool IsActive
-    {
-        get
-        {
-            lock (_lock)
-            {
-                return _isActive;
-            }
-        }
-    }
+    public bool IsActive => _state == 1;
 
     /// <summary>
     /// Prepares the awaitable for a new async wait and returns a ValueTask to await.
     /// </summary>
     public ValueTask<T> Reset()
     {
-        lock (_lock)
+        if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
         {
-            if (_isActive)
-            {
-                throw new InvalidOperationException("SslAwaitable is already active");
-            }
-
-            _isActive = true;
-            _exception = null;
-            _source.Reset();
-            return new ValueTask<T>(this, _source.Version);
+            throw new InvalidOperationException("SslAwaitable is already active");
         }
+
+        _source.Reset();
+        return new ValueTask<T>(this, _source.Version);
     }
 
     /// <summary>
     /// Completes the awaitable with a successful result.
     /// Thread-safe: first caller wins, subsequent calls return false.
+    /// Note: with inline continuations, the awaiter's continuation runs HERE on this thread.
     /// </summary>
     public bool TrySetResult(T result)
     {
-        lock (_lock)
+        if (Interlocked.CompareExchange(ref _state, 0, 1) != 1)
         {
-            if (!_isActive)
-            {
-                return false;
-            }
-
-            _isActive = false;
-            _source.SetResult(result);
-            return true;
+            return false;
         }
+
+        // State is now 0 (inactive) BEFORE SetResult runs the continuation inline.
+        // This allows the continuation to safely call Reset() without deadlock.
+        _source.SetResult(result);
+        return true;
     }
 
     /// <summary>
@@ -83,18 +75,13 @@ internal sealed class SslAwaitable<T> : IValueTaskSource<T>
     /// </summary>
     public bool TrySetException(Exception exception)
     {
-        lock (_lock)
+        if (Interlocked.CompareExchange(ref _state, 0, 1) != 1)
         {
-            if (!_isActive)
-            {
-                return false;
-            }
-
-            _isActive = false;
-            _exception = exception;
-            _source.SetException(exception);
-            return true;
+            return false;
         }
+
+        _source.SetException(exception);
+        return true;
     }
 
     /// <summary>
@@ -103,25 +90,18 @@ internal sealed class SslAwaitable<T> : IValueTaskSource<T>
     /// </summary>
     public bool TrySetCanceled()
     {
-        lock (_lock)
+        if (Interlocked.CompareExchange(ref _state, 0, 1) != 1)
         {
-            if (!_isActive)
-            {
-                return false;
-            }
-
-            _isActive = false;
-            var ex = new OperationCanceledException();
-            _exception = ex;
-            _source.SetException(ex);
-            return true;
+            return false;
         }
+
+        _source.SetException(new OperationCanceledException());
+        return true;
     }
 
     // IValueTaskSource<T> implementation
     public T GetResult(short token)
     {
-        // We don't validate the token since we control all usage
         return _source.GetResult(token);
     }
 
