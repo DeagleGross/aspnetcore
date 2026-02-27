@@ -143,26 +143,22 @@ internal sealed class HttpsConfigurationService : IHttpsConfigurationService
     /// </summary>
     internal static void PopulateMultiplexedTransportFeaturesWorker(FeatureCollection features, ListenOptions listenOptions, ILogger<HttpsConnectionMiddleware> logger)
     {
-        // HttpsOptions or HttpsCallbackOptions should always be set in production, but it's not set for InMemory tests.
+        // HttpsOptions should always be set in production, but it's not set for InMemory tests.
         // The QUIC transport will check if TlsConnectionCallbackOptions is missing.
-        if (listenOptions.HttpsOptions != null)
+        if (listenOptions.HttpsOptions is null)
         {
-            var sslServerAuthenticationOptions = HttpsConnectionMiddleware.CreateHttp3Options(listenOptions.HttpsOptions, logger);
-            features.Set(new TlsConnectionCallbackOptions
-            {
-                ApplicationProtocols = sslServerAuthenticationOptions.ApplicationProtocols ?? new List<SslApplicationProtocol> { SslApplicationProtocol.Http3 },
-                OnConnection = (context, cancellationToken) => ValueTask.FromResult(sslServerAuthenticationOptions),
-                OnConnectionState = null,
-            });
+            return;
         }
-        else if (listenOptions.HttpsCallbackOptions != null)
+
+        if (listenOptions.HttpsOptions.HasTlsHandshakeCallback)
         {
+            var httpsOptions = listenOptions.HttpsOptions;
             features.Set(new TlsConnectionCallbackOptions
             {
                 ApplicationProtocols = new List<SslApplicationProtocol> { SslApplicationProtocol.Http3 },
                 OnConnection = (context, cancellationToken) =>
                 {
-                    return listenOptions.HttpsCallbackOptions.OnConnection(new TlsHandshakeCallbackContext
+                    return httpsOptions.OnConnection!(new TlsHandshakeCallbackContext
                     {
                         ClientHelloInfo = context.ClientHelloInfo,
                         CancellationToken = cancellationToken,
@@ -170,7 +166,17 @@ internal sealed class HttpsConfigurationService : IHttpsConfigurationService
                         Connection = new ConnectionContextAdapter(context.Connection),
                     });
                 },
-                OnConnectionState = listenOptions.HttpsCallbackOptions.OnConnectionState,
+                OnConnectionState = httpsOptions.OnConnectionState,
+            });
+        }
+        else
+        {
+            var sslServerAuthenticationOptions = HttpsConnectionMiddleware.CreateHttp3Options(listenOptions.HttpsOptions, logger);
+            features.Set(new TlsConnectionCallbackOptions
+            {
+                ApplicationProtocols = sslServerAuthenticationOptions.ApplicationProtocols ?? new List<SslApplicationProtocol> { SslApplicationProtocol.Http3 },
+                OnConnection = (context, cancellationToken) => ValueTask.FromResult(sslServerAuthenticationOptions),
+                OnConnectionState = null,
             });
         }
     }

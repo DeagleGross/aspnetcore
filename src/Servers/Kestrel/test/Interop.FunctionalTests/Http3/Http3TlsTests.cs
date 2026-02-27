@@ -298,7 +298,7 @@ public class Http3TlsTests : LoggedTest
             kestrelOptions.ListenAnyIP(0, listenOptions =>
             {
                 listenOptions.Protocols = HttpProtocols.Http3;
-                listenOptions.UseHttps(new TlsHandshakeCallbackOptions
+                listenOptions.UseHttps(new HttpsConnectionAdapterOptions
                 {
                     OnConnection = (context) =>
                     {

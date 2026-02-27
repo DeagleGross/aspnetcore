@@ -106,6 +106,36 @@ public class HttpsConnectionAdapterOptions
     public Action<ConnectionContext, ReadOnlySequence<byte>>? TlsClientHelloBytesCallback { get; set; }
 
     /// <summary>
+    /// A per-connection callback that returns the <see cref="SslServerAuthenticationOptions"/> to use for the TLS handshake.
+    /// When set, the declarative certificate and client certificate properties on this instance are ignored,
+    /// and the callback is responsible for providing the full <see cref="SslServerAuthenticationOptions"/>.
+    /// Properties such as <see cref="HandshakeTimeout"/> and <see cref="TlsClientHelloBytesCallback"/> still apply.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// options.OnConnection = context =>
+    /// {
+    ///     var sslOptions = new SslServerAuthenticationOptions { ServerCertificate = myCert };
+    ///     return new ValueTask&lt;SslServerAuthenticationOptions&gt;(sslOptions);
+    /// };
+    /// </code>
+    /// </example>
+    public Func<TlsHandshakeCallbackContext, ValueTask<SslServerAuthenticationOptions>>? OnConnection { get; set; }
+
+    /// <summary>
+    /// Optional application state to flow to the <see cref="OnConnection"/> callback via <see cref="TlsHandshakeCallbackContext.State"/>.
+    /// </summary>
+    public object? OnConnectionState { get; set; }
+
+    /// <summary>
+    /// Convenient shorthand to check if the callback-based TLS handshake path is configured.
+    /// </summary>
+    internal bool HasTlsHandshakeCallback => OnConnection is not null;
+
+    // Copied from the ListenOptions to enable ALPN in the callback path.
+    internal HttpProtocols HttpProtocols { get; set; }
+
+    /// <summary>
     /// Specifies the maximum amount of time allowed for the TLS/SSL handshake. This must be positive
     /// or <see cref="Timeout.InfiniteTimeSpan"/>. Defaults to 10 seconds.
     /// </summary>

@@ -93,10 +93,9 @@ public class Program
                         listenOptions.Protocols = HttpProtocols.Http1AndHttp2;
                     });
 
-                    // TlsHandshakeCallbackOptions (ServerOptionsSelectionCallback) isn't currently supported by QuicListener
                     options.ListenAnyIP(5006, listenOptions =>
                     {
-                        listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+                        listenOptions.UseHttps(new HttpsConnectionAdapterOptions
                         {
                             OnConnection = context =>
                             {

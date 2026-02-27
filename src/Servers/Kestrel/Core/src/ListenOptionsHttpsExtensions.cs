@@ -199,6 +199,13 @@ public static class ListenOptionsHttpsExtensions
 
         listenOptions.Use(next =>
         {
+            if (httpsOptions.HasTlsHandshakeCallback)
+            {
+                // Set the list of protocols from listen options.
+                // Set it inside Use delegate so Protocols and UseHttps can be called out of order.
+                httpsOptions.HttpProtocols = listenOptions.Protocols;
+            }
+
             var middleware = new HttpsConnectionMiddleware(next, httpsOptions, listenOptions.Protocols, loggerFactory, metrics);
             return middleware.OnConnectionAsync;
         });
@@ -230,7 +237,7 @@ public static class ListenOptionsHttpsExtensions
     /// <returns>The <see cref="ListenOptions"/>.</returns>
     public static ListenOptions UseHttps(this ListenOptions listenOptions, ServerOptionsSelectionCallback serverOptionsSelectionCallback, object state, TimeSpan handshakeTimeout)
     {
-        return listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+        return listenOptions.UseHttps(new HttpsConnectionAdapterOptions
         {
             OnConnection = context => serverOptionsSelectionCallback(context.SslStream, context.ClientHelloInfo, context.State, context.CancellationToken),
             HandshakeTimeout = handshakeTimeout,
@@ -245,6 +252,7 @@ public static class ListenOptionsHttpsExtensions
     /// <param name="listenOptions">The <see cref="ListenOptions"/> to configure.</param>
     /// <param name="callbackOptions">Options for a per connection callback.</param>
     /// <returns>The <see cref="ListenOptions"/>.</returns>
+    [Obsolete($"Use {nameof(UseHttps)}({nameof(HttpsConnectionAdapterOptions)}) with {nameof(HttpsConnectionAdapterOptions)}.{nameof(HttpsConnectionAdapterOptions.OnConnection)} instead.", error: false)]
     public static ListenOptions UseHttps(this ListenOptions listenOptions, TlsHandshakeCallbackOptions callbackOptions)
     {
         ArgumentNullException.ThrowIfNull(callbackOptions);
@@ -254,22 +262,13 @@ public static class ListenOptionsHttpsExtensions
             throw new ArgumentException($"{nameof(TlsHandshakeCallbackOptions.OnConnection)} must not be null.");
         }
 
-        var loggerFactory = listenOptions.KestrelServerOptions.ApplicationServices.GetRequiredService<ILoggerFactory>();
-        var metrics = listenOptions.KestrelServerOptions.ApplicationServices.GetRequiredService<KestrelMetrics>();
-
-        listenOptions.IsTls = true;
-        listenOptions.HttpsCallbackOptions = callbackOptions;
-
-        listenOptions.Use(next =>
+        var httpsOptions = new HttpsConnectionAdapterOptions
         {
-            // Set the list of protocols from listen options.
-            // Set it inside Use delegate so Protocols and UseHttps can be called out of order.
-            callbackOptions.HttpProtocols = listenOptions.Protocols;
+            OnConnection = callbackOptions.OnConnection,
+            OnConnectionState = callbackOptions.OnConnectionState,
+            HandshakeTimeout = callbackOptions.HandshakeTimeout,
+        };
 
-            var middleware = new HttpsConnectionMiddleware(next, callbackOptions, loggerFactory, metrics);
-            return middleware.OnConnectionAsync;
-        });
-
-        return listenOptions;
+        return listenOptions.UseHttps(httpsOptions);
     }
 }

@@ -34,14 +34,14 @@ internal sealed class HttpsConnectionMiddleware
     private readonly ILogger<HttpsConnectionMiddleware> _logger;
     private readonly Func<Stream, SslStream> _sslStreamFactory;
 
-    // The following fields are only set by HttpsConnectionAdapterOptions ctor.
+    // The following fields are only set when using the declarative (non-callback) path.
     private readonly HttpsConnectionAdapterOptions? _options;
     private readonly KestrelMetrics _metrics;
     private readonly SslStreamCertificateContext? _serverCertificateContext;
     private readonly X509Certificate2? _serverCertificate;
     private readonly Func<ConnectionContext, string?, X509Certificate2?>? _serverCertificateSelector;
 
-    // The following fields are only set by TlsHandshakeCallbackOptions ctor.
+    // The following fields are only set when using the callback path (OnConnection is set).
     private readonly Func<TlsHandshakeCallbackContext, ValueTask<SslServerAuthenticationOptions>>? _tlsCallbackOptions;
     private readonly object? _tlsCallbackOptionsState;
 
@@ -63,21 +63,31 @@ internal sealed class HttpsConnectionMiddleware
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (!options.HasServerCertificateOrSelector)
-        {
-            throw new ArgumentException(CoreStrings.ServerCertificateRequired, nameof(options));
-        }
-
         _next = next;
         _handshakeTimeout = options.HandshakeTimeout;
         _logger = loggerFactory.CreateLogger<HttpsConnectionMiddleware>();
         _metrics = metrics;
 
-        // Something similar to the following could allow us to remove more duplicate logic, but we need https://github.com/dotnet/runtime/issues/40402 to be fixed first.
-        //var sniOptionsSelector = new SniOptionsSelector("", new Dictionary<string, SniConfig> { { "*", new SniConfig() } }, new NoopCertificateConfigLoader(), options, options.HttpProtocols, _logger);
-        //_httpsOptionsCallback = SniOptionsSelector.OptionsCallback;
-        //_httpsOptionsCallbackState = sniOptionsSelector;
-        //_sslStreamFactory = s => new SslStream(s);
+        if (options.TlsClientHelloBytesCallback is not null)
+        {
+            _tlsListener = new TlsListener(options.TlsClientHelloBytesCallback);
+        }
+
+        // Callback path: the user provides the full SslServerAuthenticationOptions via OnConnection.
+        if (options.HasTlsHandshakeCallback)
+        {
+            _tlsCallbackOptions = options.OnConnection;
+            _tlsCallbackOptionsState = options.OnConnectionState;
+            _httpProtocols = ValidateAndNormalizeHttpProtocols(options.HttpProtocols, _logger);
+            _sslStreamFactory = s => new SslStream(s);
+            return;
+        }
+
+        // Declarative path: Kestrel builds SslServerAuthenticationOptions from the individual properties.
+        if (!options.HasServerCertificateOrSelector)
+        {
+            throw new ArgumentException(CoreStrings.ServerCertificateRequired, nameof(options));
+        }
 
         _options = options;
         _httpProtocols = ValidateAndNormalizeHttpProtocols(httpProtocols, _logger);
@@ -116,28 +126,6 @@ internal sealed class HttpsConnectionMiddleware
             (RemoteCertificateValidationCallback?)null : RemoteCertificateValidationCallback;
 
         _sslStreamFactory = s => new SslStream(s, leaveInnerStreamOpen: false, userCertificateValidationCallback: remoteCertificateValidationCallback);
-
-        if (options.TlsClientHelloBytesCallback is not null)
-        {
-            _tlsListener = new TlsListener(options.TlsClientHelloBytesCallback);
-        }
-    }
-
-    internal HttpsConnectionMiddleware(
-        ConnectionDelegate next,
-        TlsHandshakeCallbackOptions tlsCallbackOptions,
-        ILoggerFactory loggerFactory,
-        KestrelMetrics metrics)
-    {
-        _next = next;
-        _handshakeTimeout = tlsCallbackOptions.HandshakeTimeout;
-        _logger = loggerFactory.CreateLogger<HttpsConnectionMiddleware>();
-        _metrics = metrics;
-
-        _tlsCallbackOptions = tlsCallbackOptions.OnConnection;
-        _tlsCallbackOptionsState = tlsCallbackOptions.OnConnectionState;
-        _httpProtocols = ValidateAndNormalizeHttpProtocols(tlsCallbackOptions.HttpProtocols, _logger);
-        _sslStreamFactory = s => new SslStream(s);
     }
 
     public async Task OnConnectionAsync(ConnectionContext context)

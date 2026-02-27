@@ -647,7 +647,7 @@ public class HttpsTests : LoggedTest
                 serverOptions.ListenLocalhost(5001, listenOptions =>
                 {
                     listenOptions.Protocols = HttpProtocols.Http3;
-                    listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+                    listenOptions.UseHttps(new HttpsConnectionAdapterOptions
                     {
                         OnConnection = context =>
                         {

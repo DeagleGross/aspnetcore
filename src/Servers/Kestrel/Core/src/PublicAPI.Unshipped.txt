@@ -1,1 +1,7 @@
 #nullable enable
+Microsoft.AspNetCore.Server.Kestrel.Https.HttpsConnectionAdapterOptions.OnConnection.get -> System.Func<Microsoft.AspNetCore.Server.Kestrel.Https.TlsHandshakeCallbackContext!, System.Threading.Tasks.ValueTask<System.Net.Security.SslServerAuthenticationOptions!>>?
+Microsoft.AspNetCore.Server.Kestrel.Https.HttpsConnectionAdapterOptions.OnConnection.set -> void
+Microsoft.AspNetCore.Server.Kestrel.Https.HttpsConnectionAdapterOptions.OnConnectionState.get -> object?
+Microsoft.AspNetCore.Server.Kestrel.Https.HttpsConnectionAdapterOptions.OnConnectionState.set -> void
+[Obsolete] Microsoft.AspNetCore.Server.Kestrel.Https.TlsHandshakeCallbackOptions
+[Obsolete] static Microsoft.AspNetCore.Hosting.ListenOptionsHttpsExtensions.UseHttps(this Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions! listenOptions, Microsoft.AspNetCore.Server.Kestrel.Https.TlsHandshakeCallbackOptions! callbackOptions) -> Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions!

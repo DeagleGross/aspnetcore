@@ -111,14 +111,11 @@ internal sealed class TlsConfigurationLoader
 
         var sniOptionsSelector = new SniOptionsSelector(endpoint.Name, endpoint.Sni, _certificateConfigLoader,
             httpsOptions, listenOptions.Protocols, _httpsLogger);
-        var tlsCallbackOptions = new TlsHandshakeCallbackOptions()
-        {
-            OnConnection = SniOptionsSelector.OptionsCallback,
-            HandshakeTimeout = httpsOptions.HandshakeTimeout,
-            OnConnectionState = sniOptionsSelector,
-        };
 
-        return listenOptions.UseHttps(tlsCallbackOptions);
+        httpsOptions.OnConnection = SniOptionsSelector.OptionsCallback;
+        httpsOptions.OnConnectionState = sniOptionsSelector;
+
+        return listenOptions.UseHttps(httpsOptions);
     }
 
     /// <summary>

@@ -9,6 +9,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Https;
 /// <summary>
 /// Options used to configure a per connection callback for TLS configuration.
 /// </summary>
+/// <remarks>
+/// This type is obsolete. Use <see cref="HttpsConnectionAdapterOptions.OnConnection"/> instead.
+/// </remarks>
+[Obsolete($"Use {nameof(HttpsConnectionAdapterOptions)}.{nameof(HttpsConnectionAdapterOptions.OnConnection)} instead.", error: false)]
 public class TlsHandshakeCallbackOptions
 {
     private TimeSpan _handshakeTimeout = HttpsConnectionAdapterOptions.DefaultHandshakeTimeout;

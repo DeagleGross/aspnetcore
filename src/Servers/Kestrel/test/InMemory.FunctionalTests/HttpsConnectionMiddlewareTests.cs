@@ -708,7 +708,7 @@ public class HttpsConnectionMiddlewareTests : LoggedTest
     {
         void ConfigureListenOptions(ListenOptions listenOptions)
         {
-            listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+            listenOptions.UseHttps(new HttpsConnectionAdapterOptions
             {
                 OnConnection = context =>
                 {
@@ -950,7 +950,7 @@ public class HttpsConnectionMiddlewareTests : LoggedTest
     {
         static void ConfigureListenOptions(ListenOptions listenOptions)
         {
-            listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+            listenOptions.UseHttps(new HttpsConnectionAdapterOptions
             {
                 OnConnection = context =>
                 {
@@ -982,7 +982,7 @@ public class HttpsConnectionMiddlewareTests : LoggedTest
     {
         static void ConfigureListenOptions(ListenOptions listenOptions)
         {
-            listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+            listenOptions.UseHttps(new HttpsConnectionAdapterOptions
             {
                 OnConnection = context =>
                 {

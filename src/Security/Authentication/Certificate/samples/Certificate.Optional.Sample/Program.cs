@@ -32,7 +32,7 @@ public class Program
                 {
                     options.ListenAnyIP(5001, listenOptions =>
                     {
-                        listenOptions.UseHttps(new TlsHandshakeCallbackOptions()
+                        listenOptions.UseHttps(new HttpsConnectionAdapterOptions
                         {
                             OnConnection = connectionContext =>
                             {
