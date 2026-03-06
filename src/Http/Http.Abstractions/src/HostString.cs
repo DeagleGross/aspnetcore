@@ -257,7 +257,7 @@ public readonly struct HostString : IEquatable<HostString>
             }
 
             // Sub-domain wildcards: *.example.com
-            if (pattern.StartsWith("*.", StringComparison.Ordinal) && host.Length >= pattern.Length)
+            if (pattern.StartsWith("*.", StringComparison.Ordinal) && host.Length > pattern.Length)
             {
                 // .example.com
                 var allowedRoot = pattern.Subsegment(1);
