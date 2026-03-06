@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http.HPack;
 using System.Net.Http.QPack;
@@ -295,6 +296,172 @@ namespace System.Net.Http.Unit.Tests.QPack
             QPackDecodingException exception = Assert.Throws<QPackDecodingException>(() => _decoder.Decode(encoded, endHeaders: true, handler: _handler));
             Assert.Equal(SR.net_http_hpack_incomplete_header_block, exception.Message);
             Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderName_ExceedsLimit_Throws()
+        {
+            // Use '0' (ASCII 48) which has a 5-bit Huffman code.
+            // This means N wire bytes decode to floor(N*8/5) characters.
+            // Choose a wire size under the limit that decodes to a size over the limit.
+            // With MaxHeaderFieldSize = 8192:
+            //   Wire size = 5765 bytes -> decodes to 9224 chars (5765*8/5 = 9224) > 8192
+            int decodedLength = MaxHeaderFieldSize + 1032; // 9224
+            int wireLength = (decodedLength * 5 + 7) / 8; // 5765 bytes
+
+            Assert.True(wireLength <= MaxHeaderFieldSize, "Wire length must be under the limit for this test.");
+            Assert.True(decodedLength > MaxHeaderFieldSize, "Decoded length must exceed the limit.");
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+            Assert.Equal(wireLength, huffmanEncoded.Length);
+
+            // 4.5.6 - Literal Field Line With Literal Name
+            // First byte: 0b00101xxx -> 001 prefix, 0 N, 1 H (Huffman), xxx = 3-bit name length prefix
+            byte[] nameLengthPrefix = EncodeQPackHuffmanNameLength(wireLength);
+            byte[] encoded = nameLengthPrefix
+                .Concat(huffmanEncoded)
+                .Concat(new byte[] { 0x05 }) // short non-Huffman value "value"
+                .Concat(_headerValueBytes)
+                .ToArray();
+
+            using QPackDecoder decoder = new QPackDecoder(MaxHeaderFieldSize);
+            decoder.Decode(new byte[] { 0x00, 0x00 }, endHeaders: false, handler: _handler);
+
+            QPackDecodingException exception = Assert.Throws<QPackDecodingException>(() =>
+                decoder.Decode(encoded, endHeaders: true, handler: _handler));
+            Assert.Equal(SR.Format(SR.net_http_headers_exceeded_length, MaxHeaderFieldSize), exception.Message);
+            Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderValue_ExceedsLimit_Throws()
+        {
+            int decodedLength = MaxHeaderFieldSize + 1032; // 9224
+            int wireLength = (decodedLength * 5 + 7) / 8; // 5765 bytes
+
+            Assert.True(wireLength <= MaxHeaderFieldSize, "Wire length must be under the limit for this test.");
+            Assert.True(decodedLength > MaxHeaderFieldSize, "Decoded length must exceed the limit.");
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+            Assert.Equal(wireLength, huffmanEncoded.Length);
+
+            // 4.5.4 - Literal Header Field With Name Reference - Static Table - Index 44 (content-type)
+            byte[] valueLengthPrefix = EncodeHuffmanStringLength(wireLength);
+            byte[] encoded = _literalHeaderFieldWithNameReferenceStatic
+                .Concat(valueLengthPrefix)
+                .Concat(huffmanEncoded)
+                .ToArray();
+
+            using QPackDecoder decoder = new QPackDecoder(MaxHeaderFieldSize);
+            decoder.Decode(new byte[] { 0x00, 0x00 }, endHeaders: false, handler: _handler);
+
+            QPackDecodingException exception = Assert.Throws<QPackDecodingException>(() =>
+                decoder.Decode(encoded, endHeaders: true, handler: _handler));
+            Assert.Equal(SR.Format(SR.net_http_headers_exceeded_length, MaxHeaderFieldSize), exception.Message);
+            Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderName_UnderLimit_Succeeds()
+        {
+            // Verify that a Huffman-encoded header name that decodes to exactly the limit still works.
+            int decodedLength = MaxHeaderFieldSize;
+            int wireLength = (decodedLength * 5 + 7) / 8;
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+
+            byte[] nameLengthPrefix = EncodeQPackHuffmanNameLength(wireLength);
+            byte[] encoded = nameLengthPrefix
+                .Concat(huffmanEncoded)
+                .Concat(new byte[] { 0x05 })
+                .Concat(_headerValueBytes)
+                .ToArray();
+
+            using QPackDecoder decoder = new QPackDecoder(MaxHeaderFieldSize);
+            TestHttpHeadersHandler handler = new TestHttpHeadersHandler();
+            decoder.Decode(new byte[] { 0x00, 0x00 }, endHeaders: false, handler: handler);
+            decoder.Decode(encoded, endHeaders: true, handler: handler);
+
+            Assert.Single(handler.DecodedHeaders);
+        }
+
+        /// <summary>
+        /// Huffman-encodes a string of ASCII characters using the HPACK/QPACK Huffman table.
+        /// Only the raw Huffman-coded bytes are returned (no length prefix).
+        /// </summary>
+        private static byte[] HuffmanEncode(string input)
+        {
+            long totalBits = 0;
+            foreach (char c in input)
+            {
+                (_, int bitLength) = Huffman.Encode(c);
+                totalBits += bitLength;
+            }
+
+            int byteLength = (int)((totalBits + 7) / 8);
+            byte[] result = new byte[byteLength];
+
+            int bitsLeft = 8;
+            int currentIndex = 0;
+
+            foreach (char c in input)
+            {
+                (uint code, int bitLength) = Huffman.Encode(c);
+
+                int remaining = bitLength;
+                while (remaining > 0)
+                {
+                    if (remaining >= bitsLeft)
+                    {
+                        result[currentIndex] |= (byte)(code >> (32 - bitsLeft));
+                        code <<= bitsLeft;
+                        remaining -= bitsLeft;
+                        bitsLeft = 8;
+                        currentIndex++;
+                    }
+                    else
+                    {
+                        result[currentIndex] |= (byte)(code >> (32 - bitsLeft));
+                        bitsLeft -= remaining;
+                        remaining = 0;
+                    }
+                }
+            }
+
+            // Pad with EOS (all 1s) per RFC 7541 section 5.2
+            if (bitsLeft < 8)
+            {
+                result[currentIndex] |= (byte)(0xFF >> (8 - bitsLeft));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Encodes a Huffman string length as a QPACK 7-bit prefixed integer with the H (Huffman) bit set.
+        /// Used for header value lengths.
+        /// </summary>
+        private static byte[] EncodeHuffmanStringLength(int length)
+        {
+            byte[] buffer = new byte[IntegerEncoder.MaxInt32EncodedLength];
+            buffer[0] = 0x80; // Set H bit for Huffman encoding
+            bool success = IntegerEncoder.Encode(length, 7, buffer, out int bytesWritten);
+            Debug.Assert(success);
+            return buffer.Take(bytesWritten).ToArray();
+        }
+
+        /// <summary>
+        /// Encodes a QPACK Literal Field Line With Literal Name first byte + name length.
+        /// Format: 0b001NH_LLL where N=0, H=1 (Huffman), LLL = 3-bit prefix for name length.
+        /// </summary>
+        private static byte[] EncodeQPackHuffmanNameLength(int length)
+        {
+            byte[] buffer = new byte[IntegerEncoder.MaxInt32EncodedLength];
+            // 0b00101000 = 0x28: 001 prefix, 0 N, 1 H (Huffman), 000 start of 3-bit length
+            buffer[0] = 0x28;
+            bool success = IntegerEncoder.Encode(length, 3, buffer, out int bytesWritten);
+            Debug.Assert(success);
+            return buffer.Take(bytesWritten).ToArray();
         }
 
         private static void TestDecodeWithoutIndexing(byte[] encoded, string expectedHeaderName, string expectedHeaderValue)

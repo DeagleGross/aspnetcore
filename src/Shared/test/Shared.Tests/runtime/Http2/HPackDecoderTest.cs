@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Net.Http.HPack;
 using System.Text;
@@ -902,6 +903,145 @@ namespace System.Net.Http.Unit.Tests.HPack
             Assert.Equal(SR.net_http_hpack_huffman_decode_failed, exception.Message);
             Assert.IsType<HuffmanDecodingException>(exception.InnerException);
             Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderName_ExceedsLimit_Throws()
+        {
+            // Use '0' (ASCII 48) which has a 5-bit Huffman code.
+            // This means N wire bytes decode to floor(N*8/5) characters.
+            // Choose a wire size under the limit that decodes to a size over the limit.
+            // With MaxHeaderFieldSize = 8192:
+            //   Wire size = 5765 bytes -> decodes to 9224 chars (5765*8/5 = 9224) > 8192
+            int decodedLength = MaxHeaderFieldSize + 1032; // 9224
+            int wireLength = (decodedLength * 5 + 7) / 8; // 5765 bytes
+
+            Assert.True(wireLength <= MaxHeaderFieldSize, "Wire length must be under the limit for this test.");
+            Assert.True(decodedLength > MaxHeaderFieldSize, "Decoded length must exceed the limit.");
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+            Assert.Equal(wireLength, huffmanEncoded.Length);
+
+            byte[] encoded = _literalHeaderFieldWithoutIndexingNewName
+                .Concat(EncodeHuffmanStringLength(wireLength))
+                .Concat(huffmanEncoded)
+                .Concat(_headerValue) // short non-Huffman value
+                .ToArray();
+
+            HPackDecodingException exception = Assert.Throws<HPackDecodingException>(() =>
+                _decoder.Decode(encoded, endHeaders: true, handler: _handler));
+            Assert.Equal(SR.Format(SR.net_http_headers_exceeded_length, MaxHeaderFieldSize), exception.Message);
+            Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderValue_ExceedsLimit_Throws()
+        {
+            int decodedLength = MaxHeaderFieldSize + 1032; // 9224
+            int wireLength = (decodedLength * 5 + 7) / 8; // 5765 bytes
+
+            Assert.True(wireLength <= MaxHeaderFieldSize, "Wire length must be under the limit for this test.");
+            Assert.True(decodedLength > MaxHeaderFieldSize, "Decoded length must exceed the limit.");
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+            Assert.Equal(wireLength, huffmanEncoded.Length);
+
+            // Use static indexed name (index 58 = user-agent) with Huffman-encoded value
+            byte[] encoded = _literalHeaderFieldWithoutIndexingIndexedName
+                .Concat(EncodeHuffmanStringLength(wireLength))
+                .Concat(huffmanEncoded)
+                .ToArray();
+
+            HPackDecodingException exception = Assert.Throws<HPackDecodingException>(() =>
+                _decoder.Decode(encoded, endHeaders: true, handler: _handler));
+            Assert.Equal(SR.Format(SR.net_http_headers_exceeded_length, MaxHeaderFieldSize), exception.Message);
+            Assert.Empty(_handler.DecodedHeaders);
+        }
+
+        [Fact]
+        public void HuffmanDecodedHeaderName_UnderLimit_Succeeds()
+        {
+            // Verify that a Huffman-encoded header name that decodes to exactly the limit still works.
+            int decodedLength = MaxHeaderFieldSize;
+            int wireLength = (decodedLength * 5 + 7) / 8;
+
+            byte[] huffmanEncoded = HuffmanEncode(new string('0', decodedLength));
+
+            HPackDecoder decoder = new HPackDecoder(DynamicTableInitialMaxSize, MaxHeaderFieldSize);
+
+            byte[] encoded = _literalHeaderFieldWithoutIndexingNewName
+                .Concat(EncodeHuffmanStringLength(wireLength))
+                .Concat(huffmanEncoded)
+                .Concat(_headerValue)
+                .ToArray();
+
+            decoder.Decode(encoded, endHeaders: true, handler: _handler);
+
+            Assert.Single(_handler.DecodedHeaders);
+        }
+
+        /// <summary>
+        /// Huffman-encodes a string of ASCII characters using the HPACK Huffman table.
+        /// Only the raw Huffman-coded bytes are returned (no length prefix).
+        /// </summary>
+        private static byte[] HuffmanEncode(string input)
+        {
+            long totalBits = 0;
+            foreach (char c in input)
+            {
+                (_, int bitLength) = Huffman.Encode(c);
+                totalBits += bitLength;
+            }
+
+            int byteLength = (int)((totalBits + 7) / 8);
+            byte[] result = new byte[byteLength];
+
+            int bitsLeft = 8;
+            int currentIndex = 0;
+
+            foreach (char c in input)
+            {
+                (uint code, int bitLength) = Huffman.Encode(c);
+
+                int remaining = bitLength;
+                while (remaining > 0)
+                {
+                    if (remaining >= bitsLeft)
+                    {
+                        result[currentIndex] |= (byte)(code >> (32 - bitsLeft));
+                        code <<= bitsLeft;
+                        remaining -= bitsLeft;
+                        bitsLeft = 8;
+                        currentIndex++;
+                    }
+                    else
+                    {
+                        result[currentIndex] |= (byte)(code >> (32 - bitsLeft));
+                        bitsLeft -= remaining;
+                        remaining = 0;
+                    }
+                }
+            }
+
+            // Pad with EOS (all 1s) per RFC 7541 section 5.2
+            if (bitsLeft < 8)
+            {
+                result[currentIndex] |= (byte)(0xFF >> (8 - bitsLeft));
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Encodes a Huffman string length as an HPACK 7-bit prefixed integer with the H (Huffman) bit set.
+        /// </summary>
+        private static byte[] EncodeHuffmanStringLength(int length)
+        {
+            byte[] buffer = new byte[IntegerEncoder.MaxInt32EncodedLength];
+            buffer[0] = 0x80; // Set H bit for Huffman encoding
+            bool success = IntegerEncoder.Encode(length, 7, buffer, out int bytesWritten);
+            Debug.Assert(success);
+            return buffer.Take(bytesWritten).ToArray();
         }
 
         private static void TestDecodeWithIndexing(byte[] encoded, string expectedHeaderName, string expectedHeaderValue)
