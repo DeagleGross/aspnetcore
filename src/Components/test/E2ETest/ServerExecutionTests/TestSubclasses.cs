@@ -5,6 +5,8 @@ using BasicTestApp;
 using Microsoft.AspNetCore.Components.E2ETest.Infrastructure.ServerFixtures;
 using Microsoft.AspNetCore.Components.E2ETest.Tests;
 using Microsoft.AspNetCore.E2ETesting;
+using Microsoft.AspNetCore.InternalTesting;
+using Xunit;
 using Xunit.Abstractions;
 
 namespace Microsoft.AspNetCore.Components.E2ETest.ServerExecutionTests;
@@ -42,6 +44,11 @@ public class ServerRoutingTest : RoutingTest
         : base(browserFixture, serverFixture.WithServerExecution(), output)
     {
     }
+
+    [Fact]
+    [QuarantinedTest("https://github.com/DeagleGross/aspnetcore/issues/98")]
+    public new void NavigationLock_OverlappingNavigationsCancelExistingNavigations_HistoryNavigation()
+        => base.NavigationLock_OverlappingNavigationsCancelExistingNavigations_HistoryNavigation();
 }
 
 public class ServerCascadingValueTest : CascadingValueTest
