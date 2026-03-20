@@ -17,6 +17,7 @@ namespace Microsoft.AspNetCore.SignalR.Client.Tests;
 public class TestServerTests : VerifiableLoggedTest
 {
     [Fact]
+    [QuarantinedTest("https://github.com/DeagleGross/aspnetcore/issues/97")]
     public async Task WebSocketsWorks()
     {
         using (StartVerifiableLog())
