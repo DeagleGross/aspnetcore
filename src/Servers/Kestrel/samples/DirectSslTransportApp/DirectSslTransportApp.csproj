@@ -20,6 +20,8 @@
     <Reference Include="Microsoft.AspNetCore.Server.Kestrel" />
     <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Core" />
     <Reference Include="Microsoft.Extensions.Hosting" />
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.Quic" />
+    <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.NamedPipes" />
 
     <!-- Override Transport.Sockets to use our local build instead of shared framework -->
     <Reference Include="Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets"
