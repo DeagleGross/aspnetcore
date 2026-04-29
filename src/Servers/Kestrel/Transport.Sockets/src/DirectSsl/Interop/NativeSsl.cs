@@ -10,10 +10,6 @@ internal static partial class NativeSsl
     private const string LIBC = "libc.so.6";
 
     // SSL
-    [LibraryImport(LIBSSL)] public static partial IntPtr SSL_CTX_new(IntPtr method);
-    [LibraryImport(LIBSSL)] public static partial IntPtr TLS_server_method();
-    [LibraryImport(LIBSSL, StringMarshalling = StringMarshalling.Utf8)] public static partial int SSL_CTX_use_certificate_file(IntPtr ctx, string file, int type);
-    [LibraryImport(LIBSSL, StringMarshalling = StringMarshalling.Utf8)] public static partial int SSL_CTX_use_PrivateKey_file(IntPtr ctx, string file, int type);
     [LibraryImport(LIBSSL)] public static partial IntPtr SSL_new(IntPtr ctx);
     [LibraryImport(LIBSSL)] public static partial int SSL_set_fd(IntPtr ssl, int fd);
     [LibraryImport(LIBSSL)] public static partial void SSL_set_accept_state(IntPtr ssl);

@@ -1038,6 +1038,7 @@
     <Project Path="src/Servers/Kestrel/perf/Microbenchmarks/Microsoft.AspNetCore.Server.Kestrel.Microbenchmarks.csproj" />
   </Folder>
   <Folder Name="/src/Servers/Kestrel/samples/">
+    <Project Path="src/Servers/Kestrel/samples/DirectSslTransportApp/DirectSslTransportApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/http2cat/http2cat.csproj" />
     <Project Path="src/Servers/Kestrel/samples/Http2SampleApp/Http2SampleApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/Http3SampleApp/Http3SampleApp.csproj" />

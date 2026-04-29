@@ -68,14 +68,6 @@ internal static unsafe partial class OpenSsl
     [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
     public static partial int SSL_CTX_check_private_key(IntPtr ctx);
 
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial long SSL_CTX_set_options(IntPtr ctx, long options);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial long SSL_CTX_set_mode(IntPtr ctx, long mode);
-
     #endregion
 
     #region SSL Session Caching
@@ -155,54 +147,6 @@ internal static unsafe partial class OpenSsl
 
     #endregion
 
-    #region SSL Session Management
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial IntPtr SSL_new(IntPtr ctx);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial void SSL_free(IntPtr ssl);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_set_fd(IntPtr ssl, int fd);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_accept(IntPtr ssl);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial void SSL_set_accept_state(IntPtr ssl);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_do_handshake(IntPtr ssl);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_get_error(IntPtr ssl, int ret);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_read(IntPtr ssl, byte* buf, int num);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_write(IntPtr ssl, byte* buf, int num);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int SSL_shutdown(IntPtr ssl);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial void SSL_set_quiet_shutdown(IntPtr ssl, int mode);
-
-    #endregion
-
     #region OpenSSL Initialization
 
     [LibraryImport(LibSsl)]
@@ -237,38 +181,6 @@ internal static unsafe partial class OpenSsl
         ERR_error_string(error, buffer);
         return Marshal.PtrToStringAnsi((IntPtr)buffer) ?? "Unknown error";
     }
-
-    #endregion
-
-    #region BIO Operations
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial IntPtr BIO_s_mem();
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial IntPtr BIO_new(IntPtr type);
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial void BIO_free(IntPtr bio);
-
-    [LibraryImport(LibSsl)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial void SSL_set_bio(IntPtr ssl, IntPtr rbio, IntPtr wbio);
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int BIO_read(IntPtr bio, byte* buf, int len);
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int BIO_write(IntPtr bio, byte* buf, int len);
-
-    [LibraryImport(LibCrypto)]
-    [UnmanagedCallConv(CallConvs = [typeof(System.Runtime.CompilerServices.CallConvCdecl)])]
-    public static partial int BIO_ctrl_pending(IntPtr bio);
 
     #endregion
 
