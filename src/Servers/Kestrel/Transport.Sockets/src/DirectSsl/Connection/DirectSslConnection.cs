@@ -282,7 +282,7 @@ internal sealed class DirectSslConnection : TransportConnection
         _connectionState.Cancel();
 
         // 2. Unregister from pump (removes from epoll, prevents new events)
-        _pump.Unregister(_connectionState.Fd);
+        _pump.Unregister(_connectionState.Socket, _connectionState.Fd);
 
         // 3. Cancel pending pipeline operations to unblock our loops
         Application.Input.CancelPendingRead();
@@ -302,23 +302,23 @@ internal sealed class DirectSslConnection : TransportConnection
         Transport.Input.Complete();
         Transport.Output.Complete();
 
-        // 6. Graceful SSL and socket shutdown (matching Kestrel's SocketConnection pattern)
+        // 6. Graceful SSL and socket shutdown
+        //    BEFORE: try-catch around _connectionState.Dispose(), then manual
+        //            NativeSsl.shutdown(_fd, SHUT_RDWR) + NativeSsl.close(_fd).
+        //    AFTER:  _connectionState.Dispose() runs SafeOpenSslHandle.Dispose
+        //            (quiet shutdown + SSL_free + DangerousRelease on the
+        //            socket ref), then SafeSocketHandle.Dispose runs close(fd).
+        //            shutdown(SHUT_RDWR) is implicit in close() once we drop
+        //            the last fd reference.
         try
         {
-            // SSL shutdown sends close_notify alert
             _connectionState.Dispose();
+            _connectionState.Socket.Dispose();
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "SSL shutdown failed for fd={Fd}", _connectionState.Fd);
+            _logger.LogDebug(ex, "SSL/socket shutdown failed for fd={Fd}", _connectionState.Fd);
         }
-
-        // Shutdown both directions using P/Invoke (avoids Socket wrapper overhead)
-        // Ignore return value - socket may already be closed by peer
-        NativeSsl.shutdown(_fd, NativeSsl.SHUT_RDWR);
-
-        // Close the fd using P/Invoke
-        NativeSsl.close(_fd);
 
         // 7. Signal connection closed
         _connectionClosedTokenSource.Cancel();

@@ -2,9 +2,10 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers;
+using System.Net.Security;
+using System.Net.Sockets;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Connection;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Ssl;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
@@ -41,8 +42,8 @@ internal sealed class SslEventPumpPool : IDisposable
     /// with EPOLLEXCLUSIVE so that only one pump wakes per incoming connection.
     /// </summary>
     public void StartWithListenSocket(
-        int listenFd,
-        SslContext sslContext,
+        SafeSocketHandle listenSocket,
+        SafeOpenSslContextHandle sslContext,
         ChannelWriter<DirectSslConnection> readyConnections,
         MemoryPool<byte> memoryPool,
         bool noDelay)
@@ -50,10 +51,10 @@ internal sealed class SslEventPumpPool : IDisposable
         foreach (var pump in _pumps)
         {
             pump.StartWithListenSocket(
-                listenFd, 
-                sslContext.Handle, 
-                readyConnections, 
-                memoryPool, 
+                listenSocket,
+                sslContext,
+                readyConnections,
+                memoryPool,
                 _loggerFactory!,
                 noDelay);
         }

@@ -4,12 +4,12 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Interop;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Ssl;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Connection;
@@ -27,7 +27,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     private readonly MemoryPool<byte> _memoryPool;
 
-    private readonly SslContext _sslContext;
+    private readonly SafeOpenSslContextHandle _sslContext;
     private readonly SslEventPumpPool _pumpPool;
 
     private Socket? _listenSocket;
@@ -39,7 +39,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     public DirectSslConnectionListener(
         ILoggerFactory loggerFactory,
-        SslContext sslContext,
+        SafeOpenSslContextHandle sslContext,
         SslEventPumpPool pumpPool,
         EndPoint endpoint,
         DirectSslTransportOptions options,
@@ -88,6 +88,8 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
         {
             int fd = (int)listenSocket.Handle;
             int timeout = 1;  // seconds
+
+            // when runtime obtains the socket option to set TCP_DEFER_ACCEPT, this will change
             int result = NativeLibc.SetSocketOption(fd, ref timeout, sizeof(int));
             if (result < 0)
             {
@@ -102,28 +104,23 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
         }
 
         listenSocket.Listen(_options.Backlog);
-        
+
         // Set listen socket to non-blocking for EPOLLEXCLUSIVE accept pattern
         // Without this, accept4() blocks instead of returning EAGAIN
-        if (OperatingSystem.IsLinux())
-        {
-            int fd = (int)listenSocket.Handle;
-            NativeSsl.SetNonBlocking(fd);
-            _logger?.LogDebug("Listen socket set to non-blocking mode");
-        }
-        
+        listenSocket.Blocking = false;
+        _logger?.LogDebug("Listen socket set to non-blocking mode");
+
         _listenSocket = listenSocket;
-        
+
         // Start all pump threads with the listen socket (EPOLLEXCLUSIVE)
         // Each pump will accept connections directly in its epoll loop
-        int listenFd = (int)listenSocket.Handle;
         _pumpPool.StartWithListenSocket(
-            listenFd, 
-            _sslContext, 
-            _readyConnections.Writer, 
+            listenSocket.SafeHandle,
+            _sslContext,
+            _readyConnections.Writer,
             _memoryPool,
             _options.NoDelay);
-            
+
         _logger?.LogInformation("DirectSsl listener started with EPOLLEXCLUSIVE worker accept");
     }
 

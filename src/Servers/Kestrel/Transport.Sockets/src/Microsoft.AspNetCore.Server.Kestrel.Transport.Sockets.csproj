@@ -12,6 +12,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="DirectSsl\Ssl\**" />
+    <EmbeddedResource Remove="DirectSsl\Ssl\**" />
+    <None Remove="DirectSsl\Ssl\**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Compile Include="$(KestrelSharedSourceRoot)\CorrelationIdGenerator.cs" Link="Internal\CorrelationIdGenerator.cs" />
     <Compile Include="$(SharedSourceRoot)ServerInfrastructure\DuplexPipe.cs" Link="Internal\DuplexPipe.cs" />
     <Compile Include="$(KestrelSharedSourceRoot)\TransportConnection.cs" Link="Internal\TransportConnection.cs" />
@@ -48,7 +54,6 @@
 
   <ItemGroup>
     <Folder Include="DirectSsl/Native/" />
-    <Folder Include="DirectSsl/Ssl/" />
   </ItemGroup>
 
   <!-- Build native SSL library for DirectSsl transport -->

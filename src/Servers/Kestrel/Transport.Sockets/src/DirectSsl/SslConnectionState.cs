@@ -4,16 +4,33 @@
 // Uncomment the following line to enable debug counters for SSL diagnostics
 // #define DIRECTSSL_DEBUG_COUNTERS
 
+using System.Net.Security;
+using System.Net.Sockets;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-connection state machine driving SafeOpenSslHandle.
+//
+// Compared to the pre-runtime-API version, this file shrinks substantially:
+//   * No DoSslRead / DoSslWrite helpers — Ssl.Read / Ssl.Write live on the
+//     SafeOpenSslHandle now.
+//   * No SSL_get_error switch with 6 OpenSSL-ABI error codes per call site —
+//     we get a 4-value SslOperationStatus instead.
+//   * No errno capture, no SYSCALL/EAGAIN/ECONNRESET disambiguation, no
+//     ERR_clear_error / ERR_peek_error plumbing — the runtime does all of it.
+//   * No manual SSL_shutdown / SSL_free / close(fd) in Dispose — disposing
+//     the SafeOpenSslHandle does SSL_shutdown + SSL_free + DangerousRelease
+//     on the SafeSocketHandle; disposing the SafeSocketHandle does close(fd).
+// ─────────────────────────────────────────────────────────────────────────────
 internal sealed class SslConnectionState : IDisposable
 {
     private readonly ILogger? _logger;
 
     public readonly int Fd;
-    public readonly IntPtr Ssl;
+    public readonly SafeOpenSslHandle Ssl;
+    public readonly SafeSocketHandle Socket;
 
     // Reference to pump for dynamic event modification
     internal SslEventPump? Pump { get; set; }
@@ -28,19 +45,20 @@ internal sealed class SslConnectionState : IDisposable
     // Read - reusable awaitable to avoid TCS allocations
     private readonly SslAwaitable<int> _readAwaitable = new();
     private Memory<byte> _readBuffer;
-    private bool _readWantsWrite;  // SSL_read returned WANT_WRITE (renegotiation)
+    private bool _readWantsWrite;  // SSL_read returned WantWrite (renegotiation)
 
     // Write - reusable awaitable to avoid TCS allocations
     private readonly SslAwaitable<int> _writeAwaitable = new();
     private ReadOnlyMemory<byte> _writeBuffer;
-    private bool _writeWantsRead;  // SSL_write returned WANT_READ (renegotiation)
+    private bool _writeWantsRead;  // SSL_write returned WantRead (renegotiation)
 
-    public SslConnectionState(int fd, IntPtr ssl, ILogger? logger = null)
+    public SslConnectionState(int fd, SafeOpenSslHandle ssl, SafeSocketHandle socket, ILogger? logger = null)
     {
         _logger = logger;
 
         Fd = fd;
         Ssl = ssl;
+        Socket = socket;
     }
 
     /// <summary>
@@ -57,50 +75,63 @@ internal sealed class SslConnectionState : IDisposable
 
     public ValueTask HandshakeAsync()
     {
-        // Clear any stale errors before handshake
-        NativeSsl.ERR_clear_error();
-        int n = NativeSsl.SSL_do_handshake(Ssl);
-
-        if (n == 1)
+        SslOperationStatus status;
+        try
         {
-            IsHandshaked = true;
-            return ValueTask.CompletedTask;
+            status = Ssl.Handshake();
+        }
+        catch (OpenSslException ex)
+        {
+            return ValueTask.FromException(ex);
         }
 
-        int error = NativeSsl.SSL_get_error(Ssl, n);
-
-        if (error == NativeSsl.SSL_ERROR_WANT_READ || error == NativeSsl.SSL_ERROR_WANT_WRITE)
+        switch (status)
         {
-            // Use pooled awaitable instead of allocating new TCS
-            var valueTask = _handshakeAwaitable.Reset();
-            return new ValueTask(valueTask.AsTask());
-        }
+            case SslOperationStatus.Complete:
+                IsHandshaked = true;
+                return ValueTask.CompletedTask;
 
-        return ValueTask.FromException(new SslException($"Handshake failed: {error}"));
+            case SslOperationStatus.WantRead:
+            case SslOperationStatus.WantWrite:
+                var valueTask = _handshakeAwaitable.Reset();
+                return new ValueTask(valueTask.AsTask());
+
+            case SslOperationStatus.Closed:
+            default:
+                return ValueTask.FromException(new SslException("Handshake closed by peer"));
+        }
     }
 
     private void ContinueHandshake()
     {
-        // Clear any stale errors before handshake continuation
-        NativeSsl.ERR_clear_error();
-        int n = NativeSsl.SSL_do_handshake(Ssl);
-
-        if (n == 1)
+        SslOperationStatus status;
+        try
         {
-            IsHandshaked = true;
-            _handshakeAwaitable.TrySetResult(true);
+            status = Ssl.Handshake();
+        }
+        catch (OpenSslException ex)
+        {
+            _handshakeAwaitable.TrySetException(ex);
             return;
         }
 
-        int error = NativeSsl.SSL_get_error(Ssl, n);
-
-        if (error == NativeSsl.SSL_ERROR_WANT_READ || error == NativeSsl.SSL_ERROR_WANT_WRITE)
+        switch (status)
         {
-            // Keep waiting
-            return;
-        }
+            case SslOperationStatus.Complete:
+                IsHandshaked = true;
+                _handshakeAwaitable.TrySetResult(true);
+                return;
 
-        _handshakeAwaitable.TrySetException(new SslException($"Handshake failed: {error}"));
+            case SslOperationStatus.WantRead:
+            case SslOperationStatus.WantWrite:
+                // Keep waiting
+                return;
+
+            case SslOperationStatus.Closed:
+            default:
+                _handshakeAwaitable.TrySetException(new SslException("Handshake closed by peer"));
+                return;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -119,90 +150,38 @@ internal sealed class SslConnectionState : IDisposable
             throw new InvalidOperationException("Read already pending");
         }
 
-        int n = DoSslRead(buffer);
-
-        if (n > 0)
+        SslOperationStatus status;
+        int n;
+        try
         {
-            return new ValueTask<int>(n);
+            status = Ssl.Read(buffer.Span, out n);
+        }
+        catch (OpenSslException ex)
+        {
+            return ValueTask.FromException<int>(ex);
         }
 
-        if (n == 0)
+        switch (status)
         {
-            return new ValueTask<int>(0); // EOF
-        }
+            case SslOperationStatus.Complete:
+                // n > 0: data; n == 0: clean EOF
+                return new ValueTask<int>(n);
 
-        int error = NativeSsl.SSL_get_error(Ssl, n);
-
-        switch (error)
-        {
-            case NativeSsl.SSL_ERROR_WANT_READ:
+            case SslOperationStatus.WantRead:
                 _readBuffer = buffer;
                 _readWantsWrite = false;
                 return _readAwaitable.Reset();
 
-            case NativeSsl.SSL_ERROR_WANT_WRITE:
+            case SslOperationStatus.WantWrite:
                 // SSL_read needs to write (TLS renegotiation or post-handshake auth)
-                // Register for EPOLLOUT - OnWritable will call TryCompleteRead
                 _readBuffer = buffer;
                 _readWantsWrite = true;
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT);
+                Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read | EpollEvents.Write);
                 return _readAwaitable.Reset();
 
-            case NativeSsl.SSL_ERROR_ZERO_RETURN:
-                // Peer sent close_notify - treat as EOF
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorZeroReturn);
-#endif
-                return new ValueTask<int>(0);
-
-            case NativeSsl.SSL_ERROR_SYSCALL:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscall);
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallImmediate);
-                if (n == 0)
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallRet0);
-                }
-                else
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallRetNeg1);
-                }
-                // Track errno distribution
-                if (_lastErrno == 0)
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallErrno0);
-                }
-                else if (_lastErrno == 11)
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallErrno11);
-                }
-                else
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallErrnoOther);
-                }
-#endif
-
-                // For SSL_ERROR_SYSCALL: if n==0 it's unexpected EOF, if n==-1 check errno
-                // Use _lastErrno which was captured immediately after SSL_read
-                if (n == 0 || _lastErrno == 0 || _lastErrno == 104 /* ECONNRESET */)
-                {
-                    return new ValueTask<int>(0);  // Treat as EOF
-                }
-                if (_lastErrno == 11 /* EAGAIN */ || _lastErrno == 115 /* EINPROGRESS */)
-                {
-                    // No data available - should wait for epoll
-                    _readBuffer = buffer;
-                    _readWantsWrite = false;
-                    return _readAwaitable.Reset();
-                }
-                // There's an actual error
-                return ValueTask.FromException<int>(new SslException($"SSL_read syscall error: errno={_lastErrno}"));
-
+            case SslOperationStatus.Closed:
             default:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorOther);
-#endif
-                return ValueTask.FromException<int>(new SslException($"SSL_read failed: {error}"));
+                return new ValueTask<int>(0); // EOF
         }
     }
 
@@ -211,122 +190,61 @@ internal sealed class SslConnectionState : IDisposable
         if (!_readAwaitable.IsActive)
         {
             _logger?.LogDebug("TryCompleteRead called but no read is pending");
-            return; // Race: cancelled or completed between check and call
-        }
-
-        int n = DoSslRead(_readBuffer);
-
-        if (n > 0)
-        {
-            var wasWaitingForWrite = _readWantsWrite;
-            _readBuffer = default;
-            _readWantsWrite = false;
-
-            // If we were waiting for write, remove EPOLLOUT now that read completed
-            if (wasWaitingForWrite)
-            {
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
-            }
-
-            _readAwaitable.TrySetResult(n);
             return;
         }
 
-        if (n == 0)
+        SslOperationStatus status;
+        int n;
+        try
         {
-            var wasWaitingForWrite = _readWantsWrite;
+            status = Ssl.Read(_readBuffer.Span, out n);
+        }
+        catch (OpenSslException ex)
+        {
             _readBuffer = default;
             _readWantsWrite = false;
-
-            if (wasWaitingForWrite)
-            {
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
-            }
-
-            _readAwaitable.TrySetResult(0);
+            _readAwaitable.TrySetException(ex);
             return;
         }
 
-        int error = NativeSsl.SSL_get_error(Ssl, n);
-
-        switch (error)
+        switch (status)
         {
-            case NativeSsl.SSL_ERROR_WANT_READ:
-                // Need to wait for more data - if we were waiting for write, switch back to read
+            case SslOperationStatus.Complete:
+                {
+                    var wasWaitingForWrite = _readWantsWrite;
+                    _readBuffer = default;
+                    _readWantsWrite = false;
+
+                    if (wasWaitingForWrite)
+                    {
+                        Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
+                    }
+
+                    _readAwaitable.TrySetResult(n);
+                    return;
+                }
+
+            case SslOperationStatus.WantRead:
                 if (_readWantsWrite)
                 {
                     _readWantsWrite = false;
-                    Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
+                    Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
                 }
                 return;
 
-            case NativeSsl.SSL_ERROR_WANT_WRITE:
-                // Need to write - register for EPOLLOUT if not already
+            case SslOperationStatus.WantWrite:
                 if (!_readWantsWrite)
                 {
                     _readWantsWrite = true;
-                    Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT);
+                    Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read | EpollEvents.Write);
                 }
                 return;
 
-            case NativeSsl.SSL_ERROR_ZERO_RETURN:
-                // Peer sent close_notify - treat as EOF
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorZeroReturn);
-#endif
+            case SslOperationStatus.Closed:
+            default:
                 _readBuffer = default;
                 _readWantsWrite = false;
                 _readAwaitable.TrySetResult(0);
-                return;
-
-            case NativeSsl.SSL_ERROR_SYSCALL:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscall);
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallAfterEpoll);
-                if (n == 0)
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallRet0);
-                }
-                else
-                {
-                    Interlocked.Increment(ref SslEventPump.TotalSslErrorSyscallRetNeg1);
-                }
-#endif
-                // For SSL_ERROR_SYSCALL: if n==0 it's unexpected EOF, if n==-1 check errno
-                // Use _lastErrno which was captured immediately after SSL_read
-                if (n == 0 || _lastErrno == 0 || _lastErrno == 104 /* ECONNRESET */)
-                {
-                    _readBuffer = default;
-                    _readWantsWrite = false;
-                    _readAwaitable.TrySetResult(0);  // Treat as EOF
-                    return;
-                }
-                if (_lastErrno == 11 /* EAGAIN */ || _lastErrno == 115 /* EINPROGRESS */)
-                {
-                    // No data available - wait for more (shouldn't happen after epoll wakeup)
-                    return;
-                }
-                _readBuffer = default;
-                _readWantsWrite = false;
-                _readAwaitable.TrySetException(new SslException($"SSL_read syscall error: errno={_lastErrno}"));
-                return;
-
-            case NativeSsl.SSL_ERROR_SSL:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorSsl);
-#endif
-                _readBuffer = default;
-                _readWantsWrite = false;
-                _readAwaitable.TrySetException(new SslException($"SSL_read failed: {error}"));
-                return;
-
-            default:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalSslErrorOther);
-#endif
-                _readBuffer = default;
-                _readWantsWrite = false;
-                _readAwaitable.TrySetException(new SslException($"SSL_read failed: {error}"));
                 return;
         }
     }
@@ -347,53 +265,38 @@ internal sealed class SslConnectionState : IDisposable
             throw new InvalidOperationException("Write already pending");
         }
 
-        var n = DoSslWrite(buffer);
-        if (n > 0)
+        SslOperationStatus status;
+        int n;
+        try
         {
-#if DIRECTSSL_DEBUG_COUNTERS
-            Interlocked.Increment(ref SslEventPump.TotalWriteImmediate);
-#endif
-            return new ValueTask<int>(n);
+            status = Ssl.Write(buffer.Span, out n);
+        }
+        catch (OpenSslException ex)
+        {
+            return ValueTask.FromException<int>(ex);
         }
 
-        var error = NativeSsl.SSL_get_error(Ssl, n);
-        switch (error)
+        switch (status)
         {
-            case NativeSsl.SSL_ERROR_WANT_WRITE:
-#if DIRECTSSL_DEBUG_COUNTERS
-                Interlocked.Increment(ref SslEventPump.TotalWriteWouldBlock);
-#endif
+            case SslOperationStatus.Complete:
+                return new ValueTask<int>(n);
+
+            case SslOperationStatus.WantWrite:
                 _writeBuffer = buffer;
                 _writeWantsRead = false;
-
-                // Dynamically add EPOLLOUT since the write would block
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT);
-
+                Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read | EpollEvents.Write);
                 return _writeAwaitable.Reset();
 
-            case NativeSsl.SSL_ERROR_WANT_READ:
+            case SslOperationStatus.WantRead:
                 // SSL_write needs to read (TLS renegotiation or post-handshake auth)
-                // Stay registered for EPOLLIN - OnReadable will call TryCompleteWrite
                 _writeBuffer = buffer;
                 _writeWantsRead = true;
-                // EPOLLIN is already registered, no need to modify
+                // EPOLLIN already registered
                 return _writeAwaitable.Reset();
 
-            case NativeSsl.SSL_ERROR_ZERO_RETURN:
-                // Peer closed connection cleanly - return 0 (EOF)
-                return new ValueTask<int>(0);
-
-            case NativeSsl.SSL_ERROR_SYSCALL:
-                // Check ERR_peek_error() == 0 to detect clean EOF
-                if (NativeSsl.ERR_peek_error() == 0)
-                {
-                    return new ValueTask<int>(0);  // Treat as EOF
-                }
-
-                return ValueTask.FromException<int>(new IOException($"SSL write syscall error"));
-
+            case SslOperationStatus.Closed:
             default:
-                return ValueTask.FromException<int>(new SslException($"SSL_write failed: {error}"));
+                return new ValueTask<int>(0);
         }
     }
 
@@ -402,61 +305,64 @@ internal sealed class SslConnectionState : IDisposable
         if (!_writeAwaitable.IsActive)
         {
             // Spurious EPOLLOUT - remove it to avoid future wakeups
-            Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
+            Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
             return;
         }
 
-        var n = DoSslWrite(_writeBuffer);
-        if (n > 0)
+        SslOperationStatus status;
+        int n;
+        try
         {
-            var wasWaitingForRead = _writeWantsRead;
+            status = Ssl.Write(_writeBuffer.Span, out n);
+        }
+        catch (OpenSslException ex)
+        {
             _writeBuffer = default;
             _writeWantsRead = false;
-
-            // Write completed - remove EPOLLOUT if we had it registered
-            if (!wasWaitingForRead)
-            {
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
-            }
-
-            _writeAwaitable.TrySetResult(n);
+            Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
+            _writeAwaitable.TrySetException(ex);
             return;
         }
 
-        var error = NativeSsl.SSL_get_error(Ssl, n);
-        switch (error)
+        switch (status)
         {
-            case NativeSsl.SSL_ERROR_WANT_WRITE:
-                // Need to wait for write - if we were waiting for read, switch to write
+            case SslOperationStatus.Complete:
+                {
+                    var wasWaitingForRead = _writeWantsRead;
+                    _writeBuffer = default;
+                    _writeWantsRead = false;
+
+                    if (!wasWaitingForRead)
+                    {
+                        Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
+                    }
+
+                    _writeAwaitable.TrySetResult(n);
+                    return;
+                }
+
+            case SslOperationStatus.WantWrite:
                 if (_writeWantsRead)
                 {
                     _writeWantsRead = false;
-                    Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT);
+                    Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read | EpollEvents.Write);
                 }
                 return;
 
-            case NativeSsl.SSL_ERROR_WANT_READ:
-                // Need to read - remove EPOLLOUT if we had it, stay on EPOLLIN
+            case SslOperationStatus.WantRead:
                 if (!_writeWantsRead)
                 {
                     _writeWantsRead = true;
-                    Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
+                    Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
                 }
                 return;
 
-            case NativeSsl.SSL_ERROR_ZERO_RETURN:
-                // Peer closed - return 0
-                _writeBuffer = default;
-                _writeWantsRead = false;
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
-                _writeAwaitable.TrySetResult(0);
-                return;
-
+            case SslOperationStatus.Closed:
             default:
                 _writeBuffer = default;
                 _writeWantsRead = false;
-                Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN);
-                _writeAwaitable.TrySetException(new SslException($"SSL_write failed: {error}"));
+                Pump?.ModifyEvents(Socket, Fd, EpollEvents.Read);
+                _writeAwaitable.TrySetResult(0);
                 return;
         }
     }
@@ -513,7 +419,6 @@ internal sealed class SslConnectionState : IDisposable
         _readAwaitable.TrySetException(ex);
         _writeAwaitable.TrySetException(ex);
 
-        // Notify owner about fatal error so it can trigger disposal
         OnFatalError?.Invoke(ex);
     }
 
@@ -529,56 +434,18 @@ internal sealed class SslConnectionState : IDisposable
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // SSL OPERATIONS
+    // DISPOSE
     // ═══════════════════════════════════════════════════════════════
-
-    private int DoSslRead(Memory<byte> buffer)
-    {
-        // Clear any stale errors before SSL operation
-        NativeSsl.ERR_clear_error();
-        unsafe
-        {
-            fixed (byte* ptr = buffer.Span)
-            {
-                int result = NativeSsl.SSL_read(Ssl, ptr, buffer.Length);
-                // Capture errno immediately after syscall, before any other calls
-                _lastErrno = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                return result;
-            }
-        }
-    }
-
-    // Stored errno from the last SSL_read call
-    private int _lastErrno;
-
-    private int DoSslWrite(ReadOnlyMemory<byte> buffer)
-    {
-        // Clear any stale errors before SSL operation
-        NativeSsl.ERR_clear_error();
-        unsafe
-        {
-            fixed (byte* ptr = buffer.Span)
-            {
-                return NativeSsl.SSL_write(Ssl, (byte*)ptr, buffer.Length);
-            }
-        }
-    }
-
+    //
+    // BEFORE: ERR_clear_error + SSL_set_quiet_shutdown(1) + SSL_shutdown +
+    //         SSL_free + manual close(fd), all open-coded with try/catch wrappers.
+    // AFTER:  Dispose the SafeOpenSslHandle (does quiet-shutdown + SSL_free +
+    //         DangerousRelease on the socket ref) and the SafeSocketHandle
+    //         (does close(fd)). Both are SafeHandles — exceptions during one
+    //         don't leak the other.
     public void Dispose()
     {
-        // Clear any stale errors before shutdown
-        NativeSsl.ERR_clear_error();
-
-        // Use quiet shutdown - don't wait for peer's close_notify
-        // This is appropriate because:
-        // 1. The peer may have already closed the connection (SSL_ERROR_SYSCALL with errno=0)
-        // 2. Waiting for close_notify can block or fail if connection is broken
-        // 3. Quiet shutdown is set when connection is timed out, errored, or buffered
-        NativeSsl.SSL_set_quiet_shutdown(Ssl, 1);
-
-        // Single SSL_shutdown call - with quiet shutdown, this just cleans up locally
-        NativeSsl.SSL_shutdown(Ssl);
-
-        NativeSsl.SSL_free(Ssl);
+        Ssl.SetQuietShutdown(true);
+        Ssl.Dispose();
     }
 }

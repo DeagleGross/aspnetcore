@@ -3,9 +3,10 @@
 
 using System.Buffers;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Ssl;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Connection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -17,7 +18,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// </summary>
 internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IConnectionListenerFactorySelector
 {
-    private SslContext? _sslContext;
+    private SafeOpenSslContextHandle? _sslContext;
     private SslEventPumpPool? _pumpPool;
 
     private readonly DirectSslTransportOptions _options;
@@ -45,7 +46,7 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
     /// <inheritdoc />
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
-        // Initialize SSL context lazily from options
+        // Initialize SSL context lazily from options.
         if (_sslContext is null)
         {
             if (string.IsNullOrEmpty(_options.CertificatePath) || string.IsNullOrEmpty(_options.PrivateKeyPath))
@@ -53,7 +54,14 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
                 throw new InvalidOperationException("CertificatePath and PrivateKeyPath must be configured in DirectSslTransportOptions.");
             }
 
-            _sslContext = new SslContext(_options.CertificatePath, _options.PrivateKeyPath);
+            _sslContext = SafeOpenSslContextHandle.CreateServer();
+            _sslContext.UseCertificateFile(_options.CertificatePath, _options.PrivateKeyPath);
+            _sslContext.CheckPrivateKey();
+            _sslContext.SetProtocols(SslProtocols.Tls12 | SslProtocols.Tls13);
+            _sslContext.SetSessionCacheMode(SslSessionCacheMode.Server);
+            _sslContext.SetSessionCacheSize(20_000);
+            _sslContext.SetSessionTimeout(TimeSpan.FromHours(1));
+
             _logger.LogInformation("SSL context initialized with certificate: {CertPath}", _options.CertificatePath);
         }
 
