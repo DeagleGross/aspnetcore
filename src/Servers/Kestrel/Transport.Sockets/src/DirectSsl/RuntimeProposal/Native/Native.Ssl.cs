@@ -12,7 +12,7 @@ namespace System.Net.Security;
 // in `Common/src/Interop/Unix/System.Security.Cryptography.Native/Interop.Ssl.cs`
 // (the existing file used by SslStream — most of these P/Invokes are already there).
 //
-// The public SafeOpenSslContextHandle / SafeOpenSslHandle types in this folder
+// The public SafeSslContextHandle / SafeSslHandle types in this folder
 // call into Native.* the same way SslStream's internals call Interop.Ssl.*.
 //
 // The ONLY new P/Invoke this proposal needs internally is SSL_set_fd —

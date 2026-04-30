@@ -43,7 +43,7 @@ internal sealed class SslEventPumpPool : IDisposable
     /// </summary>
     public void StartWithListenSocket(
         SafeSocketHandle listenSocket,
-        SafeOpenSslContextHandle sslContext,
+        SafeSslContextHandle sslContext,
         ChannelWriter<DirectSslConnection> readyConnections,
         MemoryPool<byte> memoryPool,
         bool noDelay)

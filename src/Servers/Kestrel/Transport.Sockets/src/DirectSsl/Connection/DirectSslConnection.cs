@@ -305,7 +305,7 @@ internal sealed class DirectSslConnection : TransportConnection
         // 6. Graceful SSL and socket shutdown
         //    BEFORE: try-catch around _connectionState.Dispose(), then manual
         //            NativeSsl.shutdown(_fd, SHUT_RDWR) + NativeSsl.close(_fd).
-        //    AFTER:  _connectionState.Dispose() runs SafeOpenSslHandle.Dispose
+        //    AFTER:  _connectionState.Dispose() runs SafeSslHandle.Dispose
         //            (quiet shutdown + SSL_free + DangerousRelease on the
         //            socket ref), then SafeSocketHandle.Dispose runs close(fd).
         //            shutdown(SHUT_RDWR) is implicit in close() once we drop

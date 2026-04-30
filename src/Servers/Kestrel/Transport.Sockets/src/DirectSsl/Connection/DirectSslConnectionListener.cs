@@ -27,7 +27,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     private readonly MemoryPool<byte> _memoryPool;
 
-    private readonly SafeOpenSslContextHandle _sslContext;
+    private readonly SafeSslContextHandle _sslContext;
     private readonly SslEventPumpPool _pumpPool;
 
     private Socket? _listenSocket;
@@ -39,7 +39,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     public DirectSslConnectionListener(
         ILoggerFactory loggerFactory,
-        SafeOpenSslContextHandle sslContext,
+        SafeSslContextHandle sslContext,
         SslEventPumpPool pumpPool,
         EndPoint endpoint,
         DirectSslTransportOptions options,

@@ -10,13 +10,13 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace System.Net.Security;
 
-// PROTOTYPE — would live in dotnet/runtime as System.Net.Security.SafeOpenSslHandle
+// PROTOTYPE — would live in dotnet/runtime as System.Net.Security.SafeSslHandle
 //
 // Wraps OpenSSL SSL* bound to a socket fd via SSL_set_fd.
-// Created by SafeOpenSslHandle.CreateForSocket(ctx, socket, isServer).
+// Created by SafeSslHandle.CreateForSocket(ctx, socket, isServer).
 // Holds the SafeSocketHandle via DangerousAddRef so the fd cannot be invalidated under OpenSSL.
 
-internal sealed class SafeOpenSslHandle : SafeHandle
+internal sealed class SafeSslHandle : SafeHandle
 {
     public static bool IsSupported => OperatingSystem.IsLinux();
 
@@ -24,9 +24,9 @@ internal sealed class SafeOpenSslHandle : SafeHandle
     private bool _socketRefAdded;
     private int _lastErrno;
 
-    public SafeOpenSslHandle() : base(IntPtr.Zero, ownsHandle: true) { }
+    public SafeSslHandle() : base(IntPtr.Zero, ownsHandle: true) { }
 
-    public SafeOpenSslHandle(IntPtr handle, bool ownsHandle) : base(IntPtr.Zero, ownsHandle)
+    public SafeSslHandle(IntPtr handle, bool ownsHandle) : base(IntPtr.Zero, ownsHandle)
     {
         SetHandle(handle);
     }
@@ -61,8 +61,8 @@ internal sealed class SafeOpenSslHandle : SafeHandle
     }
 
     /// <summary>SSL_new(ctx) + SSL_set_fd(ssl, socket) + SSL_set_accept_state / SSL_set_connect_state.</summary>
-    public static SafeOpenSslHandle CreateForSocket(
-        SafeOpenSslContextHandle context,
+    public static SafeSslHandle CreateForSocket(
+        SafeSslContextHandle context,
         SafeSocketHandle socket,
         bool isServer)
     {
@@ -72,10 +72,10 @@ internal sealed class SafeOpenSslHandle : SafeHandle
         IntPtr ssl = Native.SSL_new(context.DangerousHandle);
         if (ssl == IntPtr.Zero)
         {
-            throw new OpenSslException("SSL_new failed", Native.GetErrorString());
+            throw new SslException("SSL_new failed", Native.GetErrorString());
         }
 
-        var safe = new SafeOpenSslHandle(ssl, ownsHandle: true);
+        var safe = new SafeSslHandle(ssl, ownsHandle: true);
 
         bool addedRef = false;
         try
@@ -84,7 +84,7 @@ internal sealed class SafeOpenSslHandle : SafeHandle
             int fd = (int)socket.DangerousGetHandle();
             if (Native.SSL_set_fd(ssl, fd) != 1)
             {
-                throw new OpenSslException("SSL_set_fd failed", Native.GetErrorString());
+                throw new SslException("SSL_set_fd failed", Native.GetErrorString());
             }
         }
         catch
@@ -135,7 +135,7 @@ internal sealed class SafeOpenSslHandle : SafeHandle
             case Native.SSL_ERROR_ZERO_RETURN:  return SslOperationStatus.Closed;
             case Native.SSL_ERROR_SYSCALL:      return SslOperationStatus.Closed;
             default:
-                throw new OpenSslException($"SSL_do_handshake failed (err={err})", Native.GetErrorString());
+                throw new SslException($"SSL_do_handshake failed (err={err})", Native.GetErrorString());
         }
     }
 
@@ -173,9 +173,9 @@ internal sealed class SafeOpenSslHandle : SafeHandle
                 {
                     return SslOperationStatus.WantRead;
                 }
-                throw new OpenSslException($"SSL_read syscall error (errno={_lastErrno})", Native.GetErrorString());
+                throw new SslException($"SSL_read syscall error (errno={_lastErrno})", Native.GetErrorString());
             default:
-                throw new OpenSslException($"SSL_read failed (err={err})", Native.GetErrorString());
+                throw new SslException($"SSL_read failed (err={err})", Native.GetErrorString());
         }
     }
 
@@ -208,9 +208,9 @@ internal sealed class SafeOpenSslHandle : SafeHandle
                 {
                     return SslOperationStatus.Closed;
                 }
-                throw new OpenSslException("SSL_write syscall error", Native.GetErrorString());
+                throw new SslException("SSL_write syscall error", Native.GetErrorString());
             default:
-                throw new OpenSslException($"SSL_write failed (err={err})", Native.GetErrorString());
+                throw new SslException($"SSL_write failed (err={err})", Native.GetErrorString());
         }
     }
 

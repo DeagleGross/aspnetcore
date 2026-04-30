@@ -18,7 +18,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// </summary>
 internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IConnectionListenerFactorySelector
 {
-    private SafeOpenSslContextHandle? _sslContext;
+    private SafeSslContextHandle? _sslContext;
     private SslEventPumpPool? _pumpPool;
 
     private readonly DirectSslTransportOptions _options;
@@ -54,7 +54,7 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
                 throw new InvalidOperationException("CertificatePath and PrivateKeyPath must be configured in DirectSslTransportOptions.");
             }
 
-            _sslContext = SafeOpenSslContextHandle.CreateServer();
+            _sslContext = SafeSslContextHandle.CreateServer();
             _sslContext.UseCertificateFile(_options.CertificatePath, _options.PrivateKeyPath);
             _sslContext.CheckPrivateKey();
             _sslContext.SetProtocols(SslProtocols.Tls12 | SslProtocols.Tls13);

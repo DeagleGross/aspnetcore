@@ -48,7 +48,7 @@ internal sealed class SslEventPump : IDisposable
     // Listen socket (added with EPOLLEXCLUSIVE)
     private SafeSocketHandle? _listenSocket;
     private int _listenFd = -1;
-    private SafeOpenSslContextHandle? _sslCtx;
+    private SafeSslContextHandle? _sslCtx;
     private ChannelWriter<DirectSslConnection>? _readyConnections;
     private MemoryPool<byte>? _memoryPool;
     private bool _noDelay;
@@ -66,7 +66,7 @@ internal sealed class SslEventPump : IDisposable
     private struct HandshakingConnection
     {
         public int Fd;
-        public SafeOpenSslHandle Ssl;
+        public SafeSslHandle Ssl;
         public SafeSocketHandle Socket;
         public IPEndPoint? RemoteEndPoint;
     }
@@ -91,7 +91,7 @@ internal sealed class SslEventPump : IDisposable
     /// </summary>
     public void StartWithListenSocket(
         SafeSocketHandle listenSocket,
-        SafeOpenSslContextHandle sslCtx,
+        SafeSslContextHandle sslCtx,
         ChannelWriter<DirectSslConnection> readyConnections,
         MemoryPool<byte> memoryPool,
         ILoggerFactory loggerFactory,
@@ -261,15 +261,15 @@ internal sealed class SslEventPump : IDisposable
                 NativeSsl.SetTcpNoDelay(clientFd);
             }
 
-            // Wrap fd as SafeSocketHandle so SafeOpenSslHandle can hold a strong ref.
+            // Wrap fd as SafeSocketHandle so SafeSslHandle can hold a strong ref.
             var clientSocket = new SafeSocketHandle((IntPtr)clientFd, ownsHandle: true);
 
-            SafeOpenSslHandle ssl;
+            SafeSslHandle ssl;
             try
             {
-                ssl = SafeOpenSslHandle.CreateForSocket(_sslCtx!, clientSocket, isServer: true);
+                ssl = SafeSslHandle.CreateForSocket(_sslCtx!, clientSocket, isServer: true);
             }
-            catch (OpenSslException ex)
+            catch (SslException ex)
             {
                 _logger?.LogWarning(ex, "Failed to create SSL handle for fd={Fd}", clientFd);
                 clientSocket.Dispose();
@@ -315,7 +315,7 @@ internal sealed class SslEventPump : IDisposable
         {
             status = conn.Ssl.Handshake();
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             _logger?.LogDebug(ex, "Handshake failed for fd={Fd}", fd);
             CleanupHandshaking(fd, conn);

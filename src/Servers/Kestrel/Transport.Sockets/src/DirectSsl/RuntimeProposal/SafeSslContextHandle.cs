@@ -10,19 +10,19 @@ using System.Security.Cryptography.X509Certificates;
 
 namespace System.Net.Security;
 
-// PROTOTYPE — would live in dotnet/runtime as System.Net.Security.SafeOpenSslContextHandle
+// PROTOTYPE — would live in dotnet/runtime as System.Net.Security.SafeSslContextHandle
 //
 // Wraps OpenSSL SSL_CTX*. Created via SSL_CTX_new(TLS_server_method()),
 // released via SSL_CTX_free. Configuration (cert, protocols, ALPN, session
 // cache) is via instance methods.
 
-internal sealed class SafeOpenSslContextHandle : SafeHandle
+internal sealed class SafeSslContextHandle : SafeHandle
 {
     public static bool IsSupported => OperatingSystem.IsLinux();
 
-    public SafeOpenSslContextHandle() : base(IntPtr.Zero, ownsHandle: true) { }
+    public SafeSslContextHandle() : base(IntPtr.Zero, ownsHandle: true) { }
 
-    public SafeOpenSslContextHandle(IntPtr handle, bool ownsHandle) : base(IntPtr.Zero, ownsHandle)
+    public SafeSslContextHandle(IntPtr handle, bool ownsHandle) : base(IntPtr.Zero, ownsHandle)
     {
         SetHandle(handle);
     }
@@ -42,26 +42,26 @@ internal sealed class SafeOpenSslContextHandle : SafeHandle
     internal IntPtr DangerousHandle => handle;
 
     /// <summary>SSL_CTX_new(TLS_server_method())</summary>
-    public static SafeOpenSslContextHandle CreateServer()
+    public static SafeSslContextHandle CreateServer()
     {
         Native.Initialize();
         IntPtr method = Native.TLS_server_method();
         if (method == IntPtr.Zero)
         {
-            throw new OpenSslException("TLS_server_method failed", Native.GetErrorString());
+            throw new SslException("TLS_server_method failed", Native.GetErrorString());
         }
 
         IntPtr ctx = Native.SSL_CTX_new(method);
         if (ctx == IntPtr.Zero)
         {
-            throw new OpenSslException("SSL_CTX_new failed", Native.GetErrorString());
+            throw new SslException("SSL_CTX_new failed", Native.GetErrorString());
         }
 
-        return new SafeOpenSslContextHandle(ctx, ownsHandle: true);
+        return new SafeSslContextHandle(ctx, ownsHandle: true);
     }
 
     /// <summary>SSL_CTX_new(TLS_client_method())</summary>
-    public static SafeOpenSslContextHandle CreateClient()
+    public static SafeSslContextHandle CreateClient()
         => throw new NotImplementedException("PROTOTYPE: client not wired");
 
     /// <summary>SSL_CTX_use_certificate + SSL_CTX_use_PrivateKey from a managed cert.</summary>
@@ -87,13 +87,13 @@ internal sealed class SafeOpenSslContextHandle : SafeHandle
     {
         if (Native.SSL_CTX_use_certificate_file(handle, certPath, Native.SSL_FILETYPE_PEM) <= 0)
         {
-            throw new OpenSslException(
+            throw new SslException(
                 $"SSL_CTX_use_certificate_file failed for {certPath}",
                 Native.GetErrorString());
         }
         if (Native.SSL_CTX_use_PrivateKey_file(handle, keyPath, Native.SSL_FILETYPE_PEM) <= 0)
         {
-            throw new OpenSslException(
+            throw new SslException(
                 $"SSL_CTX_use_PrivateKey_file failed for {keyPath}",
                 Native.GetErrorString());
         }
@@ -104,7 +104,7 @@ internal sealed class SafeOpenSslContextHandle : SafeHandle
     {
         if (Native.SSL_CTX_check_private_key(handle) <= 0)
         {
-            throw new OpenSslException(
+            throw new SslException(
                 "SSL_CTX_check_private_key failed: private key does not match certificate",
                 Native.GetErrorString());
         }

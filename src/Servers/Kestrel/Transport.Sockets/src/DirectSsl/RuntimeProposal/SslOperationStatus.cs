@@ -9,10 +9,10 @@ namespace System.Net.Security;
 
 /// <summary>
 /// Status returned from non-blocking OpenSSL operations on
-/// <see cref="SafeOpenSslHandle"/>. Mirrors the OpenSSL <c>SSL_get_error()</c>
+/// <see cref="SafeSslHandle"/>. Mirrors the OpenSSL <c>SSL_get_error()</c>
 /// classification but only exposes the values the caller needs to drive the loop.
 /// Anything else (TLS protocol errors, certificate failures, system errors) is
-/// surfaced via <see cref="OpenSslException"/>.
+/// surfaced via <see cref="SslException"/>.
 /// </summary>
 internal enum SslOperationStatus
 {
@@ -36,7 +36,7 @@ internal enum SslOperationStatus
 
     /// <summary>
     /// Underlying socket is gone (RST, unexpected EOF before close_notify).
-    /// Caller should dispose the <see cref="SafeOpenSslHandle"/>.
+    /// Caller should dispose the <see cref="SafeSslHandle"/>.
     /// </summary>
     Closed = 3,
 }

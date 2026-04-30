@@ -11,17 +11,17 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Per-connection state machine driving SafeOpenSslHandle.
+// Per-connection state machine driving SafeSslHandle.
 //
 // Compared to the pre-runtime-API version, this file shrinks substantially:
 //   * No DoSslRead / DoSslWrite helpers — Ssl.Read / Ssl.Write live on the
-//     SafeOpenSslHandle now.
+//     SafeSslHandle now.
 //   * No SSL_get_error switch with 6 OpenSSL-ABI error codes per call site —
 //     we get a 4-value SslOperationStatus instead.
 //   * No errno capture, no SYSCALL/EAGAIN/ECONNRESET disambiguation, no
 //     ERR_clear_error / ERR_peek_error plumbing — the runtime does all of it.
 //   * No manual SSL_shutdown / SSL_free / close(fd) in Dispose — disposing
-//     the SafeOpenSslHandle does SSL_shutdown + SSL_free + DangerousRelease
+//     the SafeSslHandle does SSL_shutdown + SSL_free + DangerousRelease
 //     on the SafeSocketHandle; disposing the SafeSocketHandle does close(fd).
 // ─────────────────────────────────────────────────────────────────────────────
 internal sealed class SslConnectionState : IDisposable
@@ -29,7 +29,7 @@ internal sealed class SslConnectionState : IDisposable
     private readonly ILogger? _logger;
 
     public readonly int Fd;
-    public readonly SafeOpenSslHandle Ssl;
+    public readonly SafeSslHandle Ssl;
     public readonly SafeSocketHandle Socket;
 
     // Reference to pump for dynamic event modification
@@ -52,7 +52,7 @@ internal sealed class SslConnectionState : IDisposable
     private ReadOnlyMemory<byte> _writeBuffer;
     private bool _writeWantsRead;  // SSL_write returned WantRead (renegotiation)
 
-    public SslConnectionState(int fd, SafeOpenSslHandle ssl, SafeSocketHandle socket, ILogger? logger = null)
+    public SslConnectionState(int fd, SafeSslHandle ssl, SafeSocketHandle socket, ILogger? logger = null)
     {
         _logger = logger;
 
@@ -80,7 +80,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Handshake();
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             return ValueTask.FromException(ex);
         }
@@ -109,7 +109,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Handshake();
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             _handshakeAwaitable.TrySetException(ex);
             return;
@@ -156,7 +156,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Read(buffer.Span, out n);
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             return ValueTask.FromException<int>(ex);
         }
@@ -199,7 +199,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Read(_readBuffer.Span, out n);
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             _readBuffer = default;
             _readWantsWrite = false;
@@ -271,7 +271,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Write(buffer.Span, out n);
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             return ValueTask.FromException<int>(ex);
         }
@@ -315,7 +315,7 @@ internal sealed class SslConnectionState : IDisposable
         {
             status = Ssl.Write(_writeBuffer.Span, out n);
         }
-        catch (OpenSslException ex)
+        catch (SslException ex)
         {
             _writeBuffer = default;
             _writeWantsRead = false;
@@ -439,7 +439,7 @@ internal sealed class SslConnectionState : IDisposable
     //
     // BEFORE: ERR_clear_error + SSL_set_quiet_shutdown(1) + SSL_shutdown +
     //         SSL_free + manual close(fd), all open-coded with try/catch wrappers.
-    // AFTER:  Dispose the SafeOpenSslHandle (does quiet-shutdown + SSL_free +
+    // AFTER:  Dispose the SafeSslHandle (does quiet-shutdown + SSL_free +
     //         DangerousRelease on the socket ref) and the SafeSocketHandle
     //         (does close(fd)). Both are SafeHandles — exceptions during one
     //         don't leak the other.
