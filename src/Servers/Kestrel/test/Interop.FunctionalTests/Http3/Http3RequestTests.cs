@@ -764,11 +764,26 @@ public class Http3RequestTests : LoggedTest
         // Arrange
         var requestCount = 0;
 
-        var builder = CreateHostBuilder(context =>
-        {
-            Interlocked.Increment(ref requestCount);
-            return Task.CompletedTask;
-        });
+        var builder = CreateHostBuilder(
+            context =>
+            {
+                Interlocked.Increment(ref requestCount);
+                return Task.CompletedTask;
+            },
+            configureKestrel: o =>
+            {
+                // This test stresses the server with 1000 small requests (100 concurrent requests
+                // on each of 10 parallel connections). Under that load the server's default
+                // MinResponseDataRate (240 B/s, 5s grace) can trip and abort a connection with
+                // H3_INTERNAL_ERROR, which is not what this test is verifying. The data rate limit
+                // is not relevant to the behavior under test, so disable it here.
+                o.Limits.MinResponseDataRate = null;
+                o.Listen(IPAddress.Parse("127.0.0.1"), 0, listenOptions =>
+                {
+                    listenOptions.Protocols = HttpProtocols.Http3;
+                    listenOptions.UseHttps(TestResources.GetTestCertificate());
+                });
+            });
 
         using (var host = builder.Build())
         {
@@ -812,11 +827,11 @@ public class Http3RequestTests : LoggedTest
 
         static async Task MakeRequest(HttpMessageInvoker client, string address, int count)
         {
-            var request = new HttpRequestMessage(HttpMethod.Get, address);
+            using var request = new HttpRequestMessage(HttpMethod.Get, address);
             request.Version = HttpVersion.Version30;
             request.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
 
-            var response = await client.SendAsync(request, CancellationToken.None);
+            using var response = await client.SendAsync(request, CancellationToken.None);
             response.EnsureSuccessStatusCode();
         }
     }
