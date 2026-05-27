@@ -29,19 +29,8 @@ description: >
   .NET version-status claims, stray Notes section, unrelated duplicate
   citations) and posts the cleaned comment. Has no label permissions.
 
-# Per-issue concurrency so multiple orchestrator runs (each for a
-# different issue) can fan out into multiple worker runs in parallel.
-# gh-aw's default group is workflow-wide, which serializes every worker
-# invocation. We key off the issue_number input instead, so each issue
-# gets its own slot. Same-issue invocations still serialize, which is
-# the desirable race-prevention behavior we want to keep.
-#
-# NOTE: do NOT use `${{ github.workflow }}` here. In a workflow_call
-# (reusable workflow) context that variable resolves to the CALLER's
-# workflow name, not the worker's. If we used it, the worker's group
-# key would collide with the orchestrator's group key for the same
-# issue, and GitHub Actions would detect a deadlock between parent
-# and child sharing the same slot and cancel the run.
+# Per-issue concurrency. Forward-compatible with the gh-aw fix tracked
+# in https://github.com/github/gh-aw/issues/35161.
 concurrency:
   group: gh-aw-triage-comment-reviewer-${{ inputs.issue_number || github.run_id }}
   cancel-in-progress: false
@@ -181,11 +170,11 @@ strip the offending content during `REWRITE`. None of these alone is a
    issue body mentions them — they don't belong in a triage classification.
 
 3. **Label recommendations inside the comment body** — anything of the
-   form *"Recommend also labeling with `security`/`area-xyz`/…"*. The
-   `#### Labels Applied` section is a **report** of labels the orchestrator
-   already applied, not a suggestion list; if you see a sentence
-   recommending additional labels, strip it. The `#### Labels Applied`
-   section itself stays.
+   form *"Recommend also labeling with `security`/`area-xyz`/…"* or any
+   list of applied labels. Labels are visible in the issue's label
+   sidebar (the source of truth) and the orchestrator's prompt forbids
+   restating them in the comment body. If you see a label list or
+   suggestion, strip it.
 
 4. **.NET version-status claims** — words like *"preview"*, *"RC"*,
    *"stable"*, *"released"*, or *"unreleased"* applied to a .NET version.
@@ -195,23 +184,39 @@ strip the offending content during `REWRITE`. None of these alone is a
    issue is *"valid"*, *"actionable"*, *"worth fixing"*, or assigns blame
    to the reporter. Strip these sentences.
 
-6. **Stray `#### Notes` section** — the orchestrator's prompt explicitly
-   forbids a Notes section. If one appears anyway, **always strip the
-   entire `#### Notes` section, including its heading, regardless of
-   content**. Even if the Notes text looks benign (e.g. a polite
-   explanation of why the issue is out of scope), strip it. The
-   orchestrator was told not to add one, period; this is a
-   prompt-adherence guard. The rest of the comment (structured fields)
-   stays.
+6. **`#### Notes` section content violations** — the orchestrator IS now
+   allowed to include a `#### Notes` section, but its content is tightly
+   constrained. Inspect every bullet in the Notes section. Strip any
+   bullet that matches one of:
+   - **Rephrases the issue body.** Fetch the issue body in Step 1 and
+     compare. If a Notes bullet just restates a fact already in the
+     reporter's description, strip it. Notes is for additive content
+     only.
+   - **Speculative language** — *"may be related to,"* *"the error
+     suggests,"* *"likely caused by,"* *"appears to be,"* *"this
+     suggests"*. Notes must contain verifiable claims, not guesses.
+     Strip speculation bullets.
+   - **Editorial fluff** — *"reasonable request,"* *"well-documented
+     proposal,"* *"author correctly identifies."* Strip these.
+   - **Anything caught by Step 2b rules 1–5 above** (security framing,
+     third-party comparisons, label suggestions, version-status words,
+     validity editorializing) applies in Notes too — strip per the
+     relevant rule.
+
+   If after stripping bullets the Notes section is empty, **also strip
+   the `#### Notes` heading itself** (leave nothing — an empty section
+   is uglier than no section).
 
 7. **Unverifiable duplicate citations** — for each `#NNN` in the
    `#### Potential Duplicates` section, optionally call `get_issue` on the
    cited number and verify it's plausibly related. If a citation is
    clearly unrelated (different area, different problem) → remove that
-   bullet. If every citation is bad → remove the entire
-   `#### Potential Duplicates` section. Do **not** `FAIL` over duplicate
-   citations — just clean them up. Trust the orchestrator's other
-   regression / area / type findings; do not second-guess them.
+   bullet. If every citation is bad → replace the entire bullet list
+   with a single `- _None found_` bullet (keep the section heading
+   itself; the orchestrator's template always includes this section).
+   Do **not** `FAIL` over duplicate citations — just clean them up.
+   Trust the orchestrator's other regression / area / type findings;
+   do not second-guess them.
 
 ## Step 3: Decision Gate
 
@@ -230,9 +235,9 @@ itself into the posted comment:
 
 - **`REWRITE: <one sentence summary of what you changed and why>`** —
   one or more Step 2b matches exist AND you are confident the strip
-  cleanly resolves them AND the structured fields (Area / Type /
-  Labels Applied) remain coherent after stripping. Apply the strips
-  and post the cleaned comment.
+  cleanly resolves them AND the structured fields (Area / Type) remain
+  coherent after stripping. Apply the strips and post the cleaned
+  comment.
 
 - **`PASS`** — no Step 2b matches; post the comment unchanged.
 
