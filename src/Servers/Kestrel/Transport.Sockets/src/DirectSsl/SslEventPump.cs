@@ -6,6 +6,7 @@
 
 using System.Buffers;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
@@ -40,7 +41,7 @@ internal sealed partial class SslEventPump : IDisposable
 
     // Listen socket (added with EPOLLEXCLUSIVE)
     private int _listenFd = -1;
-    private IntPtr _sslCtx = IntPtr.Zero;
+    private TlsContext? _tlsContext;
     private ChannelWriter<DirectSslConnection>? _readyConnections;
     private MemoryPool<byte>? _memoryPool;
     private ILoggerFactory? _loggerFactory;
@@ -94,7 +95,7 @@ internal sealed partial class SslEventPump : IDisposable
     private struct HandshakingConnection
     {
         public int Fd;
-        public IntPtr Ssl;
+        public TlsSession Session;
         public System.Net.IPEndPoint? RemoteEndPoint;  // Captured from accept4 to avoid getpeername syscall
     }
 
@@ -122,14 +123,14 @@ internal sealed partial class SslEventPump : IDisposable
     /// </summary>
     public void StartWithListenSocket(
         int listenFd,
-        IntPtr sslCtx,
+        TlsContext tlsContext,
         ChannelWriter<DirectSslConnection> readyConnections,
         MemoryPool<byte> memoryPool,
         ILoggerFactory loggerFactory,
         bool noDelay)
     {
         _listenFd = listenFd;
-        _sslCtx = sslCtx;
+        _tlsContext = tlsContext;
         _readyConnections = readyConnections;
         _memoryPool = memoryPool;
         _loggerFactory = loggerFactory;
@@ -361,11 +362,8 @@ internal sealed partial class SslEventPump : IDisposable
         foreach (var kvp in _handshaking)
         {
             var conn = kvp.Value;
-            if (conn.Ssl != IntPtr.Zero)
-            {
-                NativeSsl.SSL_free(conn.Ssl);
-            }
-            NativeSsl.close(conn.Fd);
+            // TlsSession owns the SafeSocketHandle (created in AcceptConnections), so Dispose() closes the fd.
+            conn.Session.Dispose();
         }
         _handshaking.Clear();
     }
@@ -404,19 +402,34 @@ internal sealed partial class SslEventPump : IDisposable
                 NativeSsl.SetTcpNoDelay(clientFd);
             }
 
-            // Create SSL and bind to socket
-            IntPtr ssl = NativeSsl.SSL_new(_sslCtx);
-            if (ssl == IntPtr.Zero)
+            // Create the TlsSession bound to this socket fd. The SafeSocketHandle takes
+            // ownership of clientFd — TlsSession.Dispose() will close it. We MUST pass
+            // ownsHandle: true so Dispose actually frees the kernel fd (no double-close
+            // since we no longer call NativeSsl.close ourselves).
+            TlsSession session;
+            try
+            {
+                var safeSocket = new SafeSocketHandle((IntPtr)clientFd, ownsHandle: true);
+                session = TlsSession.Create(_tlsContext!, safeSocket);
+            }
+            catch (Exception ex)
             {
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
-                NativeSsl.close(clientFd);
+                _logger?.LogWarning(ex, "TlsSession.Create failed for fd={Fd}", clientFd);
+                // SafeSocketHandle constructor already took ownership; if Create failed before
+                // wrapping, fall back to manual close. Safest: try close once and swallow.
+                try
+                {
+                    NativeSsl.close(clientFd);
+                }
+                catch
+                {
+                    // ignored
+                }
                 continue;
             }
-
-            NativeSsl.SSL_set_fd(ssl, clientFd);
-            NativeSsl.SSL_set_accept_state(ssl);
 
             // Register client socket with epoll for handshake events
             var ev = new EpollEvent
@@ -433,8 +446,7 @@ internal sealed partial class SslEventPump : IDisposable
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
-                NativeSsl.SSL_free(ssl);
-                NativeSsl.close(clientFd);
+                session.Dispose(); // closes the fd via SafeSocketHandle
                 continue;
             }
 
@@ -442,7 +454,7 @@ internal sealed partial class SslEventPump : IDisposable
             _handshaking[clientFd] = new HandshakingConnection
             {
                 Fd = clientFd,
-                Ssl = ssl,
+                Session = session,
                 RemoteEndPoint = remoteEndPoint
             };
 
@@ -458,86 +470,100 @@ internal sealed partial class SslEventPump : IDisposable
         int fd,
         HandshakingConnection conn)
     {
-        NativeSsl.ERR_clear_error();
-        int n = NativeSsl.SSL_do_handshake(conn.Ssl);
-
-        if (n == 1)
+        TlsOperationStatus status;
+        try
         {
-            // Handshake complete! Create connection and enqueue to Kestrel
+            status = conn.Session.Handshake();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "Handshake threw for fd={Fd}", fd);
 #if DIRECTSSL_DEBUG_COUNTERS
-            Interlocked.Increment(ref _totalHandshakeComplete);
+            Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
             _handshaking.Remove(fd);
-
-            // Create SslConnectionState for the established connection
-            var connectionState = new SslConnectionState(fd, conn.Ssl, _sslConnectionStateLogger);
-            connectionState.SetHandshakeComplete();
-
-            // Register with our connections dictionary and epoll
-            connectionState.Pump = this;
-            _connections[fd] = connectionState;
-
-            // Update epoll to use standard connection events (already registered, just confirm)
-            var ev = new EpollEvent
-            {
-                Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLRDHUP,
-                Data = new EpollData { Fd = fd }
-            };
-            NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
-
-            // Create DirectSslConnection using fd directly (no Socket wrapper)
-            // This avoids ~5+ syscalls per connection (fstat, getsockopt, fcntl, etc.)
-            if (_readyConnections != null && _memoryPool != null)
-            {
-                var directConnection = new DirectSslConnection(
-                    fd,                           // Use fd directly - no Socket wrapper
-                    connectionState,
-                    this,
-                    _listenEndPoint,              // Cached - avoids getsockname syscall
-                    conn.RemoteEndPoint,          // Captured from accept4 - avoids getpeername syscall
-                    _memoryPool,
-                    _directSslConnectionLogger!);
-
-                directConnection.Start();
-
-                if (!_readyConnections.TryWrite(directConnection))
-                {
-                    // Channel closed (shutting down) - dispose connection
-                    directConnection.DisposeAsync().AsTask().GetAwaiter().GetResult();
-                }
-            }
+            NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
+            conn.Session.Dispose(); // closes fd via SafeSocketHandle
             return;
         }
 
-        int error = NativeSsl.SSL_get_error(conn.Ssl, n);
-
-        if (error == NativeSsl.SSL_ERROR_WANT_READ)
+        switch (status)
         {
-            // Already registered for EPOLLIN, just wait
-            return;
-        }
-
-        if (error == NativeSsl.SSL_ERROR_WANT_WRITE)
-        {
-            // Need to write - add EPOLLOUT
-            var ev = new EpollEvent
+            case TlsOperationStatus.Complete:
             {
-                Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT | NativeSsl.EPOLLRDHUP,
-                Data = new EpollData { Fd = fd }
-            };
-            NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
-            return;
-        }
-
-        // Handshake failed - cleanup
-        _logger?.LogDebug("Handshake failed for fd={Fd}: error={Error}", fd, error);
+                // Handshake complete! Create connection and enqueue to Kestrel
 #if DIRECTSSL_DEBUG_COUNTERS
-        Interlocked.Increment(ref _totalHandshakeFailed);
+                Interlocked.Increment(ref _totalHandshakeComplete);
 #endif
-        _handshaking.Remove(fd);
-        NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
-        NativeSsl.SSL_free(conn.Ssl);
-        NativeSsl.close(fd);
+                _handshaking.Remove(fd);
+
+                // Create SslConnectionState for the established connection
+                var connectionState = new SslConnectionState(fd, conn.Session, _sslConnectionStateLogger);
+                connectionState.SetHandshakeComplete();
+
+                // Register with our connections dictionary and epoll
+                connectionState.Pump = this;
+                _connections[fd] = connectionState;
+
+                // Update epoll to use standard connection events (already registered, just confirm)
+                var ev = new EpollEvent
+                {
+                    Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLRDHUP,
+                    Data = new EpollData { Fd = fd }
+                };
+                NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
+
+                // Create DirectSslConnection using fd directly (no Socket wrapper)
+                // This avoids ~5+ syscalls per connection (fstat, getsockopt, fcntl, etc.)
+                if (_readyConnections != null && _memoryPool != null)
+                {
+                    var directConnection = new DirectSslConnection(
+                        fd,                           // Use fd directly - no Socket wrapper
+                        connectionState,
+                        this,
+                        _listenEndPoint,              // Cached - avoids getsockname syscall
+                        conn.RemoteEndPoint,          // Captured from accept4 - avoids getpeername syscall
+                        _memoryPool,
+                        _directSslConnectionLogger!);
+
+                    directConnection.Start();
+
+                    if (!_readyConnections.TryWrite(directConnection))
+                    {
+                        // Channel closed (shutting down) - dispose connection
+                        directConnection.DisposeAsync().AsTask().GetAwaiter().GetResult();
+                    }
+                }
+                return;
+            }
+
+            case TlsOperationStatus.WantRead:
+                // Already registered for EPOLLIN, just wait
+                return;
+
+            case TlsOperationStatus.WantWrite:
+            {
+                // Need to write - add EPOLLOUT
+                var ev = new EpollEvent
+                {
+                    Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT | NativeSsl.EPOLLRDHUP,
+                    Data = new EpollData { Fd = fd }
+                };
+                NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
+                return;
+            }
+
+            default:
+                // Handshake failed - cleanup
+                _logger?.LogDebug("Handshake failed for fd={Fd}: status={Status}", fd, status);
+#if DIRECTSSL_DEBUG_COUNTERS
+                Interlocked.Increment(ref _totalHandshakeFailed);
+#endif
+                _handshaking.Remove(fd);
+                NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
+                conn.Session.Dispose(); // closes fd via SafeSocketHandle
+                return;
+        }
     }
 
     public void Dispose()

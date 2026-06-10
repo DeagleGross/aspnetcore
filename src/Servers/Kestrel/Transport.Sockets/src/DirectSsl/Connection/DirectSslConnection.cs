@@ -302,23 +302,19 @@ internal sealed class DirectSslConnection : TransportConnection
         Transport.Input.Complete();
         Transport.Output.Complete();
 
-        // 6. Graceful SSL and socket shutdown (matching Kestrel's SocketConnection pattern)
+        // 6. Graceful SSL and socket shutdown.
+        // TlsSession (owned by the connection state) holds the SafeSocketHandle and will
+        // issue SSL_shutdown + SSL_free + close(fd) inside its own Dispose(). We must NOT
+        // touch _fd ourselves after this point — that would be a double-close on a fd
+        // number that may have been recycled by the kernel.
         try
         {
-            // SSL shutdown sends close_notify alert
             _connectionState.Dispose();
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "SSL shutdown failed for fd={Fd}", _connectionState.Fd);
         }
-
-        // Shutdown both directions using P/Invoke (avoids Socket wrapper overhead)
-        // Ignore return value - socket may already be closed by peer
-        NativeSsl.shutdown(_fd, NativeSsl.SHUT_RDWR);
-
-        // Close the fd using P/Invoke
-        NativeSsl.close(_fd);
 
         // 7. Signal connection closed
         _connectionClosedTokenSource.Cancel();

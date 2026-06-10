@@ -6,62 +6,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Interop;
 
 internal static partial class NativeSsl
 {
-    private const string LIBSSL = "libssl.so.3";
     private const string LIBC = "libc.so.6";
-
-    // SSL
-    [LibraryImport(LIBSSL)] public static partial IntPtr SSL_CTX_new(IntPtr method);
-    [LibraryImport(LIBSSL)] public static partial IntPtr TLS_server_method();
-    [LibraryImport(LIBSSL, StringMarshalling = StringMarshalling.Utf8)] public static partial int SSL_CTX_use_certificate_file(IntPtr ctx, string file, int type);
-    [LibraryImport(LIBSSL, StringMarshalling = StringMarshalling.Utf8)] public static partial int SSL_CTX_use_PrivateKey_file(IntPtr ctx, string file, int type);
-    [LibraryImport(LIBSSL)] public static partial IntPtr SSL_new(IntPtr ctx);
-    [LibraryImport(LIBSSL)] public static partial int SSL_set_fd(IntPtr ssl, int fd);
-    [LibraryImport(LIBSSL)] public static partial void SSL_set_accept_state(IntPtr ssl);
-    [LibraryImport(LIBSSL)] public static partial int SSL_do_handshake(IntPtr ssl);
-    [LibraryImport(LIBSSL)] public static partial int SSL_get_error(IntPtr ssl, int ret);
-    [LibraryImport(LIBSSL, SetLastError = true)] public static unsafe partial int SSL_read(IntPtr ssl, byte* buf, int num);
-    [LibraryImport(LIBSSL, SetLastError = true)] public static unsafe partial int SSL_write(IntPtr ssl, byte* buf, int num);
-    [LibraryImport(LIBSSL)] public static partial int SSL_shutdown(IntPtr ssl);
-    [LibraryImport(LIBSSL)] public static partial void SSL_set_quiet_shutdown(IntPtr ssl, int mode);
-    [LibraryImport(LIBSSL)] public static partial void SSL_free(IntPtr ssl);
-    [LibraryImport(LIBSSL)] public static partial void SSL_CTX_free(IntPtr ctx);
-
-    // Error handling - libcrypto
-    private const string LIBCRYPTO = "libcrypto.so.3";
-    [LibraryImport(LIBCRYPTO)] public static partial void ERR_clear_error();
-    [LibraryImport(LIBCRYPTO)] public static partial ulong ERR_peek_error();
-    [LibraryImport(LIBCRYPTO)] public static partial ulong ERR_get_error();
-    [LibraryImport(LIBCRYPTO)] public static unsafe partial void ERR_error_string_n(ulong e, byte* buf, nuint len);
-
-    /// <summary>
-    /// Get the latest OpenSSL error as a string.
-    /// </summary>
-    public static unsafe string GetErrorString()
-    {
-        ulong err = ERR_get_error();
-        if (err == 0)
-        {
-            return "No error";
-        }
-
-        byte* buf = stackalloc byte[256];
-        ERR_error_string_n(err, buf, 256);
-        return Marshal.PtrToStringUTF8((IntPtr)buf) ?? "Unknown error";
-    }
-
-    // SSL error codes
-    public const int SSL_ERROR_NONE = 0;
-    public const int SSL_ERROR_SSL = 1;
-    public const int SSL_ERROR_WANT_READ = 2;
-    public const int SSL_ERROR_WANT_WRITE = 3;
-    public const int SSL_ERROR_WANT_X509_LOOKUP = 4;
-    public const int SSL_ERROR_SYSCALL = 5;
-    public const int SSL_ERROR_ZERO_RETURN = 6;
-    public const int SSL_ERROR_WANT_CONNECT = 7;
-    public const int SSL_ERROR_WANT_ACCEPT = 8;
-
-    // SSL file types
-    public const int SSL_FILETYPE_PEM = 1;
 
     // Epoll
     [LibraryImport(LIBC)] public static partial int epoll_create1(int flags);
@@ -148,9 +93,7 @@ internal static partial class NativeSsl
         {
             if (addr.ss_family == AF_INET)
             {
-                // IPv4
                 var addr4 = *(SockAddrIn*)&addr;
-                // Convert from network byte order to host byte order
                 ushort port = (ushort)System.Net.IPAddress.NetworkToHostOrder((short)addr4.sin_port);
                 var ipBytes = BitConverter.GetBytes(addr4.sin_addr);
                 var ipAddress = new System.Net.IPAddress(ipBytes);
@@ -158,7 +101,6 @@ internal static partial class NativeSsl
             }
             else if (addr.ss_family == AF_INET6)
             {
-                // IPv6
                 var addr6 = *(SockAddrIn6*)&addr;
                 ushort port = (ushort)System.Net.IPAddress.NetworkToHostOrder((short)addr6.sin6_port);
                 var ipBytes = new byte[16];
@@ -188,12 +130,10 @@ internal static partial class NativeSsl
         if (clientFd < 0)
         {
             int errno = Marshal.GetLastWin32Error();
-            // EAGAIN (11) or EWOULDBLOCK (same on Linux) - no pending connections
             if (errno == 11)
             {
                 return -1;
             }
-            // Other error
             return -2;
         }
         return clientFd;

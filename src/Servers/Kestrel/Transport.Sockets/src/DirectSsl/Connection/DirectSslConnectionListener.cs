@@ -4,12 +4,12 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Interop;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Ssl;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Connection;
@@ -27,7 +27,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     private readonly MemoryPool<byte> _memoryPool;
 
-    private readonly SslContext _sslContext;
+    private readonly TlsContext _tlsContext;
     private readonly SslEventPumpPool _pumpPool;
 
     private Socket? _listenSocket;
@@ -39,7 +39,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
 
     public DirectSslConnectionListener(
         ILoggerFactory loggerFactory,
-        SslContext sslContext,
+        TlsContext tlsContext,
         SslEventPumpPool pumpPool,
         EndPoint endpoint,
         DirectSslTransportOptions options,
@@ -51,7 +51,7 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
         _memoryPool = memoryPool;
 
         _pumpPool = pumpPool;
-        _sslContext = sslContext;
+        _tlsContext = tlsContext;
         EndPoint = endpoint;
 
         // Unbounded channel - handshakes complete asynchronously and we don't want to block them
@@ -118,9 +118,9 @@ internal sealed class DirectSslConnectionListener : IConnectionListener
         // Each pump will accept connections directly in its epoll loop
         int listenFd = (int)listenSocket.Handle;
         _pumpPool.StartWithListenSocket(
-            listenFd, 
-            _sslContext, 
-            _readyConnections.Writer, 
+            listenFd,
+            _tlsContext,
+            _readyConnections.Writer,
             _memoryPool,
             _options.NoDelay);
             

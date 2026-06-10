@@ -3,9 +3,10 @@
 
 using System.Buffers;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Connections;
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Ssl;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Connection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -17,7 +18,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// </summary>
 internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IConnectionListenerFactorySelector
 {
-    private SslContext? _sslContext;
+    private TlsContext? _tlsContext;
     private SslEventPumpPool? _pumpPool;
 
     private readonly DirectSslTransportOptions _options;
@@ -45,16 +46,29 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
     /// <inheritdoc />
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
-        // Initialize SSL context lazily from options
-        if (_sslContext is null)
+        // Initialize TLS context lazily from options
+        if (_tlsContext is null)
         {
             if (string.IsNullOrEmpty(_options.CertificatePath) || string.IsNullOrEmpty(_options.PrivateKeyPath))
             {
                 throw new InvalidOperationException("CertificatePath and PrivateKeyPath must be configured in DirectSslTransportOptions.");
             }
 
-            _sslContext = new SslContext(_options.CertificatePath, _options.PrivateKeyPath);
-            _logger.LogInformation("SSL context initialized with certificate: {CertPath}", _options.CertificatePath);
+            // Load PEM cert + key into a single X509Certificate2 (the private key is associated
+            // via the underlying OpenSSL EVP_PKEY on Linux, so it can be used by TlsContext).
+            var cert = X509Certificate2.CreateFromPemFile(_options.CertificatePath, _options.PrivateKeyPath);
+
+            var serverOptions = new SslServerAuthenticationOptions
+            {
+                ServerCertificate = cert,
+                AllowRenegotiation = false,
+                ClientCertificateRequired = false,
+                // Let TlsContext-owned SSL_CTX honor session resumption (the runtime PoC wires this through)
+                AllowTlsResume = true,
+            };
+
+            _tlsContext = TlsContext.Create(serverOptions);
+            _logger.LogInformation("TlsContext initialized with certificate: {CertPath}", _options.CertificatePath);
         }
 
         // Initialize SSL event pump pool lazily
@@ -68,7 +82,7 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
         var memoryPool = MemoryPool<byte>.Shared;
         var transport = new DirectSslConnectionListener(
             _loggerFactory,
-            _sslContext,
+            _tlsContext,
             _pumpPool,
             endpoint,
             _options,
