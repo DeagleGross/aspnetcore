@@ -1,0 +1,22 @@
+@page "/form"
+
+<h1>Form demo</h1>
+
+<form method="post" @formname="echo" @onsubmit="OnSubmit" data-enhance="false">
+    <AntiforgeryToken />
+    <input name="value" value="@Value" />
+    <button type="submit">submit</button>
+</form>
+
+<p>Last submitted: <span id="last">@Last</span></p>
+
+@code {
+    [SupplyParameterFromForm] public string? Value { get; set; }
+
+    string Last = "";
+
+    void OnSubmit()
+    {
+        Last = Value ?? "(null)";
+    }
+}
