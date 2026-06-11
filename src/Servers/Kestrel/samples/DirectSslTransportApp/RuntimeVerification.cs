@@ -1,6 +1,8 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+#nullable enable
+
 using System;
 using System.Globalization;
 using System.IO;
@@ -52,7 +54,7 @@ internal static class RuntimeVerification
 
     private static void AppendManagedAssemblyInfo(StringBuilder sb)
     {
-        sb.AppendLine($"{ManagedAssemblyName}:");
+        sb.AppendLine(CultureInfo.InvariantCulture, $"{ManagedAssemblyName}:");
 
         var asm = typeof(SslStream).Assembly;
         var location = asm.Location;
@@ -60,27 +62,27 @@ internal static class RuntimeVerification
         if (string.IsNullOrEmpty(location))
         {
             sb.AppendLine("  Location:           *** could not determine (single-file deploy or in-memory load) ***");
-            sb.AppendLine($"  Version:            {asm.GetName().Version}");
-            sb.AppendLine($"  MVID:               {{{asm.ManifestModule.ModuleVersionId}}}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Version:            {asm.GetName().Version}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  MVID:               {{{asm.ManifestModule.ModuleVersionId}}}");
             sb.AppendLine("  SHA256:             (skipped — no file path)");
             sb.AppendLine("  File size:          (skipped — no file path)");
         }
         else
         {
-            sb.AppendLine($"  Location:           {location}");
-            sb.AppendLine($"  Version:            {asm.GetName().Version}");
-            sb.AppendLine($"  MVID:               {{{asm.ManifestModule.ModuleVersionId}}}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Location:           {location}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Version:            {asm.GetName().Version}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  MVID:               {{{asm.ManifestModule.ModuleVersionId}}}");
 
             try
             {
                 var hash = ComputeSha256(location);
                 var size = new FileInfo(location).Length;
-                sb.AppendLine($"  SHA256:             {hash}");
-                sb.AppendLine($"  File size:          {size.ToString("N0", CultureInfo.InvariantCulture)} bytes");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"  SHA256:             {hash}");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"  File size:          {size.ToString("N0", CultureInfo.InvariantCulture)} bytes");
             }
             catch (Exception ex)
             {
-                sb.AppendLine($"  SHA256:             *** failed: {ex.GetType().Name}: {ex.Message} ***");
+                sb.AppendLine(CultureInfo.InvariantCulture, $"  SHA256:             *** failed: {ex.GetType().Name}: {ex.Message} ***");
                 sb.AppendLine("  File size:          (skipped)");
             }
         }
@@ -90,7 +92,7 @@ internal static class RuntimeVerification
         {
             var present = asm.GetType(fullName, throwOnError: false) is not null;
             var shortName = fullName.AsSpan(fullName.LastIndexOf('.') + 1).ToString();
-            sb.AppendLine($"  Has {shortName,-22} {present}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  Has {shortName,-22} {present}");
             if (!present)
             {
                 missingTypes.Add(shortName);
@@ -99,7 +101,7 @@ internal static class RuntimeVerification
 
         if (missingTypes.Count > 0)
         {
-            sb.AppendLine($"  *** WARNING: Patched API types not found: {string.Join(", ", missingTypes)}. Overlay may have failed. ***");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  *** WARNING: Patched API types not found: {string.Join(", ", missingTypes)}. Overlay may have failed. ***");
         }
     }
 
@@ -128,11 +130,11 @@ internal static class RuntimeVerification
         }
 
         var nativePath = Path.Combine(sharedFxDir, NativeShimName);
-        sb.AppendLine($"  Location:           {nativePath}");
+        sb.AppendLine(CultureInfo.InvariantCulture, $"  Location:           {nativePath}");
 
         if (!File.Exists(nativePath))
         {
-            sb.AppendLine($"  *** NOT FOUND at {nativePath} ***");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  *** NOT FOUND at {nativePath} ***");
             return;
         }
 
@@ -140,12 +142,12 @@ internal static class RuntimeVerification
         {
             var hash = ComputeSha256(nativePath);
             var size = new FileInfo(nativePath).Length;
-            sb.AppendLine($"  SHA256:             {hash}");
-            sb.AppendLine($"  File size:          {size.ToString("N0", CultureInfo.InvariantCulture)} bytes");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  SHA256:             {hash}");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  File size:          {size.ToString("N0", CultureInfo.InvariantCulture)} bytes");
         }
         catch (Exception ex)
         {
-            sb.AppendLine($"  SHA256:             *** failed: {ex.GetType().Name}: {ex.Message} ***");
+            sb.AppendLine(CultureInfo.InvariantCulture, $"  SHA256:             *** failed: {ex.GetType().Name}: {ex.Message} ***");
             sb.AppendLine("  File size:          (skipped)");
         }
     }
