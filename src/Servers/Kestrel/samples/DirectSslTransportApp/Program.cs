@@ -4,6 +4,7 @@
 #pragma warning disable ASPNETCORE_DIRECTSSL_001 // Experimental DirectSsl API
 
 using System.Security.Cryptography.X509Certificates;
+using DirectSslTransportApp;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.AspNetCore.Http;
@@ -11,6 +12,8 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+
+RuntimeVerification.Print();
 
 // Use environment variable to switch between DirectSsl and standard TLS
 // Set USE_STANDARD_TLS=1 to use standard Kestrel TLS (SslStream)
