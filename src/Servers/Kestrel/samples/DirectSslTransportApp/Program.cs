@@ -52,13 +52,18 @@ var hostBuilder = new HostBuilder()
     {
         if (!useStandardTls)
         {
-            Console.WriteLine("Using DirectSsl transport (OpenSSL)");
+            var engineEnv = Environment.GetEnvironmentVariable("DIRECTSSL_ENGINE");
+            var engine = string.Equals(engineEnv, "OpenSslDirect", StringComparison.OrdinalIgnoreCase)
+                ? Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.OpenSslDirect
+                : Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.TlsSession;
+            Console.WriteLine($"Using DirectSsl transport — engine = {engine} (DIRECTSSL_ENGINE={engineEnv ?? "<unset, default>"})");
 
             // Configure Kestrel to use the Direct Socket Transport
             webHost.UseKestrelDirectSslTransport();
 
             webHost.UseDirectSslSockets(options =>
             {
+                options.Engine = engine;
                 options.CertificatePath = "server-p256.crt";
                 options.PrivateKeyPath = "server-p256.key";
                 options.WorkerCount = 2; // 2 pump threads + 2 cores free for ThreadPool
