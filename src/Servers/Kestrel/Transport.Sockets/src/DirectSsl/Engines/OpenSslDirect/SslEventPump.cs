@@ -12,6 +12,10 @@ using System.Threading.Channels;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Connection;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop;
 using Microsoft.Extensions.Logging;
+// HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
+// resolve to our OpenSslDirect-namespaced version.
+using NativeSsl = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.NativeSsl;
+using EpollEvent = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.EpollEvent;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect;
 

@@ -1,10 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-// To activate counter collection in both engines, uncomment the following
-// line OR pass -p:DefineConstants=DIRECTSSL_DEBUG_COUNTERS to `dotnet build`.
-// #define DIRECTSSL_DEBUG_COUNTERS
-
+using System.Globalization;
 using System.Text;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
@@ -14,11 +11,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// per-engine counters (declared as <c>public static long Total*</c> fields on
 /// each engine's <c>SslEventPump</c>) so the two TLS engines can be benchmarked
 /// against each other without instrumentation drift. The counters themselves
-/// only update when <c>DIRECTSSL_DEBUG_COUNTERS</c> is defined at compile-time
-/// (the same gate the engines use internally).
+/// only exist when <c>DIRECTSSL_DEBUG_COUNTERS</c> is defined at compile-time
+/// in each engine's <c>SslEventPump.cs</c> / <c>SslConnectionState.cs</c>.
 /// </summary>
 internal static class DirectSslMetrics
 {
+    private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
     /// <summary>
     /// Returns a single text block with both engines' counters side-by-side
     /// (TlsSession on the left, OpenSslDirect on the right). Use from the
@@ -31,14 +30,14 @@ internal static class DirectSslMetrics
 
         StringBuilder sb = new();
         sb.AppendLine();
-        sb.AppendLine("================ DirectSsl engine comparison ================");
-        sb.AppendLine($"{"Counter",-32} {"TlsSession",18} {"OpenSslDirect",18}");
+        sb.AppendLine(Inv, $"================ DirectSsl engine comparison ================");
+        sb.AppendLine(Inv, $"{"Counter",-32} {"TlsSession",18} {"OpenSslDirect",18}");
         sb.AppendLine(new string('-', 72));
         foreach (var key in tls.Keys)
         {
             long a = tls[key];
             long b = ssl.TryGetValue(key, out var v) ? v : 0;
-            sb.AppendLine($"{key,-32} {a,18:N0} {b,18:N0}");
+            sb.AppendLine(Inv, $"{key,-32} {a,18:N0} {b,18:N0}");
         }
 #if !DIRECTSSL_DEBUG_COUNTERS
         sb.AppendLine();
@@ -49,10 +48,12 @@ internal static class DirectSslMetrics
     }
 
     /// <summary>
-    /// Snapshot of the HEAD (TlsSession-engine) <c>SslEventPump</c> static counters.
+    /// Snapshot of the HEAD (TlsSession-engine) <c>SslEventPump</c> static counters,
+    /// or an empty dictionary when <c>DIRECTSSL_DEBUG_COUNTERS</c> is not defined.
     /// </summary>
     public static IDictionary<string, long> ReadTlsSessionCounters()
     {
+#if DIRECTSSL_DEBUG_COUNTERS
         return new Dictionary<string, long>
         {
             ["TotalWriteEof"]                  = SslEventPump.TotalWriteEof,
@@ -74,13 +75,18 @@ internal static class DirectSslMetrics
             ["TotalWriteImmediate"]            = SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = SslEventPump.TotalRequestsCompleted,
         };
+#else
+        return EmptySnapshot();
+#endif
     }
 
     /// <summary>
-    /// Snapshot of the resurrected OpenSslDirect-engine <c>SslEventPump</c> static counters.
+    /// Snapshot of the resurrected OpenSslDirect-engine <c>SslEventPump</c> static counters,
+    /// or an empty dictionary when <c>DIRECTSSL_DEBUG_COUNTERS</c> is not defined.
     /// </summary>
     public static IDictionary<string, long> ReadOpenSslDirectCounters()
     {
+#if DIRECTSSL_DEBUG_COUNTERS
         return new Dictionary<string, long>
         {
             ["TotalWriteEof"]                  = Engines.OpenSslDirect.SslEventPump.TotalWriteEof,
@@ -102,5 +108,30 @@ internal static class DirectSslMetrics
             ["TotalWriteImmediate"]            = Engines.OpenSslDirect.SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = Engines.OpenSslDirect.SslEventPump.TotalRequestsCompleted,
         };
+#else
+        return EmptySnapshot();
+#endif
     }
+
+    private static IDictionary<string, long> EmptySnapshot() => new Dictionary<string, long>
+    {
+        ["TotalWriteEof"]                  = 0,
+        ["TotalReadEof"]                   = 0,
+        ["TotalWriteErrors"]               = 0,
+        ["TotalReadErrors"]                = 0,
+        ["TotalSslErrorSyscall"]           = 0,
+        ["TotalSslErrorSyscallImmediate"]  = 0,
+        ["TotalSslErrorSyscallAfterEpoll"] = 0,
+        ["TotalSslErrorSyscallRet0"]       = 0,
+        ["TotalSslErrorSyscallRetNeg1"]    = 0,
+        ["TotalSslErrorSyscallErrno0"]     = 0,
+        ["TotalSslErrorSyscallErrno11"]    = 0,
+        ["TotalSslErrorSyscallErrnoOther"] = 0,
+        ["TotalSslErrorZeroReturn"]        = 0,
+        ["TotalSslErrorSsl"]               = 0,
+        ["TotalSslErrorOther"]             = 0,
+        ["TotalWriteWouldBlock"]           = 0,
+        ["TotalWriteImmediate"]            = 0,
+        ["TotalRequestsCompleted"]         = 0,
+    };
 }

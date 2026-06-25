@@ -1,4 +1,7 @@
 #nullable enable
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.OpenSslDirect = 1 -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.TlsSession = 0 -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.Backlog.get -> int
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.Backlog.set -> void
@@ -7,12 +10,14 @@ Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTranspo
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.CreateBoundListenSocket.get -> System.Func<System.Net.EndPoint!, System.Net.Sockets.Socket!>!
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.CreateBoundListenSocket.set -> void
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.DirectSslTransportOptions() -> void
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.Engine.get -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.Engine.set -> void
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.NoDelay.get -> bool
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.NoDelay.set -> void
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.PrivateKeyPath.get -> string?
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.PrivateKeyPath.set -> void
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.WorkerCount.get -> int
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.WorkerCount.set -> void
-static Microsoft.AspNetCore.Hosting.WebHostBuilderSocketExtensions.UseDirectSslSockets(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder, System.Action<Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions!>! configureOptions) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.WebHostBuilderSocketExtensions.UseDirectSslSocketTransport(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+static Microsoft.AspNetCore.Hosting.WebHostBuilderSocketExtensions.UseDirectSslSockets(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder, System.Action<Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions!>! configureOptions) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions.CreateDefaultBoundListenSocket(System.Net.EndPoint! endpoint) -> System.Net.Sockets.Socket!

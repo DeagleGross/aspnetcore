@@ -5,6 +5,9 @@
 // #define DIRECTSSL_DEBUG_COUNTERS
 
 using Microsoft.Extensions.Logging;
+// HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
+// resolve to our OpenSslDirect-namespaced version.
+using NativeSsl = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.NativeSsl;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect;
 
