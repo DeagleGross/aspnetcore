@@ -47,6 +47,21 @@ public class DirectSslTransportOptions
     public int Backlog { get; set; } = 512;
 
     /// <summary>
+    /// Selects the TLS engine that drives OpenSSL. Comparison/benchmarking only:
+    /// both engines have identical I/O shape and are wired through the same
+    /// listener/factory; only the call site that issues <c>SSL_*</c> differs.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Defaults to <see cref="DirectSslEngineKind.TlsSession"/>. Can be overridden
+    /// at process start by setting the environment variable
+    /// <c>KESTREL_DIRECTSSL_ENGINE=tlssession</c> or <c>=opensslDirect</c> — the
+    /// factory resolves the env var when this property is left at its default.
+    /// </para>
+    /// </remarks>
+    public DirectSslEngineKind Engine { get; set; } = DirectSslEngineKind.TlsSession;
+
+    /// <summary>
     /// A function used to create a new <see cref="Socket"/> to listen with. If
     /// not set, <see cref="CreateDefaultBoundListenSocket" /> is used.
     /// </summary>
