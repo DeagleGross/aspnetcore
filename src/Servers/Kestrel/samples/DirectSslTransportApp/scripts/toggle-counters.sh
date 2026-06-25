@@ -13,6 +13,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../../../.." &>/dev/null 
 FILES=(
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/SslEventPump.cs"
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/SslConnectionState.cs"
+  "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/DirectSslMetrics.cs"
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/Engines/OpenSslDirect/SslEventPump.cs"
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/Engines/OpenSslDirect/SslConnectionState.cs"
 )
