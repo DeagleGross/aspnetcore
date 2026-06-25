@@ -9,7 +9,7 @@
 
 set -eu
 MODE="${1:-}"
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../../../" &>/dev/null && pwd)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../../../.." &>/dev/null && pwd)"
 FILES=(
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/SslEventPump.cs"
   "$ROOT/src/Servers/Kestrel/Transport.Sockets/src/DirectSsl/SslConnectionState.cs"
