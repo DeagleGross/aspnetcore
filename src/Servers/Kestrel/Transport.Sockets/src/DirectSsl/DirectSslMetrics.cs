@@ -14,7 +14,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 /// only exist when <c>DIRECTSSL_DEBUG_COUNTERS</c> is defined at compile-time
 /// in each engine's <c>SslEventPump.cs</c> / <c>SslConnectionState.cs</c>.
 /// </summary>
-internal static class DirectSslMetrics
+public static class DirectSslMetrics
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
@@ -39,12 +39,52 @@ internal static class DirectSslMetrics
             long b = ssl.TryGetValue(key, out var v) ? v : 0;
             sb.AppendLine(Inv, $"{key,-32} {a,18:N0} {b,18:N0}");
         }
+
+        // Derived metrics: handshake cost, sync %, calls/handshake. Same formulas for both engines.
+        AppendDerivedHandshakeStats(sb, tls, ssl);
+
 #if !DIRECTSSL_DEBUG_COUNTERS
         sb.AppendLine();
         sb.AppendLine("(All values will be zero unless DIRECTSSL_DEBUG_COUNTERS is defined at compile time.)");
 #endif
         sb.AppendLine("============================================================");
         return sb.ToString();
+    }
+
+    private static void AppendDerivedHandshakeStats(
+        StringBuilder sb,
+        IDictionary<string, long> tls,
+        IDictionary<string, long> ssl)
+    {
+        sb.AppendLine();
+        sb.AppendLine("-- Derived handshake stats --");
+        sb.AppendLine(Inv, $"{"Stat",-32} {"TlsSession",18} {"OpenSslDirect",18}");
+        sb.AppendLine(new string('-', 72));
+
+        long Get(IDictionary<string, long> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
+        long tlsCompleted = Get(tls, "TotalHandshakeStarted");
+        long sslCompleted = Get(ssl, "TotalHandshakeStarted");
+
+        // sync %
+        double tlsSyncPct = tlsCompleted == 0 ? 0 : (Get(tls, "TotalHandshakeSyncComplete") * 100.0 / tlsCompleted);
+        double sslSyncPct = sslCompleted == 0 ? 0 : (Get(ssl, "TotalHandshakeSyncComplete") * 100.0 / sslCompleted);
+        sb.AppendLine(Inv, $"{"sync-complete %",-32} {tlsSyncPct,17:F1}% {sslSyncPct,17:F1}%");
+
+        // avg call count per handshake
+        double tlsCalls = tlsCompleted == 0 ? 0 : ((double)Get(tls, "TotalHandshakeCallCount") / tlsCompleted);
+        double sslCalls = sslCompleted == 0 ? 0 : ((double)Get(ssl, "TotalHandshakeCallCount") / sslCompleted);
+        sb.AppendLine(Inv, $"{"avg pump calls / handshake",-32} {tlsCalls,18:F2} {sslCalls,18:F2}");
+
+        // avg wall-clock µs per handshake (time from first SSL_do_handshake to Complete)
+        double freqUs = System.Diagnostics.Stopwatch.Frequency / 1_000_000.0; // ticks per microsecond
+        double tlsWall = tlsCompleted == 0 ? 0 : Get(tls, "TotalHandshakeWallTicks") / freqUs / tlsCompleted;
+        double sslWall = sslCompleted == 0 ? 0 : Get(ssl, "TotalHandshakeWallTicks") / freqUs / sslCompleted;
+        sb.AppendLine(Inv, $"{"avg wall µs / handshake",-32} {tlsWall,18:F1} {sslWall,18:F1}");
+
+        // avg "busy" µs IN handshake calls (excludes idle WANT_READ wait)
+        double tlsBusy = tlsCompleted == 0 ? 0 : Get(tls, "TotalHandshakeBusyTicks") / freqUs / tlsCompleted;
+        double sslBusy = sslCompleted == 0 ? 0 : Get(ssl, "TotalHandshakeBusyTicks") / freqUs / sslCompleted;
+        sb.AppendLine(Inv, $"{"avg busy µs / handshake",-32} {tlsBusy,18:F1} {sslBusy,18:F1}");
     }
 
     /// <summary>
@@ -74,6 +114,11 @@ internal static class DirectSslMetrics
             ["TotalWriteWouldBlock"]           = SslEventPump.TotalWriteWouldBlock,
             ["TotalWriteImmediate"]            = SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = SslEventPump.TotalRequestsCompleted,
+            ["TotalHandshakeStarted"]          = SslEventPump.TotalHandshakeStarted,
+            ["TotalHandshakeSyncComplete"]     = SslEventPump.TotalHandshakeSyncComplete,
+            ["TotalHandshakeCallCount"]        = SslEventPump.TotalHandshakeCallCount,
+            ["TotalHandshakeWallTicks"]        = SslEventPump.TotalHandshakeWallTicks,
+            ["TotalHandshakeBusyTicks"]        = SslEventPump.TotalHandshakeBusyTicks,
         };
 #else
         return EmptySnapshot();
@@ -107,6 +152,11 @@ internal static class DirectSslMetrics
             ["TotalWriteWouldBlock"]           = Engines.OpenSslDirect.SslEventPump.TotalWriteWouldBlock,
             ["TotalWriteImmediate"]            = Engines.OpenSslDirect.SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = Engines.OpenSslDirect.SslEventPump.TotalRequestsCompleted,
+            ["TotalHandshakeStarted"]          = Engines.OpenSslDirect.SslEventPump.TotalHandshakeStarted,
+            ["TotalHandshakeSyncComplete"]     = Engines.OpenSslDirect.SslEventPump.TotalHandshakeSyncComplete,
+            ["TotalHandshakeCallCount"]        = Engines.OpenSslDirect.SslEventPump.TotalHandshakeCallCount,
+            ["TotalHandshakeWallTicks"]        = Engines.OpenSslDirect.SslEventPump.TotalHandshakeWallTicks,
+            ["TotalHandshakeBusyTicks"]        = Engines.OpenSslDirect.SslEventPump.TotalHandshakeBusyTicks,
         };
 #else
         return EmptySnapshot();
@@ -133,5 +183,10 @@ internal static class DirectSslMetrics
         ["TotalWriteWouldBlock"]           = 0,
         ["TotalWriteImmediate"]            = 0,
         ["TotalRequestsCompleted"]         = 0,
+        ["TotalHandshakeStarted"]          = 0,
+        ["TotalHandshakeSyncComplete"]     = 0,
+        ["TotalHandshakeCallCount"]        = 0,
+        ["TotalHandshakeWallTicks"]        = 0,
+        ["TotalHandshakeBusyTicks"]        = 0,
     };
 }

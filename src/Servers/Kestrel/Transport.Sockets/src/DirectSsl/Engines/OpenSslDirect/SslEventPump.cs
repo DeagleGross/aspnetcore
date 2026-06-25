@@ -88,6 +88,15 @@ internal sealed partial class SslEventPump : IDisposable
     public static long TotalWriteWouldBlock;
     public static long TotalWriteImmediate;
     public static long TotalRequestsCompleted;  // Track completed request/response cycles
+
+    // Handshake-cost instrumentation (mirror of TlsSession-engine pump):
+    public static long TotalHandshakeStarted;
+    public static long TotalHandshakeSyncComplete;
+    public static long TotalHandshakeCallCount;
+    public static long TotalHandshakeWallTicks;
+    public static long TotalHandshakeBusyTicks;
+
+    private readonly Dictionary<int, (long StartTicks, int CallCount, long BusyTicks)> _handshakeState = new();
 #endif
 
     /// <summary>
@@ -462,14 +471,36 @@ internal sealed partial class SslEventPump : IDisposable
         int fd,
         HandshakingConnection conn)
     {
+#if DIRECTSSL_DEBUG_COUNTERS
+        long callStartTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (!_handshakeState.TryGetValue(fd, out var hs))
+        {
+            hs = (StartTicks: callStartTicks, CallCount: 0, BusyTicks: 0L);
+            Interlocked.Increment(ref TotalHandshakeStarted);
+        }
+        hs.CallCount++;
+#endif
         OSsl.ERR_clear_error();
         int n = OSsl.SSL_do_handshake(conn.Ssl);
+#if DIRECTSSL_DEBUG_COUNTERS
+        hs.BusyTicks += System.Diagnostics.Stopwatch.GetTimestamp() - callStartTicks;
+        _handshakeState[fd] = hs;
+#endif
 
         if (n == 1)
         {
             // Handshake complete! Create connection and enqueue to Kestrel
 #if DIRECTSSL_DEBUG_COUNTERS
             Interlocked.Increment(ref _totalHandshakeComplete);
+            long wallTicks = System.Diagnostics.Stopwatch.GetTimestamp() - hs.StartTicks;
+            Interlocked.Add(ref TotalHandshakeWallTicks, wallTicks);
+            Interlocked.Add(ref TotalHandshakeBusyTicks, hs.BusyTicks);
+            Interlocked.Add(ref TotalHandshakeCallCount, hs.CallCount);
+            if (hs.CallCount == 1)
+            {
+                Interlocked.Increment(ref TotalHandshakeSyncComplete);
+            }
+            _handshakeState.Remove(fd);
 #endif
             _handshaking.Remove(fd);
 
@@ -537,6 +568,7 @@ internal sealed partial class SslEventPump : IDisposable
         _logger?.LogDebug("Handshake failed for fd={Fd}: error={Error}", fd, error);
 #if DIRECTSSL_DEBUG_COUNTERS
         Interlocked.Increment(ref _totalHandshakeFailed);
+        _handshakeState.Remove(fd);
 #endif
         _handshaking.Remove(fd);
         OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);

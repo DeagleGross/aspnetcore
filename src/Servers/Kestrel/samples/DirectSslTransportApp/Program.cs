@@ -105,3 +105,7 @@ var hostBuilder = new HostBuilder()
     });
 
 await hostBuilder.Build().RunAsync();
+
+// Print DirectSsl engine metrics on shutdown (Ctrl+C).
+// Values are populated only when DIRECTSSL_DEBUG_COUNTERS is defined.
+Console.WriteLine(Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslMetrics.DumpComparison());
