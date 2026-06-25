@@ -14,7 +14,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Op
 using Microsoft.Extensions.Logging;
 // HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
 // resolve to our OpenSslDirect-namespaced version.
-using NativeSsl = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.NativeSsl;
+using OSsl = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.NativeSsl;
 using EpollEvent = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Interop.EpollEvent;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect;
@@ -107,7 +107,7 @@ internal sealed partial class SslEventPump : IDisposable
         _id = id;
         _logger = sslPumpLogger;
 
-        _epollFd = NativeSsl.epoll_create1(0);
+        _epollFd = OSsl.epoll_create1(0);
         if (_epollFd < 0)
         {
             throw new InvalidOperationException($"epoll_create1 failed: {Marshal.GetLastWin32Error()}");
@@ -153,11 +153,11 @@ internal sealed partial class SslEventPump : IDisposable
         // Add listen socket with EPOLLEXCLUSIVE - only one worker wakes per connection
         var ev = new EpollEvent
         {
-            Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLEXCLUSIVE,
+            Events = OSsl.EPOLLIN | OSsl.EPOLLEXCLUSIVE,
             Data = new EpollData { Fd = listenFd }
         };
 
-        int result = NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_ADD, listenFd, ref ev);
+        int result = OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_ADD, listenFd, ref ev);
         if (result < 0)
         {
             int errno = Marshal.GetLastWin32Error();
@@ -192,11 +192,11 @@ internal sealed partial class SslEventPump : IDisposable
         // Using level-triggered mode (no EPOLLET) for stability
         var ev = new EpollEvent
         {
-            Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLRDHUP,
+            Events = OSsl.EPOLLIN | OSsl.EPOLLRDHUP,
             Data = new EpollData { Fd = conn.Fd }
         };
 
-        int result = NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_ADD, conn.Fd, ref ev);
+        int result = OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_ADD, conn.Fd, ref ev);
         if (result < 0)
         {
             int errno = Marshal.GetLastWin32Error();
@@ -217,7 +217,7 @@ internal sealed partial class SslEventPump : IDisposable
         Interlocked.Increment(ref _totalUnregistered);
 #endif
 
-        NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
+        OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
     }
 
     /// <summary>
@@ -229,11 +229,11 @@ internal sealed partial class SslEventPump : IDisposable
         // Using level-triggered mode (no EPOLLET) for stability
         var ev = new EpollEvent
         {
-            Events = events | NativeSsl.EPOLLRDHUP,
+            Events = events | OSsl.EPOLLRDHUP,
             Data = new EpollData { Fd = fd }
         };
 
-        int result = NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
+        int result = OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_MOD, fd, ref ev);
         if (result < 0)
         {
             int errno = Marshal.GetLastWin32Error();
@@ -255,7 +255,7 @@ internal sealed partial class SslEventPump : IDisposable
         {
             // Use shorter timeout when there are handshaking connections
             int timeout = _handshaking.Count > 0 ? 10 : 1000;
-            int numEvents = NativeSsl.epoll_wait(_epollFd, events, MaxEvents, timeout);
+            int numEvents = OSsl.epoll_wait(_epollFd, events, MaxEvents, timeout);
 
 #if DIRECTSSL_DEBUG_COUNTERS
             // Log stats every 5 seconds
@@ -311,32 +311,32 @@ internal sealed partial class SslEventPump : IDisposable
                     continue;
                 }
 
-                if ((mask & (NativeSsl.EPOLLERR | NativeSsl.EPOLLHUP)) != 0)
+                if ((mask & (OSsl.EPOLLERR | OSsl.EPOLLHUP)) != 0)
                 {
                     // When error events occur, add EPOLLIN|EPOLLOUT
                     // to handle the events in at least one active handler.
-                    mask |= NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT;
+                    mask |= OSsl.EPOLLIN | OSsl.EPOLLOUT;
 #if DIRECTSSL_DEBUG_COUNTERS
                     Interlocked.Increment(ref _totalErrors);
 #endif
                 }
 
                 // Process EPOLLIN first - even if EPOLLRDHUP is set, there may be data to read
-                if ((mask & NativeSsl.EPOLLIN) != 0)
+                if ((mask & OSsl.EPOLLIN) != 0)
                 {
                     conn.OnReadable();
                 }
 
-                if ((mask & NativeSsl.EPOLLOUT) != 0)
+                if ((mask & OSsl.EPOLLOUT) != 0)
                 {
                     conn.OnWritable();
                 }
 
                 // Handle EPOLLRDHUP - peer closed their write side
-                if ((mask & NativeSsl.EPOLLRDHUP) != 0)
+                if ((mask & OSsl.EPOLLRDHUP) != 0)
                 {
 #if DIRECTSSL_DEBUG_COUNTERS
-                    if ((mask & NativeSsl.EPOLLIN) != 0)
+                    if ((mask & OSsl.EPOLLIN) != 0)
                     {
                         Interlocked.Increment(ref _totalRdhupWithData);
                     }
@@ -345,7 +345,7 @@ internal sealed partial class SslEventPump : IDisposable
                         Interlocked.Increment(ref _totalRdhup);
                     }
 #endif
-                    if ((mask & NativeSsl.EPOLLIN) == 0)
+                    if ((mask & OSsl.EPOLLIN) == 0)
                     {
                         // No data to read, peer closed - signal error
                         if ((uint)fd < MaxFd)
@@ -367,9 +367,9 @@ internal sealed partial class SslEventPump : IDisposable
             var conn = kvp.Value;
             if (conn.Ssl != IntPtr.Zero)
             {
-                NativeSsl.SSL_free(conn.Ssl);
+                OSsl.SSL_free(conn.Ssl);
             }
-            NativeSsl.close(conn.Fd);
+            OSsl.close(conn.Fd);
         }
         _handshaking.Clear();
     }
@@ -384,7 +384,7 @@ internal sealed partial class SslEventPump : IDisposable
         while (true)
         {
             // Use accept4 with address capture to avoid separate getpeername syscall
-            var (clientFd, remoteEndPoint) = NativeSsl.AcceptNonBlockingWithPeerAddress(_listenFd);
+            var (clientFd, remoteEndPoint) = OSsl.AcceptNonBlockingWithPeerAddress(_listenFd);
 
             if (clientFd == -1)
             {
@@ -405,31 +405,31 @@ internal sealed partial class SslEventPump : IDisposable
             // Set TCP_NODELAY for low latency
             if (_noDelay)
             {
-                NativeSsl.SetTcpNoDelay(clientFd);
+                OSsl.SetTcpNoDelay(clientFd);
             }
 
             // Create SSL and bind to socket
-            IntPtr ssl = NativeSsl.SSL_new(_sslCtx);
+            IntPtr ssl = OSsl.SSL_new(_sslCtx);
             if (ssl == IntPtr.Zero)
             {
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
-                NativeSsl.close(clientFd);
+                OSsl.close(clientFd);
                 continue;
             }
 
-            NativeSsl.SSL_set_fd(ssl, clientFd);
-            NativeSsl.SSL_set_accept_state(ssl);
+            OSsl.SSL_set_fd(ssl, clientFd);
+            OSsl.SSL_set_accept_state(ssl);
 
             // Register client socket with epoll for handshake events
             var ev = new EpollEvent
             {
-                Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLRDHUP,
+                Events = OSsl.EPOLLIN | OSsl.EPOLLRDHUP,
                 Data = new EpollData { Fd = clientFd }
             };
 
-            int result = NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_ADD, clientFd, ref ev);
+            int result = OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_ADD, clientFd, ref ev);
             if (result < 0)
             {
                 int errno = Marshal.GetLastWin32Error();
@@ -437,8 +437,8 @@ internal sealed partial class SslEventPump : IDisposable
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
-                NativeSsl.SSL_free(ssl);
-                NativeSsl.close(clientFd);
+                OSsl.SSL_free(ssl);
+                OSsl.close(clientFd);
                 continue;
             }
 
@@ -462,8 +462,8 @@ internal sealed partial class SslEventPump : IDisposable
         int fd,
         HandshakingConnection conn)
     {
-        NativeSsl.ERR_clear_error();
-        int n = NativeSsl.SSL_do_handshake(conn.Ssl);
+        OSsl.ERR_clear_error();
+        int n = OSsl.SSL_do_handshake(conn.Ssl);
 
         if (n == 1)
         {
@@ -484,10 +484,10 @@ internal sealed partial class SslEventPump : IDisposable
             // Update epoll to use standard connection events (already registered, just confirm)
             var ev = new EpollEvent
             {
-                Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLRDHUP,
+                Events = OSsl.EPOLLIN | OSsl.EPOLLRDHUP,
                 Data = new EpollData { Fd = fd }
             };
-            NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
+            OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_MOD, fd, ref ev);
 
             // Create DirectSslConnection using fd directly (no Socket wrapper)
             // This avoids ~5+ syscalls per connection (fstat, getsockopt, fcntl, etc.)
@@ -513,23 +513,23 @@ internal sealed partial class SslEventPump : IDisposable
             return;
         }
 
-        int error = NativeSsl.SSL_get_error(conn.Ssl, n);
+        int error = OSsl.SSL_get_error(conn.Ssl, n);
 
-        if (error == NativeSsl.SSL_ERROR_WANT_READ)
+        if (error == OSsl.SSL_ERROR_WANT_READ)
         {
             // Already registered for EPOLLIN, just wait
             return;
         }
 
-        if (error == NativeSsl.SSL_ERROR_WANT_WRITE)
+        if (error == OSsl.SSL_ERROR_WANT_WRITE)
         {
             // Need to write - add EPOLLOUT
             var ev = new EpollEvent
             {
-                Events = NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT | NativeSsl.EPOLLRDHUP,
+                Events = OSsl.EPOLLIN | OSsl.EPOLLOUT | OSsl.EPOLLRDHUP,
                 Data = new EpollData { Fd = fd }
             };
-            NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_MOD, fd, ref ev);
+            OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_MOD, fd, ref ev);
             return;
         }
 
@@ -539,16 +539,16 @@ internal sealed partial class SslEventPump : IDisposable
         Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
         _handshaking.Remove(fd);
-        NativeSsl.epoll_ctl(_epollFd, NativeSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
-        NativeSsl.SSL_free(conn.Ssl);
-        NativeSsl.close(fd);
+        OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
+        OSsl.SSL_free(conn.Ssl);
+        OSsl.close(fd);
     }
 
     public void Dispose()
     {
         _running = false;
         _pumpThread.Join(2000);
-        NativeSsl.close(_epollFd);
+        OSsl.close(_epollFd);
     }
 
     /// <summary>
