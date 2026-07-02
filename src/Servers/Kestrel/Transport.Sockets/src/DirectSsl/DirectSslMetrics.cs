@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 // Uncomment the following line to enable debug counters for SSL diagnostics
-// #define DIRECTSSL_DEBUG_COUNTERS
+#define DIRECTSSL_DEBUG_COUNTERS
 
 using System.Globalization;
 using System.Text;
@@ -64,7 +64,7 @@ public static class DirectSslMetrics
         sb.AppendLine(Inv, $"{"Stat",-32} {"TlsSession",18} {"OpenSslDirect",18}");
         sb.AppendLine(new string('-', 72));
 
-        long Get(IDictionary<string, long> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
+        static long Get(IDictionary<string, long> d, string k) => d.TryGetValue(k, out var v) ? v : 0;
         long tlsCompleted = Get(tls, "TotalHandshakeStarted");
         long sslCompleted = Get(ssl, "TotalHandshakeStarted");
 
@@ -88,6 +88,47 @@ public static class DirectSslMetrics
         double tlsBusy = tlsCompleted == 0 ? 0 : Get(tls, "TotalHandshakeBusyTicks") / freqUs / tlsCompleted;
         double sslBusy = sslCompleted == 0 ? 0 : Get(ssl, "TotalHandshakeBusyTicks") / freqUs / sslCompleted;
         sb.AppendLine(Inv, $"{"avg busy µs / handshake",-32} {tlsBusy,18:F1} {sslBusy,18:F1}");
+
+        // --- Read/Write per-call stats ---
+        sb.AppendLine();
+        sb.AppendLine("-- Derived Read/Write per-call stats --");
+        sb.AppendLine(Inv, $"{"Stat",-32} {"TlsSession",18} {"OpenSslDirect",18}");
+        sb.AppendLine(new string('-', 72));
+        long tlsRd = Get(tls, "TotalReadCallCount"), sslRd = Get(ssl, "TotalReadCallCount");
+        long tlsRdC = Get(tls, "TotalReadComplete"), sslRdC = Get(ssl, "TotalReadComplete");
+        long tlsRdB = Get(tls, "TotalReadBytes"), sslRdB = Get(ssl, "TotalReadBytes");
+        double tlsRdBusy = tlsRd == 0 ? 0 : Get(tls, "TotalReadBusyTicks") / freqUs / tlsRd;
+        double sslRdBusy = sslRd == 0 ? 0 : Get(ssl, "TotalReadBusyTicks") / freqUs / sslRd;
+        sb.AppendLine(Inv, $"{"avg µs / Read call",-32} {tlsRdBusy,18:F2} {sslRdBusy,18:F2}");
+        double tlsRdMax = Get(tls, "MaxReadBusyTicks") / freqUs;
+        double sslRdMax = Get(ssl, "MaxReadBusyTicks") / freqUs;
+        sb.AppendLine(Inv, $"{"max µs / Read call",-32} {tlsRdMax,18:F1} {sslRdMax,18:F1}");
+        double tlsRdAvgB = tlsRdC == 0 ? 0 : (double)tlsRdB / tlsRdC;
+        double sslRdAvgB = sslRdC == 0 ? 0 : (double)sslRdB / sslRdC;
+        sb.AppendLine(Inv, $"{"avg bytes / completed Read",-32} {tlsRdAvgB,18:F1} {sslRdAvgB,18:F1}");
+
+        long tlsWr = Get(tls, "TotalWriteCallCount"), sslWr = Get(ssl, "TotalWriteCallCount");
+        long tlsWrB = Get(tls, "TotalWriteBytes"), sslWrB = Get(ssl, "TotalWriteBytes");
+        double tlsWrBusy = tlsWr == 0 ? 0 : Get(tls, "TotalWriteBusyTicks") / freqUs / tlsWr;
+        double sslWrBusy = sslWr == 0 ? 0 : Get(ssl, "TotalWriteBusyTicks") / freqUs / sslWr;
+        sb.AppendLine(Inv, $"{"avg µs / Write call",-32} {tlsWrBusy,18:F2} {sslWrBusy,18:F2}");
+        double tlsWrMax = Get(tls, "MaxWriteBusyTicks") / freqUs;
+        double sslWrMax = Get(ssl, "MaxWriteBusyTicks") / freqUs;
+        sb.AppendLine(Inv, $"{"max µs / Write call",-32} {tlsWrMax,18:F1} {sslWrMax,18:F1}");
+        double tlsWrAvgB = tlsWr == 0 ? 0 : (double)tlsWrB / tlsWr;
+        double sslWrAvgB = sslWr == 0 ? 0 : (double)sslWrB / sslWr;
+        sb.AppendLine(Inv, $"{"avg bytes / Write call",-32} {tlsWrAvgB,18:F1} {sslWrAvgB,18:F1}");
+        // ReadAsync body time and gap between reads (suspend->resume)
+        long tlsRE = Get(tls, "TotalReadAsyncEntries"), sslRE = Get(ssl, "TotalReadAsyncEntries");
+        double tlsBody = tlsRE == 0 ? 0 : Get(tls, "TotalReadAsyncBodyTicks") / freqUs / tlsRE;
+        double sslBody = sslRE == 0 ? 0 : Get(ssl, "TotalReadAsyncBodyTicks") / freqUs / sslRE;
+        sb.AppendLine(Inv, $"{"avg us / ReadAsync body",-32} {tlsBody,18:F2} {sslBody,18:F2}");
+        long tlsGC = Get(tls, "TotalReadAsyncGapCount"), sslGC = Get(ssl, "TotalReadAsyncGapCount");
+        double tlsGap = tlsGC == 0 ? 0 : Get(tls, "TotalReadAsyncGapTicks") / freqUs / tlsGC;
+        double sslGap = sslGC == 0 ? 0 : Get(ssl, "TotalReadAsyncGapTicks") / freqUs / sslGC;
+        sb.AppendLine(Inv, $"{"avg us gap between Reads",-32} {tlsGap,18:F2} {sslGap,18:F2}");
+        sb.AppendLine(Inv, $"{"ReadAsync entries",-32} {tlsRE,18:N0} {sslRE,18:N0}");
+
     }
 
     /// <summary>
@@ -117,6 +158,20 @@ public static class DirectSslMetrics
             ["TotalWriteWouldBlock"]           = SslEventPump.TotalWriteWouldBlock,
             ["TotalWriteImmediate"]            = SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = SslEventPump.TotalRequestsCompleted,
+                        ["TotalReadCallCount"]             = SslEventPump.TotalReadCallCount,
+            ["TotalReadBytes"]                 = SslEventPump.TotalReadBytes,
+            ["TotalReadBusyTicks"]             = SslEventPump.TotalReadBusyTicks,
+            ["MaxReadBusyTicks"]               = SslEventPump.MaxReadBusyTicks,
+            ["TotalReadComplete"]              = SslEventPump.TotalReadComplete,
+            ["TotalReadWantRead"]              = SslEventPump.TotalReadWantRead,
+            ["TotalWriteCallCount"]            = SslEventPump.TotalWriteCallCount,
+            ["TotalWriteBytes"]                = SslEventPump.TotalWriteBytes,
+            ["TotalWriteBusyTicks"]            = SslEventPump.TotalWriteBusyTicks,
+            ["TotalReadAsyncEntries"]          = SslEventPump.TotalReadAsyncEntries,
+            ["TotalReadAsyncBodyTicks"]        = SslEventPump.TotalReadAsyncBodyTicks,
+            ["TotalReadAsyncGapTicks"]         = SslEventPump.TotalReadAsyncGapTicks,
+            ["TotalReadAsyncGapCount"]         = SslEventPump.TotalReadAsyncGapCount,
+            ["MaxWriteBusyTicks"]              = SslEventPump.MaxWriteBusyTicks,
             ["TotalHandshakeStarted"]          = SslEventPump.TotalHandshakeStarted,
             ["TotalHandshakeSyncComplete"]     = SslEventPump.TotalHandshakeSyncComplete,
             ["TotalHandshakeCallCount"]        = SslEventPump.TotalHandshakeCallCount,
@@ -155,6 +210,20 @@ public static class DirectSslMetrics
             ["TotalWriteWouldBlock"]           = Engines.OpenSslDirect.SslEventPump.TotalWriteWouldBlock,
             ["TotalWriteImmediate"]            = Engines.OpenSslDirect.SslEventPump.TotalWriteImmediate,
             ["TotalRequestsCompleted"]         = Engines.OpenSslDirect.SslEventPump.TotalRequestsCompleted,
+                        ["TotalReadCallCount"]             = Engines.OpenSslDirect.SslEventPump.TotalReadCallCount,
+            ["TotalReadBytes"]                 = Engines.OpenSslDirect.SslEventPump.TotalReadBytes,
+            ["TotalReadBusyTicks"]             = Engines.OpenSslDirect.SslEventPump.TotalReadBusyTicks,
+            ["MaxReadBusyTicks"]               = Engines.OpenSslDirect.SslEventPump.MaxReadBusyTicks,
+            ["TotalReadComplete"]              = Engines.OpenSslDirect.SslEventPump.TotalReadComplete,
+            ["TotalReadWantRead"]              = Engines.OpenSslDirect.SslEventPump.TotalReadWantRead,
+            ["TotalWriteCallCount"]            = Engines.OpenSslDirect.SslEventPump.TotalWriteCallCount,
+            ["TotalWriteBytes"]                = Engines.OpenSslDirect.SslEventPump.TotalWriteBytes,
+            ["TotalWriteBusyTicks"]            = Engines.OpenSslDirect.SslEventPump.TotalWriteBusyTicks,
+            ["TotalReadAsyncEntries"]          = Engines.OpenSslDirect.SslEventPump.TotalReadAsyncEntries,
+            ["TotalReadAsyncBodyTicks"]        = Engines.OpenSslDirect.SslEventPump.TotalReadAsyncBodyTicks,
+            ["TotalReadAsyncGapTicks"]         = Engines.OpenSslDirect.SslEventPump.TotalReadAsyncGapTicks,
+            ["TotalReadAsyncGapCount"]         = Engines.OpenSslDirect.SslEventPump.TotalReadAsyncGapCount,
+            ["MaxWriteBusyTicks"]              = Engines.OpenSslDirect.SslEventPump.MaxWriteBusyTicks,
             ["TotalHandshakeStarted"]          = Engines.OpenSslDirect.SslEventPump.TotalHandshakeStarted,
             ["TotalHandshakeSyncComplete"]     = Engines.OpenSslDirect.SslEventPump.TotalHandshakeSyncComplete,
             ["TotalHandshakeCallCount"]        = Engines.OpenSslDirect.SslEventPump.TotalHandshakeCallCount,
@@ -166,30 +235,30 @@ public static class DirectSslMetrics
 #endif
     }
 
-    private static IDictionary<string, long> EmptySnapshot() => new Dictionary<string, long>
-    {
-        ["TotalWriteEof"]                  = 0,
-        ["TotalReadEof"]                   = 0,
-        ["TotalWriteErrors"]               = 0,
-        ["TotalReadErrors"]                = 0,
-        ["TotalSslErrorSyscall"]           = 0,
-        ["TotalSslErrorSyscallImmediate"]  = 0,
-        ["TotalSslErrorSyscallAfterEpoll"] = 0,
-        ["TotalSslErrorSyscallRet0"]       = 0,
-        ["TotalSslErrorSyscallRetNeg1"]    = 0,
-        ["TotalSslErrorSyscallErrno0"]     = 0,
-        ["TotalSslErrorSyscallErrno11"]    = 0,
-        ["TotalSslErrorSyscallErrnoOther"] = 0,
-        ["TotalSslErrorZeroReturn"]        = 0,
-        ["TotalSslErrorSsl"]               = 0,
-        ["TotalSslErrorOther"]             = 0,
-        ["TotalWriteWouldBlock"]           = 0,
-        ["TotalWriteImmediate"]            = 0,
-        ["TotalRequestsCompleted"]         = 0,
-        ["TotalHandshakeStarted"]          = 0,
-        ["TotalHandshakeSyncComplete"]     = 0,
-        ["TotalHandshakeCallCount"]        = 0,
-        ["TotalHandshakeWallTicks"]        = 0,
-        ["TotalHandshakeBusyTicks"]        = 0,
-    };
+    // private static IDictionary<string, long> EmptySnapshot() => new Dictionary<string, long>
+    // {
+    //     ["TotalWriteEof"]                  = 0,
+    //     ["TotalReadEof"]                   = 0,
+    //     ["TotalWriteErrors"]               = 0,
+    //     ["TotalReadErrors"]                = 0,
+    //     ["TotalSslErrorSyscall"]           = 0,
+    //     ["TotalSslErrorSyscallImmediate"]  = 0,
+    //     ["TotalSslErrorSyscallAfterEpoll"] = 0,
+    //     ["TotalSslErrorSyscallRet0"]       = 0,
+    //     ["TotalSslErrorSyscallRetNeg1"]    = 0,
+    //     ["TotalSslErrorSyscallErrno0"]     = 0,
+    //     ["TotalSslErrorSyscallErrno11"]    = 0,
+    //     ["TotalSslErrorSyscallErrnoOther"] = 0,
+    //     ["TotalSslErrorZeroReturn"]        = 0,
+    //     ["TotalSslErrorSsl"]               = 0,
+    //     ["TotalSslErrorOther"]             = 0,
+    //     ["TotalWriteWouldBlock"]           = 0,
+    //     ["TotalWriteImmediate"]            = 0,
+    //     ["TotalRequestsCompleted"]         = 0,
+    //     ["TotalHandshakeStarted"]          = 0,
+    //     ["TotalHandshakeSyncComplete"]     = 0,
+    //     ["TotalHandshakeCallCount"]        = 0,
+    //     ["TotalHandshakeWallTicks"]        = 0,
+    //     ["TotalHandshakeBusyTicks"]        = 0,
+    // };
 }

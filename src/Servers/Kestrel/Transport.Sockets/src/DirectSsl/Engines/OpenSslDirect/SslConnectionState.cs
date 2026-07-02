@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 // Uncomment the following line to enable debug counters for SSL diagnostics
-// #define DIRECTSSL_DEBUG_COUNTERS
+#define DIRECTSSL_DEBUG_COUNTERS
 
 using Microsoft.Extensions.Logging;
 // HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
@@ -30,6 +30,7 @@ internal sealed class SslConnectionState : IDisposable
 
     // Read - reusable awaitable to avoid TCS allocations
     private readonly SslAwaitable<int> _readAwaitable = new();
+    private long _lastReadExitTicks;
     private Memory<byte> _readBuffer;
     private bool _readWantsWrite;  // SSL_read returned WANT_WRITE (renegotiation)
 
@@ -112,6 +113,15 @@ internal sealed class SslConnectionState : IDisposable
 
     public ValueTask<int> ReadAsync(Memory<byte> buffer)
     {
+        long __rEntry = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (s_traceReads) { _readAsyncEntries++; }
+        System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadAsyncEntries);
+        if (_lastReadExitTicks != 0) {
+            long __gap = __rEntry - _lastReadExitTicks;
+            System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncGapTicks, __gap);
+            System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadAsyncGapCount);
+        }
+
         if (!IsHandshaked)
         {
             throw new InvalidOperationException("Handshake not complete");
@@ -122,16 +132,26 @@ internal sealed class SslConnectionState : IDisposable
             throw new InvalidOperationException("Read already pending");
         }
 
+        long _t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         int n = DoSslRead(buffer);
+        long _wallTicks = System.Diagnostics.Stopwatch.GetTimestamp() - _t0;
+        System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadCallCount);
+        System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBusyTicks, _wallTicks);
+        { long _maxOld; do { _maxOld = System.Threading.Interlocked.Read(ref SslEventPump.MaxReadBusyTicks); if (_maxOld >= _wallTicks) { break; } } while (System.Threading.Interlocked.CompareExchange(ref SslEventPump.MaxReadBusyTicks, _wallTicks, _maxOld) != _maxOld); }
+        if (n > 0) {
+            System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadComplete);
+            System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBytes, n);
+        }
 
         if (n > 0)
         {
-            return new ValueTask<int>(n);
+            if (s_traceReads) { _readImmediateHit++; RecordSuccessRead(); }
+            { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(n); }
         }
 
         if (n == 0)
         {
-            return new ValueTask<int>(0); // EOF
+            { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(0); } // EOF
         }
 
         int error = OSsl.SSL_get_error(Ssl, n);
@@ -139,9 +159,10 @@ internal sealed class SslConnectionState : IDisposable
         switch (error)
         {
             case OSsl.SSL_ERROR_WANT_READ:
+                System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadWantRead);
                 _readBuffer = buffer;
                 _readWantsWrite = false;
-                return _readAwaitable.Reset();
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return _readAwaitable.Reset(); }
 
             case OSsl.SSL_ERROR_WANT_WRITE:
                 // SSL_read needs to write (TLS renegotiation or post-handshake auth)
@@ -149,14 +170,14 @@ internal sealed class SslConnectionState : IDisposable
                 _readBuffer = buffer;
                 _readWantsWrite = true;
                 Pump?.ModifyEvents(Fd, OSsl.EPOLLIN | OSsl.EPOLLOUT);
-                return _readAwaitable.Reset();
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return _readAwaitable.Reset(); }
 
             case OSsl.SSL_ERROR_ZERO_RETURN:
                 // Peer sent close_notify - treat as EOF
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref SslEventPump.TotalSslErrorZeroReturn);
 #endif
-                return new ValueTask<int>(0);
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(0); }
 
             case OSsl.SSL_ERROR_SYSCALL:
 #if DIRECTSSL_DEBUG_COUNTERS
@@ -189,14 +210,14 @@ internal sealed class SslConnectionState : IDisposable
                 // Use _lastErrno which was captured immediately after SSL_read
                 if (n == 0 || _lastErrno == 0 || _lastErrno == 104 /* ECONNRESET */)
                 {
-                    return new ValueTask<int>(0);  // Treat as EOF
+                    { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(0); }  // Treat as EOF
                 }
                 if (_lastErrno == 11 /* EAGAIN */ || _lastErrno == 115 /* EINPROGRESS */)
                 {
                     // No data available - should wait for epoll
                     _readBuffer = buffer;
                     _readWantsWrite = false;
-                    return _readAwaitable.Reset();
+                    { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return _readAwaitable.Reset(); }
                 }
                 // There's an actual error
                 return ValueTask.FromException<int>(new SslException($"SSL_read syscall error: errno={_lastErrno}"));
@@ -216,11 +237,19 @@ internal sealed class SslConnectionState : IDisposable
             _logger?.LogDebug("TryCompleteRead called but no read is pending");
             return; // Race: cancelled or completed between check and call
         }
+        if (s_traceReads) { _tryCompleteReadEntries++; }
 
+        long _t0b = System.Diagnostics.Stopwatch.GetTimestamp();
         int n = DoSslRead(_readBuffer);
+        { long _wT = System.Diagnostics.Stopwatch.GetTimestamp() - _t0b;
+          System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadCallCount);
+          System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBusyTicks, _wT);
+          if (n > 0) { System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadComplete); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBytes, n); }
+        }
 
         if (n > 0)
         {
+            if (s_traceReads) { _readTryCompleteHit++; RecordSuccessRead(); }
             var wasWaitingForWrite = _readWantsWrite;
             _readBuffer = default;
             _readWantsWrite = false;
@@ -350,7 +379,14 @@ internal sealed class SslConnectionState : IDisposable
             throw new InvalidOperationException("Write already pending");
         }
 
+        long _w0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var n = DoSslWrite(buffer);
+        { long _wWall = System.Diagnostics.Stopwatch.GetTimestamp() - _w0;
+          System.Threading.Interlocked.Increment(ref SslEventPump.TotalWriteCallCount);
+          System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBusyTicks, _wWall);
+          long _maxOld; do { _maxOld = System.Threading.Interlocked.Read(ref SslEventPump.MaxWriteBusyTicks); if (_maxOld >= _wWall) { break; } } while (System.Threading.Interlocked.CompareExchange(ref SslEventPump.MaxWriteBusyTicks, _wWall, _maxOld) != _maxOld);
+          if (n > 0) { System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBytes, n); }
+        }
         if (n > 0)
         {
 #if DIRECTSSL_DEBUG_COUNTERS
@@ -409,7 +445,13 @@ internal sealed class SslConnectionState : IDisposable
             return;
         }
 
+        long _w0 = System.Diagnostics.Stopwatch.GetTimestamp();
         var n = DoSslWrite(_writeBuffer);
+        { long _wT = System.Diagnostics.Stopwatch.GetTimestamp() - _w0;
+          System.Threading.Interlocked.Increment(ref SslEventPump.TotalWriteCallCount);
+          System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBusyTicks, _wT);
+          if (n > 0) { System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBytes, n); }
+        }
         if (n > 0)
         {
             var wasWaitingForRead = _writeWantsRead;
@@ -470,6 +512,7 @@ internal sealed class SslConnectionState : IDisposable
 
     internal void OnReadable()
     {
+        if (s_traceReads) { _onReadableFires++; }
         if (_handshakeAwaitable.IsActive)
         {
             ContinueHandshake();
@@ -539,6 +582,16 @@ internal sealed class SslConnectionState : IDisposable
     {
         // Clear any stale errors before SSL operation
         OSsl.ERR_clear_error();
+        long startTicks = 0;
+        if (s_traceReads)
+        {
+            _readCalls++;
+            int tid = Environment.CurrentManagedThreadId;
+            if (System.Threading.Thread.CurrentThread.IsThreadPoolThread) { _readOnPool++; }
+            if (_lastReadThreadId != 0 && _lastReadThreadId != tid) { _readThreadSwitchCount++; }
+            _lastReadThreadId = tid;
+            startTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
         unsafe
         {
             fixed (byte* ptr = buffer.Span)
@@ -546,6 +599,14 @@ internal sealed class SslConnectionState : IDisposable
                 int result = OSsl.SSL_read(Ssl, ptr, buffer.Length);
                 // Capture errno immediately after syscall, before any other calls
                 _lastErrno = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                if (s_traceReads)
+                {
+                    long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+                    _readTotalTicks += elapsed;
+                    if (elapsed > _readMaxTicks) { _readMaxTicks = elapsed; }
+                    if (result > 0) { _readBytes += result; }
+                    else { _readNonPositiveCount++; }
+                }
                 return result;
             }
         }
@@ -558,13 +619,78 @@ internal sealed class SslConnectionState : IDisposable
     {
         // Clear any stale errors before SSL operation
         OSsl.ERR_clear_error();
+        if (s_traceReads)
+        {
+            _writeCalls++;
+            int tid = Environment.CurrentManagedThreadId;
+            if (System.Threading.Thread.CurrentThread.IsThreadPoolThread) { _writeOnPool++; }
+            if (_lastWriteThreadId != 0 && _lastWriteThreadId != tid) { _writeThreadSwitchCount++; }
+            _lastWriteThreadId = tid;
+        }
         unsafe
         {
             fixed (byte* ptr = buffer.Span)
             {
-                return OSsl.SSL_write(Ssl, (byte*)ptr, buffer.Length);
+                int result = OSsl.SSL_write(Ssl, (byte*)ptr, buffer.Length);
+                if (s_traceReads)
+                {
+                    if (result > 0) { _writeBytes += result; }
+                    else { _writeNonPositiveCount++; }
+                }
+                return result;
             }
         }
+    }
+
+    // ═════════════ OSD diagnostics counters (parity with Hybrid) ═════════════
+    private static readonly bool s_traceReads =
+        Environment.GetEnvironmentVariable("DIRECTSSL_TRACE_READS") == "1";
+    private long _readCalls;
+    private long _readBytes;
+    private long _readNonPositiveCount;
+    private long _readTotalTicks;
+    private long _readMaxTicks;
+    private long _writeCalls;
+    private long _writeBytes;
+    private long _writeNonPositiveCount;
+    private long _readOnPool;
+    private long _writeOnPool;
+    private int _lastReadThreadId;
+    private int _readThreadSwitchCount;
+    private int _lastWriteThreadId;
+    private int _writeThreadSwitchCount;
+
+    // Per-conn behavioral counters (behavioral A/B parity with Hybrid)
+    private long _readAsyncEntries;
+    private long _tryCompleteReadEntries;
+    private long _onReadableFires;
+    private long _readImmediateHit;      // n>0 in ReadAsync inline
+    private long _readTryCompleteHit;    // n>0 in TryCompleteRead
+    private long _lastSuccessTicks;
+    private long _gapMaxTicks;
+    // Gap histogram between successful reads (bucketed µs)
+    private long _gapLt10us;
+    private long _gapLt100us;
+    private long _gapLt1ms;
+    private long _gapLt10ms;
+    private long _gapLt100ms;
+    private long _gapGe100ms;
+
+    private void RecordSuccessRead()
+    {
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        long prev = _lastSuccessTicks;
+        _lastSuccessTicks = now;
+        if (prev == 0) { return; }
+        long gap = now - prev;
+        if (gap > _gapMaxTicks) { _gapMaxTicks = gap; }
+        double us = gap * (1_000_000.0 / System.Diagnostics.Stopwatch.Frequency);
+        if      (us < 10)       { _gapLt10us++; }
+        else if (us < 100)      { _gapLt100us++; }
+        else if (us < 1_000)    { _gapLt1ms++; }
+        else if (us < 10_000)   { _gapLt10ms++; }
+        else if (us < 100_000)  { _gapLt100ms++; }
+        else                    { _gapGe100ms++; }
     }
 
     public void Dispose()
@@ -583,5 +709,20 @@ internal sealed class SslConnectionState : IDisposable
         OSsl.SSL_shutdown(Ssl);
 
         OSsl.SSL_free(Ssl);
+
+        if (s_traceReads && (_readCalls > 0 || _writeCalls > 0))
+        {
+            double tickToUs = 1_000_000.0 / System.Diagnostics.Stopwatch.Frequency;
+            double avgReadUs = _readCalls > 0 ? (_readTotalTicks * tickToUs) / _readCalls : 0;
+            double maxReadUs = _readMaxTicks * tickToUs;
+            double gapMaxUs = _gapMaxTicks * tickToUs;
+            long totalHits = _readImmediateHit + _readTryCompleteHit;
+            Console.WriteLine(
+                $"[OSD-diag fd={Fd}] pumpTid={_lastReadThreadId} reads={_readCalls} readBytes={_readBytes} avgReadUs={avgReadUs:F2} maxReadUs={maxReadUs:F1} nonPos/read={_readNonPositiveCount} readTidSwitches={_readThreadSwitchCount} readOnPool={_readOnPool} " +
+                $"writes={_writeCalls} writeBytes={_writeBytes} nonPos/write={_writeNonPositiveCount} writeTidSwitches={_writeThreadSwitchCount} writeOnPool={_writeOnPool} " +
+                $"| readAsyncEntries={_readAsyncEntries} tryCompleteReadEntries={_tryCompleteReadEntries} onReadableFires={_onReadableFires} " +
+                $"immediateHit={_readImmediateHit} tryCompleteHit={_readTryCompleteHit} totalHits={totalHits} " +
+                $"| gapMaxUs={gapMaxUs:F1} gap<10us={_gapLt10us} <100us={_gapLt100us} <1ms={_gapLt1ms} <10ms={_gapLt10ms} <100ms={_gapLt100ms} >=100ms={_gapGe100ms}");
+        }
     }
 }

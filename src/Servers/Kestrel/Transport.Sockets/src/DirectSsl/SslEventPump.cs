@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 // Uncomment the following line to enable debug counters for SSL diagnostics
-// #define DIRECTSSL_DEBUG_COUNTERS
+#define DIRECTSSL_DEBUG_COUNTERS
 
 using System.Buffers;
 using System.Net;
@@ -92,6 +92,24 @@ internal sealed partial class SslEventPump : IDisposable
     public static long TotalHandshakeCallCount;       // sum of Handshake() invocations across completed handshakes
     public static long TotalHandshakeWallTicks;       // sum of wall-clock time (Stopwatch.GetTimestamp() units) from first call to Complete
     public static long TotalHandshakeBusyTicks;       // sum of wall-clock time spent INSIDE Handshake() calls (excludes idle)
+
+    // Per-call Read/Write instrumentation (added for stall diagnosis)
+    public static long TotalReadCallCount;     // # of Session.Read / SSL_read invocations (all paths)
+    public static long TotalReadBytes;         // sum of bytes returned (>0 only)
+    public static long TotalReadBusyTicks;     // sum of Stopwatch ticks inside the SSL call
+    public static long MaxReadBusyTicks;       // longest single-call wall ticks
+    public static long TotalReadComplete;      // # of calls that returned Complete with bytes>0
+    public static long TotalReadWantRead;      // # of calls that returned WantRead
+    
+    public static long TotalReadAsyncEntries;     // # times ReadAsync was called
+    public static long TotalReadAsyncBodyTicks;   // total ticks spent in ReadAsync body (entry to return)
+    public static long TotalReadAsyncGapTicks;    // total ticks between consecutive ReadAsync entries per connection
+    public static long TotalReadAsyncGapCount;    // # of gaps measured
+
+    public static long TotalWriteCallCount;
+    public static long TotalWriteBytes;
+    public static long TotalWriteBusyTicks;
+    public static long MaxWriteBusyTicks;
 
     // Per-fd side state (only allocated when counters are enabled)
     private readonly Dictionary<int, (long StartTicks, int CallCount, long BusyTicks)> _handshakeState = new();

@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 // Uncomment the following line to enable debug counters for SSL diagnostics
-// #define DIRECTSSL_DEBUG_COUNTERS
+#define DIRECTSSL_DEBUG_COUNTERS
 
 using System.Buffers;
 using System.Net;
@@ -95,6 +95,24 @@ internal sealed partial class SslEventPump : IDisposable
     public static long TotalHandshakeCallCount;
     public static long TotalHandshakeWallTicks;
     public static long TotalHandshakeBusyTicks;
+
+    // Per-call Read/Write instrumentation (added for stall diagnosis)
+    public static long TotalReadCallCount;     // # of Session.Read / SSL_read invocations (all paths)
+    public static long TotalReadBytes;         // sum of bytes returned (>0 only)
+    public static long TotalReadBusyTicks;     // sum of Stopwatch ticks inside the SSL call
+    public static long MaxReadBusyTicks;       // longest single-call wall ticks
+    public static long TotalReadComplete;      // # of calls that returned Complete with bytes>0
+    public static long TotalReadWantRead;      // # of calls that returned WantRead
+    
+    public static long TotalReadAsyncEntries;     // # times ReadAsync was called
+    public static long TotalReadAsyncBodyTicks;   // total ticks spent in ReadAsync body (entry to return)
+    public static long TotalReadAsyncGapTicks;    // total ticks between consecutive ReadAsync entries per connection
+    public static long TotalReadAsyncGapCount;    // # of gaps measured
+
+    public static long TotalWriteCallCount;
+    public static long TotalWriteBytes;
+    public static long TotalWriteBusyTicks;
+    public static long MaxWriteBusyTicks;
 
     private readonly Dictionary<int, (long StartTicks, int CallCount, long BusyTicks)> _handshakeState = new();
 #endif
@@ -260,11 +278,61 @@ internal sealed partial class SslEventPump : IDisposable
         const int MaxEvents = 256;
         var events = new EpollEvent[MaxEvents];
 
+        // Fairness instrumentation (measurement only, no rotate-start for OSD baseline).
+        long _batchN0 = 0, _batchN1 = 0, _batchN2 = 0, _batchN3 = 0, _batchN4 = 0, _batchN5plus = 0;
+        var _firstFdHits = new System.Collections.Generic.Dictionary<int, long>(64);
+        long _totalFirstFdHits = 0;
+        var _diagStart = System.Diagnostics.Stopwatch.StartNew();
+        bool _diagEmitted = false;
+
         while (_running)
         {
             // Use shorter timeout when there are handshaking connections
             int timeout = _handshaking.Count > 0 ? 10 : 1000;
             int numEvents = OSsl.epoll_wait(_epollFd, events, MaxEvents, timeout);
+
+            // Track batch-size distribution.
+            if (numEvents > 0)
+            {
+                if (numEvents == 1) { _batchN1++; }
+                else if (numEvents == 2) { _batchN2++; }
+                else if (numEvents == 3) { _batchN3++; }
+                else if (numEvents == 4) { _batchN4++; }
+                else { _batchN5plus++; }
+                int _firstFd = events[0].Data.Fd;
+                _firstFdHits.TryGetValue(_firstFd, out var _h);
+                _firstFdHits[_firstFd] = _h + 1;
+                _totalFirstFdHits++;
+            }
+            else if (numEvents == 0)
+            {
+                _batchN0++;
+            }
+
+            // Emit fairness diag once after 13 seconds of run (mid-wrk load).
+            if (!_diagEmitted && _diagStart.Elapsed.TotalSeconds >= 13)
+            {
+                _diagEmitted = true;
+                long _totalBatches = _batchN1 + _batchN2 + _batchN3 + _batchN4 + _batchN5plus;
+                double _avgBatch = _totalBatches > 0
+                    ? (double)(_batchN1 * 1 + _batchN2 * 2 + _batchN3 * 3 + _batchN4 * 4 + _batchN5plus * 5) / _totalBatches
+                    : 0.0;
+                Console.WriteLine(
+                    $"[Pump-diag id={_id}] batches: timeout={_batchN0} n=1:{_batchN1} n=2:{_batchN2} n=3:{_batchN3} n=4:{_batchN4} n>=5:{_batchN5plus} avgBatch={_avgBatch:F2}");
+                var _firstFdList = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int, long>>(_firstFdHits);
+                _firstFdList.Sort((a, b) => b.Value.CompareTo(a.Value));
+                var _sb = new System.Text.StringBuilder();
+                _sb.Append(System.Globalization.CultureInfo.InvariantCulture, $"[Pump-diag id={_id}] firstFd totalBatches={_totalFirstFdHits}");
+                int _n = 0;
+                foreach (var kv in _firstFdList)
+                {
+                    if (_n++ >= 10) { break; }
+                    double _pct = _totalFirstFdHits > 0 ? (100.0 * kv.Value / _totalFirstFdHits) : 0.0;
+                    _sb.Append(System.Globalization.CultureInfo.InvariantCulture, $" fd={kv.Key}:{kv.Value}({_pct:F1}%)");
+                }
+                Console.WriteLine(_sb.ToString());
+                Console.Out.Flush();
+            }
 
 #if DIRECTSSL_DEBUG_COUNTERS
             // Log stats every 5 seconds

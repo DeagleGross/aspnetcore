@@ -115,7 +115,12 @@ internal sealed class DirectSslConnection : TransportConnection
                 }
                 else if (bytesRead == 0)
                 {
-                    // Connection closed (EOF)
+                    // Connection closed (EOF from TLS close_notify / SSL_ERROR_ZERO_RETURN).
+                    // Unregister from epoll immediately so we do not get phantom EPOLLIN
+                    // fires on this dead fd until Kestrel eventually calls DisposeAsync.
+                    // Idempotent: DisposeAsync also calls Unregister; a second EPOLL_CTL_DEL
+                    // just returns ENOENT and is ignored.
+                    _pump.Unregister(_connectionState.Fd);
 #if DIRECTSSL_DEBUG_COUNTERS
                     Interlocked.Increment(ref SslEventPump.TotalReadEof);
 #endif

@@ -17,17 +17,12 @@ using TlsSessionPumpPool     = Microsoft.AspNetCore.Server.Kestrel.Transport.Soc
 using OpenSslDirectListener  = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Connection.DirectSslConnectionListener;
 using OpenSslDirectPumpPool  = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.SslEventPumpPool;
 using OpenSslDirectContext   = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.OpenSslDirect.Ssl.SslContext;
+using HybridListener         = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Connection.DirectSslConnectionListener;
+using HybridPumpPool         = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.SslEventPumpPool;
+using HybridContext          = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Ssl.SslContext;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 
-/// <summary>
-/// A factory for direct-ssl based connections. Selects between two TLS engines
-/// at startup based on <see cref="DirectSslTransportOptions.Engine"/> or the
-/// <c>KESTREL_DIRECTSSL_ENGINE</c> environment variable. Both engines share the
-/// listener-factory entry point but each carries its own pump pool, listener,
-/// and per-connection state — there is no per-call virtual dispatch between
-/// them, which keeps the hot path monomorphic and the A/B comparison clean.
-/// </summary>
 internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IConnectionListenerFactorySelector
 {
     private readonly DirectSslTransportOptions _options;
@@ -44,6 +39,10 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
     private OpenSslDirectContext? _opensslDirectContext;
     private OpenSslDirectPumpPool? _opensslDirectPumpPool;
 
+    // Hybrid engine state (OSD clone with TlsSession primitives)
+    private HybridContext? _hybridContext;
+    private HybridPumpPool? _hybridPumpPool;
+
     public DirectSslTransportFactory(
         IOptions<DirectSslTransportOptions> options,
         ILoggerFactory loggerFactory)
@@ -59,12 +58,6 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
         _logger.LogInformation("DirectSsl engine selected: {Engine}", _engine);
     }
 
-    /// <summary>
-    /// Returns the engine kind to use. Precedence:
-    /// 1. <c>KESTREL_DIRECTSSL_ENGINE</c> env var (case-insensitive) — wins over options so that
-    ///    benchmark scripts can flip the engine without touching code.
-    /// 2. <see cref="DirectSslTransportOptions.Engine"/>.
-    /// </summary>
     private static DirectSslEngineKind ResolveEngine(DirectSslTransportOptions options, ILogger logger)
     {
         string? envValue = Environment.GetEnvironmentVariable("KESTREL_DIRECTSSL_ENGINE");
@@ -81,7 +74,6 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
         return options.Engine;
     }
 
-    /// <inheritdoc />
     public ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(_options.CertificatePath) || string.IsNullOrEmpty(_options.PrivateKeyPath))
@@ -93,6 +85,7 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
         {
             DirectSslEngineKind.TlsSession    => BindTlsSession(endpoint),
             DirectSslEngineKind.OpenSslDirect => BindOpenSslDirect(endpoint),
+            DirectSslEngineKind.Hybrid        => BindHybrid(endpoint),
             _ => throw new InvalidOperationException($"Unknown engine kind: {_engine}"),
         };
     }
@@ -101,8 +94,6 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
     {
         if (_tlsContext is null)
         {
-            // Load PEM cert + key into a single X509Certificate2 (the private key is associated
-            // via the underlying OpenSSL EVP_PKEY on Linux, so it can be used by TlsContext).
             var cert = X509Certificate2.CreateFromPemFile(_options.CertificatePath!, _options.PrivateKeyPath!);
 
             var serverOptions = new SslServerAuthenticationOptions
@@ -161,7 +152,32 @@ internal sealed class DirectSslTransportFactory : IConnectionListenerFactory, IC
         return new ValueTask<IConnectionListener>(transport);
     }
 
-    /// <inheritdoc />
+    private ValueTask<IConnectionListener> BindHybrid(EndPoint endpoint)
+    {
+        if (_hybridContext is null)
+        {
+            _hybridContext = new HybridContext(_options.CertificatePath!, _options.PrivateKeyPath!);
+            _logger.LogInformation("[Hybrid] SslContext initialized with certificate: {CertPath}", _options.CertificatePath);
+        }
+
+        if (_hybridPumpPool is null)
+        {
+            _hybridPumpPool = new HybridPumpPool(_options.WorkerCount, _loggerFactory);
+            _logger.LogInformation("[Hybrid] event pump pool started with {PumpCount} pumps.", _options.WorkerCount);
+        }
+
+        var transport = new HybridListener(
+            _loggerFactory,
+            _hybridContext,
+            _hybridPumpPool,
+            endpoint,
+            _options,
+            MemoryPool<byte>.Shared);
+
+        transport.Bind();
+        return new ValueTask<IConnectionListener>(transport);
+    }
+
     public bool CanBind(EndPoint endpoint) => endpoint switch
     {
         IPEndPoint _ => true,

@@ -2,7 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 // Uncomment the following line to enable debug counters for SSL diagnostics
-// #define DIRECTSSL_DEBUG_COUNTERS
+#define DIRECTSSL_DEBUG_COUNTERS
 
 using System.Net.Security;
 using System.Security.Authentication;
@@ -32,6 +32,7 @@ internal sealed class SslConnectionState : IDisposable
 
     // Read - reusable awaitable to avoid TCS allocations
     private readonly SslAwaitable<int> _readAwaitable = new();
+    private long _lastReadExitTicks;
     private Memory<byte> _readBuffer;
     private bool _readWantsWrite;  // TlsSession.Read returned WantWrite (renegotiation)
 
@@ -125,6 +126,14 @@ internal sealed class SslConnectionState : IDisposable
 
     public ValueTask<int> ReadAsync(Memory<byte> buffer)
     {
+        long __rEntry = System.Diagnostics.Stopwatch.GetTimestamp();
+        System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadAsyncEntries);
+        if (_lastReadExitTicks != 0) {
+            long __gap = __rEntry - _lastReadExitTicks;
+            System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncGapTicks, __gap);
+            System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadAsyncGapCount);
+        }
+
         if (!IsHandshaked)
         {
             throw new InvalidOperationException("Handshake not complete");
@@ -137,6 +146,7 @@ internal sealed class SslConnectionState : IDisposable
 
         TlsOperationStatus status;
         int bytesRead;
+        long _t0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             status = Session.Read(buffer.Span, out bytesRead);
@@ -146,25 +156,38 @@ internal sealed class SslConnectionState : IDisposable
             // OpenSSL SSL_ERROR_SYSCALL (e.g. ECONNRESET, abrupt peer close without close_notify)
             // surfaces as AuthenticationException via TlsSession. Treat as EOF — the connection
             // is gone and our caller will tear down the pipeline.
-            return new ValueTask<int>(0);
+            { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(0); }
+        }
+        {
+            long _wallTicks = System.Diagnostics.Stopwatch.GetTimestamp() - _t0;
+            System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadCallCount);
+            System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBusyTicks, _wallTicks);
+            long _maxOld; do { _maxOld = System.Threading.Interlocked.Read(ref SslEventPump.MaxReadBusyTicks); if (_maxOld >= _wallTicks) { break; } } while (System.Threading.Interlocked.CompareExchange(ref SslEventPump.MaxReadBusyTicks, _wallTicks, _maxOld) != _maxOld);
+            if (status == TlsOperationStatus.Complete && bytesRead > 0) {
+                System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadComplete);
+                System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBytes, bytesRead);
+            }
+            if (status == TlsOperationStatus.WantRead) {
+                System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadWantRead);
+            }
         }
 
         switch (status)
         {
             case TlsOperationStatus.Complete:
-                return new ValueTask<int>(bytesRead);
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(bytesRead); }
 
             case TlsOperationStatus.Closed:
                 // Peer sent close_notify or transport is gone — treat as EOF
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref SslEventPump.TotalSslErrorZeroReturn);
 #endif
-                return new ValueTask<int>(0);
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return new ValueTask<int>(0); }
 
             case TlsOperationStatus.WantRead:
                 _readBuffer = buffer;
                 _readWantsWrite = false;
-                return _readAwaitable.Reset();
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return _readAwaitable.Reset(); }
 
             case TlsOperationStatus.WantWrite:
                 // TlsSession.Read needs to write (TLS renegotiation or post-handshake auth).
@@ -172,7 +195,7 @@ internal sealed class SslConnectionState : IDisposable
                 _readBuffer = buffer;
                 _readWantsWrite = true;
                 Pump?.ModifyEvents(Fd, NativeSsl.EPOLLIN | NativeSsl.EPOLLOUT);
-                return _readAwaitable.Reset();
+                { long __rExit = System.Diagnostics.Stopwatch.GetTimestamp(); System.Threading.Interlocked.Add(ref SslEventPump.TotalReadAsyncBodyTicks, __rExit - __rEntry); _lastReadExitTicks = __rExit; return _readAwaitable.Reset(); }
 
             default:
 #if DIRECTSSL_DEBUG_COUNTERS
@@ -194,7 +217,20 @@ internal sealed class SslConnectionState : IDisposable
         int bytesRead;
         try
         {
+            long _t0b = System.Diagnostics.Stopwatch.GetTimestamp();
             status = Session.Read(_readBuffer.Span, out bytesRead);
+            { long _wTicks = System.Diagnostics.Stopwatch.GetTimestamp() - _t0b;
+              System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadCallCount);
+              System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBusyTicks, _wTicks);
+              long _mOld; do { _mOld = System.Threading.Interlocked.Read(ref SslEventPump.MaxReadBusyTicks); if (_mOld >= _wTicks) { break; } } while (System.Threading.Interlocked.CompareExchange(ref SslEventPump.MaxReadBusyTicks, _wTicks, _mOld) != _mOld);
+              if (status == TlsOperationStatus.Complete && bytesRead > 0) {
+                  System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadComplete);
+                  System.Threading.Interlocked.Add(ref SslEventPump.TotalReadBytes, bytesRead);
+              }
+              if (status == TlsOperationStatus.WantRead) {
+                  System.Threading.Interlocked.Increment(ref SslEventPump.TotalReadWantRead);
+              }
+            }
         }
         catch (AuthenticationException)
         {
@@ -292,6 +328,7 @@ internal sealed class SslConnectionState : IDisposable
 
         TlsOperationStatus status;
         int bytesWritten;
+        long _w0 = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             status = Session.Write(buffer.Span, out bytesWritten);
@@ -299,6 +336,15 @@ internal sealed class SslConnectionState : IDisposable
         catch (AuthenticationException)
         {
             return new ValueTask<int>(0); // Treat as broken connection → caller will tear down
+        }
+        {
+            long _wWall = System.Diagnostics.Stopwatch.GetTimestamp() - _w0;
+            System.Threading.Interlocked.Increment(ref SslEventPump.TotalWriteCallCount);
+            System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBusyTicks, _wWall);
+            long _maxOld; do { _maxOld = System.Threading.Interlocked.Read(ref SslEventPump.MaxWriteBusyTicks); if (_maxOld >= _wWall) { break; } } while (System.Threading.Interlocked.CompareExchange(ref SslEventPump.MaxWriteBusyTicks, _wWall, _maxOld) != _maxOld);
+            if (status == TlsOperationStatus.Complete && bytesWritten > 0) {
+                System.Threading.Interlocked.Add(ref SslEventPump.TotalWriteBytes, bytesWritten);
+            }
         }
 
         switch (status)

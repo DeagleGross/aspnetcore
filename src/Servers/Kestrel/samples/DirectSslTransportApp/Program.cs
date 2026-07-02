@@ -53,8 +53,8 @@ var hostBuilder = new HostBuilder()
         if (!useStandardTls)
         {
             var engineEnv = Environment.GetEnvironmentVariable("DIRECTSSL_ENGINE");
-            var engine = string.Equals(engineEnv, "OpenSslDirect", StringComparison.OrdinalIgnoreCase)
-                ? Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.OpenSslDirect
+            var engine = Enum.TryParse<Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind>(engineEnv, ignoreCase: true, out var parsedEngine)
+                ? parsedEngine
                 : Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.TlsSession;
             Console.WriteLine($"Using DirectSsl transport — engine = {engine} (DIRECTSSL_ENGINE={engineEnv ?? "<unset, default>"})");
 
@@ -66,7 +66,9 @@ var hostBuilder = new HostBuilder()
                 options.Engine = engine;
                 options.CertificatePath = "server-p256.crt";
                 options.PrivateKeyPath = "server-p256.key";
-                options.WorkerCount = 2; // 2 pump threads + 2 cores free for ThreadPool
+                var wcEnv = Environment.GetEnvironmentVariable("DIRECTSSL_WORKERS");
+                options.WorkerCount = int.TryParse(wcEnv, out var wc) && wc > 0 ? wc : 2;
+                Console.WriteLine($"DirectSsl WorkerCount = {options.WorkerCount} (DIRECTSSL_WORKERS={wcEnv ?? "<unset>"})");
             });
 
             webHost.ConfigureKestrel(options =>
@@ -96,6 +98,11 @@ var hostBuilder = new HostBuilder()
             app.UseRouting();
             app.UseEndpoints(endpoints =>
             {
+                                endpoints.MapGet("/metrics", async context =>
+                {
+                    context.Response.ContentType = "text/plain";
+                    await context.Response.WriteAsync(Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslMetrics.DumpComparison());
+                });
                 endpoints.MapGet("/", async context =>
                 {
                     await context.Response.WriteAsync("Hello world");

@@ -1,6 +1,7 @@
 #nullable enable
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.OpenSslDirect = 1 -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
+Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.Hybrid = 2 -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind.TlsSession = 0 -> Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslEngineKind
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslMetrics
 Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.DirectSslTransportOptions

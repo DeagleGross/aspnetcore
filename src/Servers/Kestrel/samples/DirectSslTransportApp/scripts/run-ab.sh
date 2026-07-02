@@ -64,7 +64,7 @@ run_scenario() {
     sleep 2
 }
 
-for engine in TlsSession OpenSslDirect; do
+for engine in OpenSslDirect Hybrid; do
     run_scenario "$engine" "persistent" "wrk-persistent.sh"
     run_scenario "$engine" "close13"    "wrk-close13.sh"
     run_scenario "$engine" "closeall"   "wrk-closeall.sh"
@@ -75,7 +75,7 @@ echo "================ SUMMARY ================"
 printf '%-18s %-12s %18s %18s %18s\n' "Scenario" "Engine" "RPS" "Lat avg" "Lat p99"
 echo "-------------------------------------------------------------------------------------"
 for scenario in persistent close13 closeall; do
-    for engine in TlsSession OpenSslDirect; do
+    for engine in OpenSslDirect Hybrid; do
         f="$OUT_DIR/${engine}-${scenario}.wrk"
         [ -f "$f" ] || continue
         rps=$(grep -E 'Requests/sec' "$f" | awk '{print $2}')

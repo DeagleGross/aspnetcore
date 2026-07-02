@@ -14,15 +14,21 @@ public enum DirectSslEngineKind
 {
     /// <summary>
     /// Drive OpenSSL through <c>System.Net.Security.TlsContext</c> / <c>TlsSession</c>.
-    /// This is the "this run" / runtime-PoC path.
     /// </summary>
     TlsSession = 0,
 
     /// <summary>
-    /// Drive OpenSSL with direct P/Invoke calls (<c>SSL_do_handshake</c>,
-    /// <c>SSL_read</c>, <c>SSL_write</c>) hosted inside this assembly.
-    /// This is the "Net10 Private" path resurrected from
-    /// <c>dmkorolev/internal/native-tls-transport@82e1b108</c>.
+    /// Drive OpenSSL with direct P/Invoke calls (SSL_do_handshake, SSL_read, SSL_write)
+    /// hosted inside this assembly.
     /// </summary>
     OpenSslDirect = 1,
+
+    /// <summary>
+    /// Hybrid engine: byte-for-byte clone of OpenSslDirect where ONLY the raw SSL primitives
+    /// (SSL_new/SSL_set_fd/SSL_do_handshake/SSL_read/SSL_write/SSL_free) are swapped for
+    /// TlsSession / TlsContext calls. Everything else — pump, epoll loop, connection wrapper,
+    /// buffering — is identical to OpenSslDirect. Used to isolate whether the primitive swap
+    /// alone accounts for the persistent-keepalive perf gap.
+    /// </summary>
+    Hybrid = 2,
 }
