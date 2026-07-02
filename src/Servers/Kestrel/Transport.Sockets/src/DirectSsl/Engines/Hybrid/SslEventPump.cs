@@ -587,13 +587,31 @@ internal sealed partial class SslEventPump : IDisposable
         hs.CallCount++;
 #endif
         OSsl.ERR_clear_error();
-        int n = OSsl.SSL_do_handshake(conn.Ssl);
+        // Hybrid Step 3: drive the handshake via TlsSession.Handshake() instead of raw
+        // SSL_do_handshake. In fd-mode TlsSession short-circuits to Interop.Ssl.SslDoHandshake
+        // + MapSslError, so the number of native calls per epoll wakeup is identical to
+        // Step 2 (one SSL_do_handshake, one SSL_get_error). Mapped return value:
+        //   TlsOperationStatus.Complete   → handshake done (n==1)
+        //   TlsOperationStatus.WantRead   → SSL_ERROR_WANT_READ
+        //   TlsOperationStatus.WantWrite  → SSL_ERROR_WANT_WRITE
+        //   TlsOperationStatus.Closed     → SSL_ERROR_ZERO_RETURN
+        //   any other native error path bubbles up as AuthenticationException.
+        TlsOperationStatus hsStatus;
+        try
+        {
+            hsStatus = conn.Session!.Handshake();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "TlsSession.Handshake threw for fd={Fd}", fd);
+            hsStatus = TlsOperationStatus.Closed;
+        }
 #if DIRECTSSL_DEBUG_COUNTERS
         hs.BusyTicks += System.Diagnostics.Stopwatch.GetTimestamp() - callStartTicks;
         _handshakeState[fd] = hs;
 #endif
 
-        if (n == 1)
+        if (hsStatus == TlsOperationStatus.Complete)
         {
             // Handshake complete! Create connection and enqueue to Kestrel
 #if DIRECTSSL_DEBUG_COUNTERS
@@ -652,15 +670,13 @@ internal sealed partial class SslEventPump : IDisposable
             return;
         }
 
-        int error = OSsl.SSL_get_error(conn.Ssl, n);
-
-        if (error == OSsl.SSL_ERROR_WANT_READ)
+        if (hsStatus == TlsOperationStatus.WantRead)
         {
             // Already registered for EPOLLIN, just wait
             return;
         }
 
-        if (error == OSsl.SSL_ERROR_WANT_WRITE)
+        if (hsStatus == TlsOperationStatus.WantWrite)
         {
             // Need to write - add EPOLLOUT
             var ev = new EpollEvent
@@ -673,7 +689,7 @@ internal sealed partial class SslEventPump : IDisposable
         }
 
         // Handshake failed - cleanup
-        _logger?.LogDebug("Handshake failed for fd={Fd}: error={Error}", fd, error);
+        _logger?.LogDebug("Handshake failed for fd={Fd}: status={Status}", fd, hsStatus);
 #if DIRECTSSL_DEBUG_COUNTERS
         Interlocked.Increment(ref _totalHandshakeFailed);
         _handshakeState.Remove(fd);
