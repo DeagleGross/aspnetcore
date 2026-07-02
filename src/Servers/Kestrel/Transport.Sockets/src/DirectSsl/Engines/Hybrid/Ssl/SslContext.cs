@@ -1,21 +1,41 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Interop;
+using System.Net.Security;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Ssl;
 
 /// <summary>
-/// Wrapper around OpenSSL SSL_CTX.
-/// Manages the SSL context lifecycle and certificate loading.
-/// Thread-safe - can be shared across connections.
+/// Hybrid SslContext — STEP 1 of the incremental TlsSession migration.
+///
+/// This engine's context is a THIN WRAPPER around a runtime-owned
+/// <see cref="TlsContext"/>. We use reflection to force materialization of the
+/// TlsContext's internal <c>_sslContext</c> (SafeSslContextHandle) and expose
+/// the raw <c>SSL_CTX*</c> via <see cref="Handle"/> so that the rest of the
+/// engine (pump, connection state) continues to call raw <c>SSL_new</c>,
+/// <c>SSL_set_fd</c>, <c>SSL_read</c>, <c>SSL_write</c> on that pointer
+/// exactly as OpenSslDirect does.
+///
+/// This is the SMALLEST possible delta from OSD: only the origin of the
+/// SSL_CTX changes (TlsContext-owned vs. our own <c>SSL_CTX_new</c>).
+/// If RPS/fairness change here, the culprit is on the TlsContext SSL_CTX
+/// configuration side (ciphers/session-cache/protocol mask), not the pump.
 /// </summary>
 internal sealed class SslContext : IDisposable
 {
-    private IntPtr _ctx;
+    private TlsContext? _tlsContext;
+    private IntPtr _sslCtxHandle;
     private bool _disposed;
 
-    public IntPtr Handle => _ctx;
+    /// <summary>Raw <c>SSL_CTX*</c> extracted from the TlsContext via reflection.</summary>
+    public IntPtr Handle => _sslCtxHandle;
+
+    /// <summary>Underlying runtime TlsContext — exposed for later migration steps.</summary>
+    public TlsContext TlsContext => _tlsContext ?? throw new ObjectDisposedException(nameof(SslContext));
 
     public SslContext(string certPath, string keyPath)
     {
@@ -23,95 +43,65 @@ internal sealed class SslContext : IDisposable
         {
             throw new ArgumentNullException(nameof(certPath));
         }
-
         if (string.IsNullOrEmpty(keyPath))
         {
             throw new ArgumentNullException(nameof(keyPath));
         }
 
-        // Initialize OpenSSL
-        OpenSsl.Initialize();
+        var cert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
 
-        // Create SSL context with TLS server method
-        var method = OpenSsl.TLS_server_method();
-        if (method == IntPtr.Zero)
+        var serverOptions = new SslServerAuthenticationOptions
         {
-            throw new InvalidOperationException("Failed to create TLS server method");
+            ServerCertificate = cert,
+            ClientCertificateRequired = false,
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            AllowTlsResume = true,
+        };
+
+        _tlsContext = TlsContext.Create(serverOptions);
+
+        _sslCtxHandle = ExtractRawSslCtx(_tlsContext);
+        if (_sslCtxHandle == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Failed to extract SSL_CTX* from TlsContext._sslContext");
         }
 
-        _ctx = OpenSsl.SSL_CTX_new(method);
-        if (_ctx == IntPtr.Zero)
-        {
-            throw new InvalidOperationException($"Failed to create SSL context: {OpenSsl.GetLastErrorString()}");
-        }
-
-        // Load certificate
-        if (OpenSsl.SSL_CTX_use_certificate_file(_ctx, certPath, OpenSsl.SSL_FILETYPE_PEM) <= 0)
-        {
-            Dispose();
-            throw new InvalidOperationException($"Failed to load certificate from {certPath}: {OpenSsl.GetLastErrorString()}");
-        }
-
-        // Load private key
-        if (OpenSsl.SSL_CTX_use_PrivateKey_file(_ctx, keyPath, OpenSsl.SSL_FILETYPE_PEM) <= 0)
-        {
-            Dispose();
-            throw new InvalidOperationException($"Failed to load private key from {keyPath}: {OpenSsl.GetLastErrorString()}");
-        }
-
-        // Verify private key matches certificate
-        if (OpenSsl.SSL_CTX_check_private_key(_ctx) <= 0)
-        {
-            Dispose();
-            throw new InvalidOperationException($"Private key does not match certificate: {OpenSsl.GetLastErrorString()}");
-        }
-
-        // Enable TLS session resumption for performance
-        // This allows returning clients to skip expensive ECDHE key exchange
-        ConfigureSessionCaching();
-
-        // TLS_server_method() in OpenSSL 3.x already supports TLS 1.2 and 1.3 by default
-        // No need to explicitly set min/max versions
-
-        Console.WriteLine($"[SslContext] Initialized with cert: {certPath}");
+        Console.WriteLine($"[SslContext] Hybrid Step 1: wrapped TlsContext, extracted SSL_CTX* = 0x{_sslCtxHandle.ToInt64():X}");
     }
 
     /// <summary>
-    /// Configure OpenSSL's built-in session caching for TLS session resumption.
-    /// 
-    /// TLS 1.2: Session ID-based resumption or session tickets
-    /// TLS 1.3: Pre-Shared Key (PSK) based resumption with optional 0-RTT
-    /// 
-    /// Benefits:
-    /// - 50-80% latency reduction for resumed sessions
-    /// - Significant CPU reduction (skip ECDHE key exchange)
-    /// - Reduced network round trips
+    /// Force materialization of <c>TlsContext._sslContext</c> (a lazy
+    /// SafeSslContextHandle) by invoking the internal
+    /// <c>CreateSessionOptions()</c> method — which calls the OpenSSL-partial
+    /// <c>AttachSharedNativeContext</c> that allocates the SSL_CTX. Then
+    /// read the private <c>_sslContext</c> field and return its raw handle.
     /// </summary>
-    private void ConfigureSessionCaching()
+    private static IntPtr ExtractRawSslCtx(TlsContext tlsCtx)
     {
-        // Enable server-side session caching
-        OpenSsl.SetSessionCacheMode(_ctx, OpenSsl.SSL_SESS_CACHE_SERVER);
+        var t = typeof(TlsContext);
 
-        // Set session timeout to 1 hour (3600 seconds)
-        // This is a reasonable balance between security and performance
-        OpenSsl.SSL_CTX_set_timeout(_ctx, 3600);
+        var createSessionOptions = t.GetMethod(
+            "CreateSessionOptions",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("TlsContext.CreateSessionOptions() not found");
+        _ = createSessionOptions.Invoke(tlsCtx, null);
 
-        // Set cache size to 20,000 sessions
-        // This accommodates high-traffic scenarios with many unique clients
-        OpenSsl.SetSessionCacheSize(_ctx, 20000);
+        var sslContextField = t.GetField(
+            "_sslContext",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("TlsContext._sslContext not found");
 
-        Console.WriteLine("[SslContext] TLS session caching enabled (mode=SERVER, timeout=3600s, cache_size=20000)");
+        var handle = sslContextField.GetValue(tlsCtx) as SafeHandle;
+        return handle?.DangerousGetHandle() ?? IntPtr.Zero;
     }
 
     public void Dispose()
     {
         if (!_disposed)
         {
-            if (_ctx != IntPtr.Zero)
-            {
-                OpenSsl.SSL_CTX_free(_ctx);
-                _ctx = IntPtr.Zero;
-            }
+            _tlsContext?.Dispose();
+            _tlsContext = null;
+            _sslCtxHandle = IntPtr.Zero;
             _disposed = true;
         }
     }
