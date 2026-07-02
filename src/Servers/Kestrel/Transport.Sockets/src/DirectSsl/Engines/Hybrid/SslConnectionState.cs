@@ -646,18 +646,33 @@ internal sealed class SslConnectionState : IDisposable
             if (_lastWriteThreadId != 0 && _lastWriteThreadId != tid) { _writeThreadSwitchCount++; }
             _lastWriteThreadId = tid;
         }
-        unsafe
+        // Hybrid Step 5: route SSL_write through TlsSession.Write (cumulative on top
+        // of Step 4). Isolation experiment (Step 4 reverted + Step 5 only) showed
+        // 100.1%% Hyb/OSD — Write alone does not regress, because writes always
+        // succeed on first call (0%% WANT_WRITE) so the per-call TlsSession overhead
+        // is amortized across many productive bytes. See README for details.
+        TlsOperationStatus wstatus = _session!.Write(buffer.Span, out int bytesWritten);
+        int result;
+        switch (wstatus)
         {
-            fixed (byte* ptr = buffer.Span)
-            {
-                int result = OSsl.SSL_write(Ssl, (byte*)ptr, buffer.Length);
+            case TlsOperationStatus.Complete:
+                result = bytesWritten;
+                break;
+            case TlsOperationStatus.Closed:
+                result = 0;
+                break;
+            default:
+                result = -1;
+                break;
+        }
+        {
                 if (s_traceReads)
                 {
                     if (result > 0) { _writeBytes += result; }
                     else { _writeNonPositiveCount++; }
                 }
                 return result;
-            }
+            
         }
     }
 
