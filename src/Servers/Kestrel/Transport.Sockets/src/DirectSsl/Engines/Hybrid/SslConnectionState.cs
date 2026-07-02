@@ -596,24 +596,39 @@ internal sealed class SslConnectionState : IDisposable
             _lastReadThreadId = tid;
             startTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         }
-        unsafe
+        // Hybrid Step 4: route SSL_read through TlsSession.Read. In fd-mode this
+        // internally calls Interop.Ssl.SslRead(SafeSslHandle, ...) which takes a
+        // SafeHandle refcount (DangerousAddRef/Release) on every call — one of the
+        // strong suspects for the customer -10% regression. Contract preserved:
+        // returns int (bytes read, 0 for EOF, -1 for WANT_READ/WANT_WRITE/error).
+        // Callers continue to use OSsl.SSL_get_error(Ssl, n) on -1, which still
+        // works because the SSL* inside TlsSession is the same handle we cached.
+        TlsOperationStatus status = _session!.Read(buffer.Span, out int bytesRead);
+        // Capture errno immediately, before any other calls
+        _lastErrno = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+        int result;
+        switch (status)
         {
-            fixed (byte* ptr = buffer.Span)
-            {
-                int result = OSsl.SSL_read(Ssl, ptr, buffer.Length);
-                // Capture errno immediately after syscall, before any other calls
-                _lastErrno = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                if (s_traceReads)
-                {
-                    long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
-                    _readTotalTicks += elapsed;
-                    if (elapsed > _readMaxTicks) { _readMaxTicks = elapsed; }
-                    if (result > 0) { _readBytes += result; }
-                    else { _readNonPositiveCount++; }
-                }
-                return result;
-            }
+            case TlsOperationStatus.Complete:
+                result = bytesRead;
+                break;
+            case TlsOperationStatus.Closed:
+                result = 0;
+                break;
+            default:
+                // WantRead / WantWrite / other error → caller inspects via SSL_get_error.
+                result = -1;
+                break;
         }
+        if (s_traceReads)
+        {
+            long elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - startTicks;
+            _readTotalTicks += elapsed;
+            if (elapsed > _readMaxTicks) { _readMaxTicks = elapsed; }
+            if (result > 0) { _readBytes += result; }
+            else { _readNonPositiveCount++; }
+        }
+        return result;
     }
 
     // Stored errno from the last SSL_read call
