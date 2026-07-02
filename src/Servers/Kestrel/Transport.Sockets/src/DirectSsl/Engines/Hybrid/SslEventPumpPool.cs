@@ -52,6 +52,7 @@ internal sealed class SslEventPumpPool : IDisposable
             pump.StartWithListenSocket(
                 listenFd, 
                 sslContext.Handle, 
+                sslContext.TlsContext,
                 readyConnections, 
                 memoryPool, 
                 _loggerFactory!,

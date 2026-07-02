@@ -10,6 +10,8 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Connection;
+using System.Net.Security;
+using System.Reflection;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Interop;
 using Microsoft.Extensions.Logging;
 // HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
@@ -45,6 +47,14 @@ internal sealed partial class SslEventPump : IDisposable
     // Listen socket (added with EPOLLEXCLUSIVE)
     private int _listenFd = -1;
     private IntPtr _sslCtx = IntPtr.Zero;
+    private TlsContext? _tlsContext;
+
+    // Cached reflection accessor: reads TlsSession._securityContext (SafeSslHandle),
+    // then DangerousGetHandle() returns the raw SSL*. Same technique used in
+    // Hybrid.Ssl.SslContext for SSL_CTX* extraction.
+    private static readonly FieldInfo s_tlsSessionSecurityContextField =
+        typeof(TlsSession).GetField("_securityContext", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("TlsSession._securityContext field not found (runtime mismatch?)");
     private ChannelWriter<DirectSslConnection>? _readyConnections;
     private MemoryPool<byte>? _memoryPool;
     private ILoggerFactory? _loggerFactory;
@@ -126,6 +136,7 @@ internal sealed partial class SslEventPump : IDisposable
     {
         public int Fd;
         public IntPtr Ssl;
+        public TlsSession? Session;  // Hybrid Step 2: managed reference keeps SafeSslHandle alive for the raw Ssl pointer.
         public System.Net.IPEndPoint? RemoteEndPoint;  // Captured from accept4 to avoid getpeername syscall
     }
 
@@ -154,6 +165,7 @@ internal sealed partial class SslEventPump : IDisposable
     public void StartWithListenSocket(
         int listenFd,
         IntPtr sslCtx,
+        TlsContext tlsContext,
         ChannelWriter<DirectSslConnection> readyConnections,
         MemoryPool<byte> memoryPool,
         ILoggerFactory loggerFactory,
@@ -161,6 +173,7 @@ internal sealed partial class SslEventPump : IDisposable
     {
         _listenFd = listenFd;
         _sslCtx = sslCtx;
+        _tlsContext = tlsContext;
         _readyConnections = readyConnections;
         _memoryPool = memoryPool;
         _loggerFactory = loggerFactory;
@@ -442,10 +455,7 @@ internal sealed partial class SslEventPump : IDisposable
         foreach (var kvp in _handshaking)
         {
             var conn = kvp.Value;
-            if (conn.Ssl != IntPtr.Zero)
-            {
-                OSsl.SSL_free(conn.Ssl);
-            }
+            conn.Session?.Dispose();  // Hybrid Step 2: SafeSslHandle owns SSL*.
             OSsl.close(conn.Fd);
         }
         _handshaking.Clear();
@@ -485,19 +495,46 @@ internal sealed partial class SslEventPump : IDisposable
                 OSsl.SetTcpNoDelay(clientFd);
             }
 
-            // Create SSL and bind to socket
-            IntPtr ssl = OSsl.SSL_new(_sslCtx);
-            if (ssl == IntPtr.Zero)
+            // Hybrid Step 2: replace SSL_new + SSL_set_fd + SSL_set_accept_state with
+            // TlsSession.Create(TlsContext, SafeSocketHandle). This drops the caller
+            // into fd-mode inside TlsSession (SocketHandle set, _useFdMode=true). The
+            // SSL* itself is allocated lazily on the first Handshake() call via
+            // EnsureFdSslHandle, which internally invokes SslSetAcceptState for us
+            // because TlsContext was built with SslServerAuthenticationOptions.
+            TlsSession session;
+            IntPtr ssl;
+            try
             {
+                var safeSock = new SafeSocketHandle((IntPtr)clientFd, ownsHandle: false);
+                session = TlsSession.Create(_tlsContext!, safeSock);
+
+                // Force EnsureFdSslHandle -> SSL_new + SslSetAcceptState + first
+                // SSL_do_handshake. On a fresh accept the peer hasn't sent bytes yet
+                // so this returns WantRead; ignore status here, the epoll pump will
+                // continue driving the raw SSL_do_handshake in TryAdvanceHandshake.
+                _ = session.Handshake();
+
+                var safeSsl = s_tlsSessionSecurityContextField.GetValue(session) as SafeHandle;
+                ssl = safeSsl?.DangerousGetHandle() ?? IntPtr.Zero;
+                if (ssl == IntPtr.Zero)
+                {
+                    session.Dispose();
+#if DIRECTSSL_DEBUG_COUNTERS
+                    Interlocked.Increment(ref _totalHandshakeFailed);
+#endif
+                    OSsl.close(clientFd);
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "TlsSession.Create/Handshake failed for fd={Fd}", clientFd);
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
                 OSsl.close(clientFd);
                 continue;
             }
-
-            OSsl.SSL_set_fd(ssl, clientFd);
-            OSsl.SSL_set_accept_state(ssl);
 
             // Register client socket with epoll for handshake events
             var ev = new EpollEvent
@@ -514,7 +551,7 @@ internal sealed partial class SslEventPump : IDisposable
 #if DIRECTSSL_DEBUG_COUNTERS
                 Interlocked.Increment(ref _totalHandshakeFailed);
 #endif
-                OSsl.SSL_free(ssl);
+                session.Dispose();
                 OSsl.close(clientFd);
                 continue;
             }
@@ -524,6 +561,7 @@ internal sealed partial class SslEventPump : IDisposable
             {
                 Fd = clientFd,
                 Ssl = ssl,
+                Session = session,
                 RemoteEndPoint = remoteEndPoint
             };
 
@@ -572,8 +610,10 @@ internal sealed partial class SslEventPump : IDisposable
 #endif
             _handshaking.Remove(fd);
 
-            // Create SslConnectionState for the established connection
-            var connectionState = new SslConnectionState(fd, conn.Ssl, _sslConnectionStateLogger);
+            // Create SslConnectionState for the established connection.
+            // Hybrid Step 2: hand the TlsSession off so SafeSslHandle stays alive
+            // for the lifetime of the connection (and disposal path is unified).
+            var connectionState = new SslConnectionState(fd, conn.Ssl, _sslConnectionStateLogger, conn.Session);
             connectionState.SetHandshakeComplete();
 
             // Register with our connections dictionary and epoll
@@ -640,7 +680,7 @@ internal sealed partial class SslEventPump : IDisposable
 #endif
         _handshaking.Remove(fd);
         OSsl.epoll_ctl(_epollFd, OSsl.EPOLL_CTL_DEL, fd, IntPtr.Zero);
-        OSsl.SSL_free(conn.Ssl);
+        conn.Session?.Dispose();
         OSsl.close(fd);
     }
 

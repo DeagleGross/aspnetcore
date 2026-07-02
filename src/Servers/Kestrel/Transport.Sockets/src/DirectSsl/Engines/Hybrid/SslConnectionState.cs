@@ -7,6 +7,7 @@
 using Microsoft.Extensions.Logging;
 // HEAD has a global-namespace 'NativeSsl' that would shadow ours; alias ensures we always
 // resolve to our OpenSslDirect-namespaced version.
+using System.Net.Security;
 using OSsl = Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid.Interop.NativeSsl;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl.Engines.Hybrid;
@@ -17,6 +18,8 @@ internal sealed class SslConnectionState : IDisposable
 
     public readonly int Fd;
     public readonly IntPtr Ssl;
+    // Hybrid Step 2: keeps the SafeSslHandle inside TlsSession alive so the raw SSL* remains valid.
+    private readonly TlsSession? _session;
 
     // Reference to pump for dynamic event modification
     internal SslEventPump? Pump { get; set; }
@@ -39,9 +42,10 @@ internal sealed class SslConnectionState : IDisposable
     private ReadOnlyMemory<byte> _writeBuffer;
     private bool _writeWantsRead;  // SSL_write returned WANT_READ (renegotiation)
 
-    public SslConnectionState(int fd, IntPtr ssl, ILogger? logger = null)
+    public SslConnectionState(int fd, IntPtr ssl, ILogger? logger = null, TlsSession? session = null)
     {
         _logger = logger;
+        _session = session;
 
         Fd = fd;
         Ssl = ssl;
@@ -698,17 +702,19 @@ internal sealed class SslConnectionState : IDisposable
         // Clear any stale errors before shutdown
         OSsl.ERR_clear_error();
 
-        // Use quiet shutdown - don't wait for peer's close_notify
-        // This is appropriate because:
-        // 1. The peer may have already closed the connection (SSL_ERROR_SYSCALL with errno=0)
-        // 2. Waiting for close_notify can block or fail if connection is broken
-        // 3. Quiet shutdown is set when connection is timed out, errored, or buffered
-        OSsl.SSL_set_quiet_shutdown(Ssl, 1);
-
-        // Single SSL_shutdown call - with quiet shutdown, this just cleans up locally
-        OSsl.SSL_shutdown(Ssl);
-
-        OSsl.SSL_free(Ssl);
+        if (_session is not null)
+        {
+            // Hybrid Step 2: SafeSslHandle inside TlsSession owns SSL*. Dispose the
+            // session so SafeSslHandle.ReleaseHandle performs SSL_shutdown + SSL_free.
+            _session.Dispose();
+        }
+        else
+        {
+            // Fallback (pre-Step-2 path when Ssl was allocated via raw SSL_new).
+            OSsl.SSL_set_quiet_shutdown(Ssl, 1);
+            OSsl.SSL_shutdown(Ssl);
+            OSsl.SSL_free(Ssl);
+        }
 
         if (s_traceReads && (_readCalls > 0 || _writeCalls > 0))
         {
