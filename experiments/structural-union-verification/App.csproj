@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net11.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);SYSLIB0051;CS9057;CS9058;CS9059;SYSLIB1227</NoWarn>
+    <RootNamespace>StructuralUnionVerification</RootNamespace>
+    <AssemblyName>StructuralUnionVerification</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Force the prototype STJ dll to be app-local so it wins over the shared framework's -->
+    <Reference Include="System.Text.Json">
+      <HintPath>D:\code\scratch-runtime\artifacts\bin\System.Text.Json\Release\net11.0\System.Text.Json.dll</HintPath>
+      <Private>true</Private>
+      <ReferenceOutputAssembly>true</ReferenceOutputAssembly>
+      <SpecificVersion>false</SpecificVersion>
+    </Reference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,36 @@
+Q1 — global classifier registration via ConfigureHttpJsonOptions
+---------------------------------------------------------------
+  [ok]   Q1: int literal 42                           -> 200 {"kind":"Int32","value":42}
+  [ok]   Q1: string "hello"                           -> 200 {"kind":"String","value":"hello"}
+  [ok]   Q1: "42" (Web AllowReadFromString)           -> 200 {"kind":"Int32","value":42}
+  [FAIL] Q1: 42.5 (fractional Number)                 -> 400 
+  [ok]   Q1: null literal                             -> 200 {"kind":"other","value":null}
+
+Q2 — [JsonUnion(TypeClassifier)] vs JsonSerializerOptions.TypeClassifiers
+---------------------------------------------------------------------
+  [ok]   Q2a: 42 (attribute→String, global→Int32)             json=42         -> THROWS:JsonException
+  [ok]   Q2b: "42" (attribute→String, global→Int32)           json="42"       -> String
+  [ok]   Q2c: "hello" (both→String)                           json="hello"    -> String
+
+Q3 — Disambiguating overlapping property shapes with structural classifier
+--------------------------------------------------------------------------
+(baseline) plain Cat/Dog
+  [ok]   baseline Cat-only                                       json={"Name":"x"}                                   -> Cat (expected Cat)
+  [ok]   baseline Dog-only                                       json={"Breed":"y"}                                  -> Dog (expected Dog)
+  [ok]   baseline mixed (tie 1:1)                                json={"Name":"x","Breed":"y"}                       -> THROWS:JsonException (expected THROWS:JsonException)
+(S1) [JsonUnmappedMemberHandling(Disallow)] on Cat only
+  [ok]   S1 Cat-only                                             json={"Name":"x"}                                   -> CatS1 (expected CatS1)
+  [ok]   S1 Dog-only                                             json={"Breed":"y"}                                  -> DogS1 (expected DogS1)
+  [ok]   S1 mixed (Cat disq→Dog)                                 json={"Name":"x","Breed":"y"}                       -> DogS1 (expected DogS1)
+(S2) [JsonUnmappedMemberHandling(Disallow)] on BOTH
+  [ok]   S2 Cat-only                                             json={"Name":"x"}                                   -> CatS2 (expected CatS2)
+  [ok]   S2 Dog-only                                             json={"Breed":"y"}                                  -> DogS2 (expected DogS2)
+  [ok]   S2 mixed (both disq)                                    json={"Name":"x","Breed":"y"}                       -> THROWS:JsonException (expected THROWS:JsonException)
+(S3) required string Species on Cat with [JsonPropertyName("species")]
+  [ok]   S3 with species→Cat                                     json={"species":"cat","Name":"x"}                   -> CatS3 (expected CatS3)
+  [ok]   S3 no species,Name only→Dog                             json={"Name":"x"}                                   -> DogS3 (expected DogS3)
+  [ok]   S3 Dog-only                                             json={"Breed":"y"}                                  -> DogS3 (expected DogS3)
+  [ok]   S3 mixed no species→Dog                                 json={"Name":"x","Breed":"y"}                       -> DogS3 (expected DogS3)
+  [ok]   S3 mixed with species→Cat                               json={"species":"cat","Name":"x","Breed":"y"}       -> CatS3 (expected CatS3)
+
+TOTAL: pass=21, fail=1
