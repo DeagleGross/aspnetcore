@@ -1,21 +1,21 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Internal;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets.DirectSsl;
 
 namespace Microsoft.AspNetCore.Hosting;
 
-/// <summary>
-/// <see cref="IWebHostBuilder" /> extension methods to configure the Socket transport to be used by Kestrel.
-/// </summary>
 public static partial class WebHostBuilderSocketExtensions
 {
     /// <summary>
-    /// Specify Sockets as the transport to be used by Kestrel.
+    /// Specify Direct Socket Transport with native OpenSSL integration as the transport to be used by Kestrel.
+    /// This bypasses SslStream and integrates OpenSSL directly at the socket transport layer for zero-copy TLS processing.
     /// </summary>
     /// <param name="hostBuilder">
     /// The Microsoft.AspNetCore.Hosting.IWebHostBuilder to configure.
@@ -23,11 +23,19 @@ public static partial class WebHostBuilderSocketExtensions
     /// <returns>
     /// The Microsoft.AspNetCore.Hosting.IWebHostBuilder.
     /// </returns>
-    public static IWebHostBuilder UseSockets(this IWebHostBuilder hostBuilder)
+    /// <remarks>
+    /// This transport is experimental and bypasses the traditional HttpsConnectionMiddleware.
+    /// It requires OpenSSL (libssl) to be available on the system.
+    /// For HTTPS endpoints, you must call ConfigureHttpsDefaults or set certificates on endpoints manually.
+    /// </remarks>
+    [Experimental("ASPNETCORE_DIRECTSSL_001")]
+    public static IWebHostBuilder UseDirectSslSocketTransport(this IWebHostBuilder hostBuilder)
     {
         return hostBuilder.ConfigureServices(services =>
         {
-            services.TryAddSingleton<IConnectionListenerFactory, SocketTransportFactory>();
+            // Replace the default SocketTransportFactory with DirectSocketTransportFactory
+            // We use AddSingleton here (not TryAddSingleton) to ensure it replaces any existing factory
+            services.AddSingleton<IConnectionListenerFactory, DirectSslTransportFactory>();
 
             services.TryAddSingleton<IMemoryPoolFactory<byte>, DefaultSimpleMemoryPoolFactory>();
             services.AddOptions<SocketTransportOptions>().Configure((SocketTransportOptions options, IMemoryPoolFactory<byte> factory) =>
@@ -39,7 +47,7 @@ public static partial class WebHostBuilderSocketExtensions
     }
 
     /// <summary>
-    /// Specify Sockets as the transport to be used by Kestrel.
+    /// Specify DirectSsl Sockets with native OpenSSL integration as the transport to be used by Kestrel.
     /// </summary>
     /// <param name="hostBuilder">
     /// The Microsoft.AspNetCore.Hosting.IWebHostBuilder to configure.
@@ -50,9 +58,10 @@ public static partial class WebHostBuilderSocketExtensions
     /// <returns>
     /// The Microsoft.AspNetCore.Hosting.IWebHostBuilder.
     /// </returns>
-    public static IWebHostBuilder UseSockets(this IWebHostBuilder hostBuilder, Action<SocketTransportOptions> configureOptions)
+    [Experimental("ASPNETCORE_DIRECTSSL_001", UrlFormat = "https://aka.ms/aspnetcore/directssl")]
+    public static IWebHostBuilder UseDirectSslSockets(this IWebHostBuilder hostBuilder, Action<DirectSslTransportOptions> configureOptions)
     {
-        return hostBuilder.UseSockets().ConfigureServices(services =>
+        return hostBuilder.UseDirectSslSocketTransport().ConfigureServices(services =>
         {
             services.Configure(configureOptions);
         });
