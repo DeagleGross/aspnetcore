@@ -1,0 +1,6 @@
+#nullable enable
+Microsoft.AspNetCore.Hosting.OwnedTransportExtensions
+static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTcp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions
+static Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions.UseIoUring(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
