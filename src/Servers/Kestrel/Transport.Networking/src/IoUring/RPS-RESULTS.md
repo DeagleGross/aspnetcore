@@ -1,5 +1,7 @@
 # Kestrel transport RPS comparison
 
+For the day-by-day story, including wake coalescing, unsuccessful experiments, and final-send/shutdown batching, start with the [development history](history/README.md). This report retains the detailed measurement series.
+
 ## Final-send batching extended to fd TLS and layered BIO (2026-09-28, 17:20 onward)
 
 `NETWORKPROTO_FINAL_SEND=3` now applies to `IoUringTls` and both modes of `IoUringBio`, as well as the existing `IoUringTcp` path. Eligibility is still produced by real output-pipe completion, not by parsing HTTP. The default remains off.

@@ -1,5 +1,7 @@
 # NetworkProto initial comparison and bounded iterations
 
+The [day-by-day transport history](../../Transport.Networking/src/IoUring/history/README.md) connects these original experiments to the later owned-page, TLS, wake-coalescing, and final-send batching work. The measurements below remain the detailed historical record.
+
 ## 2026-09-26: sharded owned-buffer and post-TLS prototypes
 
 Four server cores (`0,2,4,6`), `DOTNET_PROCESSOR_COUNT=4`, twelve disjoint physical client cores, wrk2, 1,200 connections, two 15-second runs per cell. Same 1,024-byte response and real Kestrel HTTP/1.1 parser; `--minimal true` suppresses diagnostic response headers. TLS uses RSA-2048, TLS 1.2 and `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`; resumption is disabled on both paths. Changes remain uncommitted.
