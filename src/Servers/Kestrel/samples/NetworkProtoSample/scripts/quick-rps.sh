@@ -17,9 +17,9 @@ backend=${1:-sockets}
 trials=${TRIALS:-2}
 duration=${DURATION:-15s}
 port=${PORT:-18720}
-output="$sample/results/quick-$backend${NETWORKPROTO_COALESCE:+-coalesced}${NETWORKPROTO_KTLS:+-ktls$NETWORKPROTO_KTLS}${NETWORKPROTO_GUARD_PAGE_READ:+-guard$NETWORKPROTO_GUARD_PAGE_READ}${NETWORKPROTO_FINAL_SEND:+-finalsend$NETWORKPROTO_FINAL_SEND}${RUN_LABEL:+-$RUN_LABEL}-$(date +%Y%m%d-%H%M%S)"
+output="$sample/results/quick-$backend${WORKERS:+-workers$WORKERS}${NETWORKPROTO_COALESCE:+-coalesced}${NETWORKPROTO_KTLS:+-ktls$NETWORKPROTO_KTLS}${NETWORKPROTO_GUARD_PAGE_READ:+-guard$NETWORKPROTO_GUARD_PAGE_READ}${NETWORKPROTO_FINAL_SEND:+-finalsend$NETWORKPROTO_FINAL_SEND}${RUN_LABEL:+-$RUN_LABEL}-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$output"
-dll="$root/artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll"
+dll="${SAMPLE_DLL:-$root/artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll}"
 cert="$sample/.certs-owned/cert.pem"
 key="$sample/.certs-owned/key.pem"
 wrk="$HOME/code/wrk2/wrk"
@@ -51,7 +51,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 printf 'backend\tscheme\tmode\ttrial\toffered_rps\tachieved_rps\n' > "$output/summary.tsv"
 schemes=(http https)
-if [[ $backend == IoUringTls ]]; then schemes=(https); fi
+if [[ $backend == IoUringTls || $backend == epollTls ]]; then schemes=(https); fi
 if [[ -n ${SCHEME:-} ]]; then schemes=("$SCHEME"); fi
 for scheme in "${schemes[@]}"; do
     modes=(close keepalive)
@@ -70,7 +70,7 @@ for scheme in "${schemes[@]}"; do
             if [[ $scheme == https ]]; then tls=(--cacert "$cert" --tlsv1.2 --tls-max 1.2); fi
             LD_LIBRARY_PATH="${SERVER_OPENSSL_LIB:+$SERVER_OPENSSL_LIB:}$LD_LIBRARY_PATH" \
                 DOTNET_PROCESSOR_COUNT=4 taskset -c 0,2,4,6 dotnet "$dll" \
-                --backend "$backend" --scheme "$scheme" --port "$port" \
+                --backend "$backend" --scheme "$scheme" --port "$port" --workers "${WORKERS:-4}" \
                 --cert "$cert" --key "$key" --minimal true --Logging:LogLevel:Default Warning \
                 > "$output/$label-server.log" 2>&1 &
             pid=$!

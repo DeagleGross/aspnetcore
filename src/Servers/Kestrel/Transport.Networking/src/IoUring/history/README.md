@@ -25,7 +25,7 @@ The standalone C servers from September 25 live in the sibling Network-Transport
 
 The newer `IoUringTcp`, `IoUringTls`, and `IoUringBio` backends use four native pumps and the shared owned-page managed adapter. They were added from September 26 onward while preserving the original backend. The new adapter still allocated roughly 4 KB/request in persistent workloads; it did not automatically inherit the older implementation's approximately 1.6 KB/request result.
 
-## Latest available snapshot: end of September 28
+## Afternoon snapshot: September 28, before the epoll experiment
 
 For ongoing comparisons, the chosen native configuration is coalesced wakes plus final-send batching; the fd path also uses the page-return read guard. These remain explicit experiment switches, not a change to their source-code defaults. Historical measurements below are not silently relabeled as measurements with all newer switches enabled.
 
@@ -41,6 +41,8 @@ Every percentage in this convenience table is arithmetic against the stock value
 | Custom-BIO IoUringBio, required kTLS | N/A | N/A | Not supported | Not supported |
 
 Stock, fd userspace TLS, and BIO are from the final matched batching experiment. IoUringTcp's TCP short value is the mean of the earlier 84,008 / 85,485 batching-enabled runs; TCP long is a single 219,731-RPS screen. Its SslStream/TLS cells and the kTLS cells are carried from the earlier coalesced matrix, before final-send batching was benchmarked on those configurations. kTLS later passed the batching correctness checks but was not rebenchmarked. The [September 28 entry](2026-09-28.md) preserves the actual off/on comparisons.
+
+The later evening [native epoll TLS experiment](../../Epoll/README.md) added a separate readiness backend and fresh controls. Its final four-worker mean was 5,744 TLS short / 127,039 TLS long RPS versus stock 3,160 / 95,058. That batch is recorded separately rather than retroactively replacing the afternoon baselines.
 
 ## How to interpret and extend this history
 

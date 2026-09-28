@@ -2,6 +2,23 @@
 
 For the day-by-day story, including wake coalescing, unsuccessful experiments, and final-send/shutdown batching, start with the [development history](history/README.md). This report retains the detailed measurement series.
 
+## Native epoll post-TLS comparison (2026-09-28 evening)
+
+The separate [`Epoll` prototype](../Epoll/README.md) provides `epollTls`: configurable dedicated workers, batched level-triggered epoll readiness, and native fd-bound OpenSSL, without runtime `TlsContext`/`TlsSocketSession`. The table below records the original C engine with a reused managed adapter. The later refactor moved event/TLS state into epoll-local C# code and reduced C to a 176-line shim; it no longer depends on the io_uring engine. It has no custom-BIO or plaintext mode.
+
+Fresh final-binary controls, four server workers/cores, twelve client cores, 1,200 connections, 1,024-byte response, two reversed-order 15-second runs per cell. Native rows enable wake coalescing and final-send batching; fd io_uring also enables the read guard.
+
+| Transport | TLS short mean RPS | TLS long mean RPS |
+|---|---:|---:|
+| Stock Sockets / SslStream | 3,160 | 95,058 |
+| Fd-bound IoUringTls | 5,871 (+85.8%) | 117,357 (+23.5%) |
+| Layered IoUringBio | 5,957 (+88.5%) | 130,442 (+37.2%) |
+| epollTls | 5,744 (+81.8%) | 127,039 (+33.6%) |
+
+Epoll was -2.2% short / +8.3% long against fd io_uring in this batch, not proof of a general backend ranking. These are overloaded achieved rates; one stock short run had 65 timeouts. Native runs had complete worker/page accounting and no wrk error summary, while native peer-abort/teardown counters remained recorded. Do not compare the lower evening stock rates directly with afternoon results as an implementation regression. Final evidence is `NetworkProtoSample/results/epoll-final-matrix-20260928-225808/validated-summary.json`.
+
+The subsequent same-session native-engine versus C#-engine screen averaged 6,848 versus 6,735 TLS-short RPS and 132,853 versus 130,509 TLS-long RPS (about -1.7% / -1.8%). Fresh stock was 3,922 / 102,685. These are separate batches; the old binary was preserved, not reconstructed from remembered results. The [epoll report](../Epoll/README.md#moving-the-state-machine-to-c-same-session-comparison) describes the boundary, controls and limitations. Evidence: `epoll-managed-matrix-20260928-234344/validated-summary.json`.
+
 ## Final-send batching extended to fd TLS and layered BIO (2026-09-28, 17:20 onward)
 
 `NETWORKPROTO_FINAL_SEND=3` now applies to `IoUringTls` and both modes of `IoUringBio`, as well as the existing `IoUringTcp` path. Eligibility is still produced by real output-pipe completion, not by parsing HTTP. The default remains off.

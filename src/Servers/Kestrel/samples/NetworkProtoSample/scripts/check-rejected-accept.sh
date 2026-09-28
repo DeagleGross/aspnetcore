@@ -9,7 +9,9 @@ set -e
 set -u
 output="$sample/results/rejected-accept-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$output"
-for backend in IoUringTls IoUringBio; do
+backends=(IoUringTls IoUringBio epollTls)
+if [[ $# != 0 ]]; then backends=("$1"); fi
+for backend in "${backends[@]}"; do
     for coalesced in 0 1; do
         logfile="$output/$backend-$coalesced.log"
         LD_LIBRARY_PATH="${SERVER_OPENSSL_LIB:-/opt/openssl-3.5.8/lib}:$HOME/.local/lib" \
