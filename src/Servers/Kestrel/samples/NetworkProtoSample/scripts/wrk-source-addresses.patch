@@ -1,0 +1,25 @@
+diff --git a/src/wrk.c b/src/wrk.c
+--- a/src/wrk.c
++++ b/src/wrk.c
+@@ -304,6 +304,21 @@ static int connect_socket(thread *thread, connection *c) {
+     flags = fcntl(fd, F_GETFL, 0);
+     fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+ 
++    if (getenv("WRK_SOURCE_IPS") != NULL && addr->ai_family == AF_INET) {
++        int source_count = atoi(getenv("WRK_SOURCE_IPS"));
++        if (source_count < 1 || source_count > 100) {
++            fprintf(stderr, "WRK_SOURCE_IPS must be between 1 and 100\n");
++            exit(1);
++        }
++        struct sockaddr_in local = {0};
++        local.sin_family = AF_INET;
++        local.sin_addr.s_addr = htonl(0x7f000002 + ((c - thread->cs) % source_count));
++        int enabled = 1;
++        if (setsockopt(fd, IPPROTO_IP, IP_BIND_ADDRESS_NO_PORT, &enabled, sizeof(enabled)) != 0
++            || bind(fd, (struct sockaddr *) &local, sizeof(local)) != 0)
++            goto error;
++    }
++
+     if (connect(fd, addr->ai_addr, addr->ai_addrlen) == -1) {
+         if (errno != EINPROGRESS) goto error;
+     }

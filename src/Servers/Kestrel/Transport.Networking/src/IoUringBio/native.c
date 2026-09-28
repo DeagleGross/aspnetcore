@@ -30,6 +30,7 @@ struct connection {
     int fatal, close_requested;
     int cipher_head, cipher_tail, cipher_bytes, peer_eof, tls_write_done, shutdown_sent;
     int output_length, output_offset;
+    int final_send, corked;
     unsigned char output[OUTPUT_SIZE];
     SSL *ssl;
     const unsigned char *send_data;
@@ -56,6 +57,8 @@ struct engine {
     uint64_t bio_input_bytes, bio_output_bytes, cipher_received, cipher_returned, partial_sends, peer_aborts, tls_errors;
     int require_ktls;
     uint64_t handshakes, ktls_rx, ktls_tx, ktls_rejected;
+    int final_more;
+    uint64_t final_shutdowns, final_close_notify, final_shutdown_failures, final_corks, shutdown_not_connected;
 };
 
 static void emit(struct engine *e, int kind, struct connection *c, int result, int page, int length)
@@ -199,12 +202,22 @@ static void close_connection(struct connection *c)
                 }
             } else {
                 c->shutdown_sent = 1;
+                if (c->final_send) c->e->final_close_notify++;
             }
             }
             if (!c->fatal && c->output_length) { write_start(c); return; }
         }
         c->closing = 1;
-        shutdown(c->fd, SHUT_RDWR);
+        int shutdown_result = shutdown(c->fd, SHUT_RDWR);
+        if (c->final_send) {
+            if (shutdown_result == 0) c->e->final_shutdowns++;
+            else if (errno == ENOTCONN) c->e->shutdown_not_connected++;
+            else {
+                c->e->final_shutdown_failures++;
+                fprintf(stderr, "BIO final shutdown failed: %s\n", strerror(errno));
+            }
+            if (c->ssl && !c->shutdown_sent) c->e->final_shutdown_failures++;
+        }
         if (c->receive_active && !c->cancel_read) {
             c->cancel_read = 1; cancel(c, &c->read, &c->cr);
         }
@@ -304,6 +317,10 @@ static void tls_drive(struct connection *c)
     if (c->send_data && c->tls_write_done) {
         c->send_data = NULL; c->tls_write_done = 0;
         emit(c->e, 4, c, c->send_length, -1, 0);
+        if (c->final_send) {
+            close_connection(c); /* Drain generated close_notify before FIN. */
+            return;
+        }
     }
     while (!c->closing && c->leased < 4) {
         if (!c->cipher_bytes && !c->peer_eof && !SSL_has_pending(c->ssl)) { read_start(c); return; }
@@ -356,6 +373,7 @@ void *np2_create(int port, int tls, const char *cert, const char *key, int cpu, 
         (flags ? IORING_SETUP_DEFER_TASKRUN : 0));
     if (r < 0) { errno = -r; goto failure; }
     e->tls = tls;
+    e->final_more = getenv("NETWORKPROTO_FINAL_SEND") && !strcmp(getenv("NETWORKPROTO_FINAL_SEND"), "3");
     e->require_ktls = getenv("NETWORKPROTO_KTLS") && !strcmp(getenv("NETWORKPROTO_KTLS"), "1");
     if (e->require_ktls && !tls) { errno = EINVAL; goto failure_ring; }
     if (posix_memalign((void **)&e->pages, 4096, (size_t)PAGES * PAGE_SIZE)) { errno = ENOMEM; goto failure_ring; }
@@ -432,6 +450,17 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
             else {
                 if (c->send_data) abort();
                 c->send_data = cmd->data; c->send_length = cmd->length; c->send_offset = 0;
+                c->final_send = cmd->unused == 1;
+                if (c->final_send && e->final_more && !c->corked) {
+                    int one = 1;
+                    if (setsockopt(c->fd, IPPROTO_TCP, TCP_CORK, &one, sizeof(one)) != 0) {
+                        int error = -errno;
+                        c->fatal = 1; c->send_data = NULL;
+                        emit(e, 4, c, error, -1, 0); close_connection(c);
+                        continue;
+                    }
+                    c->corked = 1; e->final_corks++;
+                }
                 if (e->tls) tls_drive(c); else write_start(c);
             }
         } else if (cmd->kind == 2) {
@@ -548,7 +577,10 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
                 if (res > 0 && !c->closing) {
                     c->send_offset += res;
                     if (c->send_offset < c->send_length) write_start(c);
-                    else { c->send_data = NULL; emit(e, 4, c, c->send_length, -1, 0); }
+                    else {
+                        c->send_data = NULL; emit(e, 4, c, c->send_length, -1, 0);
+                        if (c->final_send) close_connection(c);
+                    }
                 } else { c->send_data = NULL; emit(e, 4, c, res < 0 ? res : -EPIPE, -1, 0); }
             }
             done(c);
@@ -576,6 +608,9 @@ void np2_destroy(void *handle)
     if (e->connections) abort();
     fprintf(stdout, "KTLS_METRICS {\"mode\":\"custom-bio\",\"required\":%d,\"handshakes\":%lu,\"rx\":%lu,\"tx\":%lu,\"rejected\":%lu}\n",
         e->require_ktls, e->handshakes, e->ktls_rx, e->ktls_tx, e->ktls_rejected);
+    fflush(stdout);
+    fprintf(stdout, "BIO_FINAL_SEND_METRICS {\"shutdowns\":%lu,\"closeNotify\":%lu,\"shutdownFailures\":%lu,\"corks\":%lu,\"shutdownNotConnected\":%lu}\n",
+        e->final_shutdowns, e->final_close_notify, e->final_shutdown_failures, e->final_corks, e->shutdown_not_connected);
     fflush(stdout);
     io_uring_queue_exit(&e->ring);
     close(e->listener); close(e->wakefd);

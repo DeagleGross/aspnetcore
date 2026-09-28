@@ -1,5 +1,225 @@
 # Kestrel transport RPS comparison
 
+## Final-send batching extended to fd TLS and layered BIO (2026-09-28, 17:20 onward)
+
+`NETWORKPROTO_FINAL_SEND=3` now applies to `IoUringTls` and both modes of `IoUringBio`, as well as the existing `IoUringTcp` path. Eligibility is still produced by real output-pipe completion, not by parsing HTTP. The default remains off.
+
+The implementation differs by backend:
+
+| Backend | What mode 3 does after output completion is known |
+|---|---|
+| Raw IoUringTcp | Existing linked `SEND(MSG_WAITALL | MSG_MORE)` -> `SHUTDOWN(SHUT_WR)` |
+| Fd-bound IoUringTls | Set `TCP_CORK` before the final `SSL_write_ex`; after successful output, send `close_notify` with `SSL_shutdown`, then shut down the socket natively |
+| IoUringBio, HTTPS | Set `TCP_CORK`; send the final application ciphertext through io_uring, generate and drain `close_notify` through the same BIO/send machinery, then shut down the socket |
+| IoUringBio, HTTP | Set `TCP_CORK`; shut down natively after the final send has fully completed |
+
+For fd TLS and layered BIO, modes 1 and 2 both initiate native close after the final send, without corking. Mode 2 does not invent an SQE for `SSL_write_ex` or add a linked shutdown to BIO ciphertext. Mode 3 avoids an extra managed close-command round trip and lets TCP defer the final tail until shutdown; it does not guarantee that the response, TLS alert, and FIN fit in one packet. Larger output still streams, partial sends and TLS retries retain their buffers, and connection resources are freed only after outstanding operations and leases drain.
+
+### Fresh matched results
+
+Original single-source-address wrk2 client, four server cores, twelve separate client cores, 1,200 connections, 1,024-byte responses, 15-second measurements. Native configurations have coalesced wakes enabled; fd TLS also has the page-return read guard enabled. TLS settings and libraries are held fixed. Each cell is the mean of two runs in reversed configuration order, except BIO TLS keep-alive, which has four runs per setting after an additional regression screen. The stock controls were rerun, not carried forward.
+
+Percentages in parentheses are against the fresh stock mean in the same column. These measurements use the quick runner without the separate TCP investigation runner's explicit warmup. Do not directly compare their absolute RPS to the earlier 84k-85k IoUringTcp investigation runs.
+
+| Transport | TCP short RPS | TCP long RPS | TLS short RPS | TLS long RPS |
+|---|---:|---:|---:|---:|
+| Stock Sockets / SslStream | 51,082 | 180,554 | 4,330 | 114,123 |
+| Fd IoUringTls, final batching off | N/A | N/A | 7,402 (+70.9%) | 146,528 (+28.4%) |
+| Fd IoUringTls, final batching on | N/A | N/A | 7,526 (+73.8%) | 146,725 (+28.6%) |
+| Layered IoUringBio, final batching off | 36,760 (-28.0%) | 206,938 (+14.6%) | 7,758 (+79.1%) | 146,703 (+28.5%) |
+| Layered IoUringBio, final batching on | 57,079 (+11.7%) | 213,982 (+18.5%) | 7,723 (+78.3%) | 143,618 (+25.8%) |
+
+The **on/off change**, rather than the total difference from stock, is:
+
+| Backend | TCP short | TCP long | TLS short | TLS long |
+|---|---:|---:|---:|---:|
+| Fd IoUringTls | N/A | N/A | +1.7% | +0.1% |
+| Layered IoUringBio | **+55.3%** | +3.4% | -0.5% | -2.1% |
+
+The large improvement is again in plaintext connection churn, now for the BIO engine's TCP mode: off runs were 35,078 / 38,443 RPS, on runs 56,461 / 57,696. The TLS short runs do not establish a material improvement: fd off/on were 7,442 / 7,363 versus 7,506 / 7,547; BIO off/on were 7,770 / 7,746 versus 7,869 / 7,577. TLS still performs a fresh handshake for each short connection; this change removes neither handshake work nor that exchange. There was no new TLS CPU profile establishing the remaining limiting component.
+
+Keep-alive reported **zero final-send commands and zero cork operations** in every run. Consequently the observed changes there are not evidence of a final-response/FIN batching benefit or delay. BIO TLS keep-alive was 2.1% lower across four off/on runs; that observation remains reported, not dismissed as proven noise or declared a verified regression in the close path. Its initial two-run difference was -3.0%, and the second two-run screen was -1.2%. Stock TLS keep-alive itself ranged from 107,867 to 120,379 RPS. These small-sample measurements on a shared machine do not establish stable percentage gains for persistent connections.
+
+### Reachability, lifetime, and protocol evidence
+
+The optimized TLS short runs reached 111,041 / 112,031 fd final sends and 116,813 / 112,664 BIO final sends, roughly 98% of application receives. Each run had matching final-send, `close_notify`, cork, and native shutdown counts, with no final-shutdown errors. The BIO TCP runs reached 847,374 / 865,877 final sends and successful native shutdowns. Both plaintext and ciphertext page accounting balanced, and all four workers drained in every native benchmark run.
+
+The real output-pipe check now supports fd TLS, BIO TLS, and BIO TCP. Modes 0-3 passed for raw TCP, fd TLS, BIO TCP, BIO TLS, and fd TLS with required RX+TX kTLS. Each mode verified 1 KiB and 4 MiB payloads, byte-for-byte delivery before EOF, and cleanup after a peer reset. The reset case was strengthened to a 16 MiB send with a 4 KiB client receive buffer: 4 MiB with default socket buffers could finish queueing before the intended reset, so it was not a dependable blocked-send case.
+
+Mode 3 also passed isolated native AddressSanitizer/UndefinedBehaviorSanitizer checks for fd TLS, BIO TLS, and required kTLS, including the final-output cases and real Kestrel fragmented-input, 132-request reuse, 40 KiB body, and 3,001-response slow-reader/pipeline checks. An OpenSSL client observed the actual `close_notify` on the real HTTP close path in each configuration. These checks preserve graceful TLS close rather than substituting reset for FIN. Leak detection was disabled in the mixed managed/native sanitizer process; untested cancellation races and TLS versions outside the prototype's TLS 1.2 configuration remain out of scope. kTLS was exercised for correctness here, not benchmarked again.
+
+No wrk errors were reported by the fd/BIO runs in this batch. Stock TCP short reported 15 / 104 timeout counts and one read error in the second run. BIO separately recorded peer aborts at load cutoff but no `tlsErrors`. Offered rates remain deliberately excessive: 200k TCP short, 50k TLS short, 1M keep-alive. These are achieved RPS under overload, not sustainable latency-SLO capacity.
+
+```bash
+cd ~/code/aspnetcore
+scripts=src/Servers/Kestrel/samples/NetworkProtoSample/scripts
+$scripts/check-final-send.sh IoUringTls
+SCHEME=https $scripts/check-final-send.sh IoUringBio
+SCHEME=http $scripts/check-final-send.sh IoUringBio
+NETWORKPROTO_KTLS=1 $scripts/check-final-send.sh IoUringTls
+NETWORKPROTO_FINAL_SEND=3 NETWORKPROTO_COALESCE=1 NETWORKPROTO_GUARD_PAGE_READ=1 \
+    SCHEME=https $scripts/quick-rps.sh IoUringTls
+NETWORKPROTO_FINAL_SEND=3 NETWORKPROTO_COALESCE=1 \
+    $scripts/quick-rps.sh IoUringBio
+```
+
+Evidence: sample `results/tls-bio-final-send-20260928.json` contains all 36 benchmark runs, raw directory references, metrics, and means. Per-run labels are `tls-final-close-*`, `tls-final-long-*`, and `bio-final-tcp-*`. Deterministic checks are in `final-send-check-20260928-173036` through `final-send-check-20260928-173052`; native sanitizer, real HTTP, and TLS-alert evidence is in `tls-final-integration-20260928-173152`.
+
+## Final send plus write shutdown experiment (2026-09-28, 16:55 onward)
+
+The TCP output adapter can tell the native pump that a send contains the last output bytes when `PipeReader.ReadAsync()` returns `IsCompleted`, the read is not cancelled, and the segment is the last nonempty segment in that read. It does not inspect HTTP headers or assume a response means the connection is finished. If output completion is not yet known, the existing close path remains in use.
+
+The experiment is opt-in via `NETWORKPROTO_FINAL_SEND`:
+
+| Value | Behavior for an eligible final TCP send |
+|---|---|
+| Unset / `0` | Existing managed send-completion -> close-command path |
+| `1` | Native send CQE handler initiates shutdown after all final bytes are sent |
+| `2` | `SEND(MSG_WAITALL)` with `IOSQE_IO_LINK` -> `SHUTDOWN(SHUT_WR)` |
+| `3` | Same linked pair, adding `MSG_MORE` to the final send so the following shutdown can flush the tail with the FIN |
+
+This is a **send + write-shutdown** chain, not a premature fd `CLOSE`. Descriptor/buffer ownership still waits for terminal send, shutdown, receive and cancellation completions. A partial linked send cancels the shutdown link and the remaining bytes are retried after the linked operations have drained. `MSG_WAITALL` is required for the linked-send short-result behavior, as described in the [liburing send documentation](https://man7.org/linux/man-pages/man3/io_uring_prep_send.3.html).
+
+The managed/native ABI uses the command's previously unused integer as a final-send hint. Both SQEs are prepared together; the code ensures space for both before adding the link head. If the managed send continuation requests close before the linked shutdown CQE arrives, it waits for the pending shutdown instead of racing a second one against it.
+
+This initial stage gated mode 3 to the raw `IoUringTcp` engine, including SslStream above that raw transport. The later fd-TLS and BIO extension is described above. It is not enabled by default.
+
+### Results with the original single-source-address client
+
+Same 4 server / 12 client cores, 1,200 connections, 1,024-byte response, 200k offered RPS, 3-second warmup and 15-second measurement. The diagnostic multiple-source-address client was **not** used.
+
+| Configuration | Short-connection achieved RPS | Evidence |
+|---|---:|---|
+| Native shutdown on final-send CQE, mode 1 | 49,985 | Initial single-run screen |
+| Kernel-linked send/shutdown, mode 2 | 39,381 | Initial single-run screen |
+| Stock Sockets | 70,465 / 65,033 | Two-order confirmation controls |
+| Default IoUringTcp, final hint disabled | 40,865 / 46,204 | Two-order confirmation controls |
+| Linked send + `MSG_MORE`, initial mode 3 | 81,198 / 82,877 | Two-order confirmation; later tightened pending-shutdown ownership |
+| Linked send + `MSG_MORE`, final mode 3 | **84,008 / 85,485** | Final drain-aware implementation |
+| Default IoUringTcp, final control afterward | 39,304 | Drift control |
+| Stock Sockets, final control afterward | 58,735 | Drift control |
+
+The final mode-3 runs had only **31 / 62 client-side TIME_WAIT entries**, versus approximately 13.4k-13.6k for the default path. Client system CPU dropped from approximately 158-160 CPU seconds to 67-69 CPU seconds per 15-second load. No TIME_WAIT-overflow events occurred in these confirmation runs.
+
+The distinction matters: removing the managed close round trip alone was insufficient. Even a linked send can deliver the response before the peer sees FIN. Mode 3 also changes when TCP pushes the known-final bytes, greatly reducing client-first closure in this experiment. This is evidence that response/FIN sequencing materially affected the original short-connection regression, not proof that every network or workload benefits.
+
+No wrk socket/HTTP errors were reported in the mode-3 confirmation runs. Stock reported overload timeouts. Native shutdown CQEs in the final two runs included 140 / 64 `ENOTCONN` results among approximately 1.4 million linked operations per run: those connections were no longer connected when shutdown executed. They remained logged and propagated, not treated as successful shutdowns. New logs classify this exact errno under `shutdownNotConnected`; other unexpected shutdown errors remain separate. Therefore these are not entirely error-free native teardown runs. All worker/page summaries completed and all receive pages returned.
+
+The environment remained shared and overloaded; corrected latency grew to seconds. Do not claim the difference versus stock as sustainable capacity or combine these numbers with a baseline from a different session.
+
+### Lifetime and behavior checks
+
+`FinalSendCheck` exercises the real output pipe as the producer of the final hint. It completes a 1 KiB or 4 MiB output buffer, delays client reads, verifies every byte and EOF ordering, then resets a client during another backpressured 4 MiB send. Modes 0-3 passed. The linked-mode counters establish that final hints, cancelled links, and an actual partial-send path were reached. Native final-send code also passed an AddressSanitizer/UndefinedBehaviorSanitizer run; leak detection was disabled in the mixed .NET/native process.
+
+Real Kestrel HTTP and SslStream/HTTPS keep-alive checks passed with mode 3: fragmented input, a page-spanning header, 132 requests on the same connection, pipelining and explicit close. A single-run keep-alive screen was 217,751 RPS with the option off versus 219,731 with it on; this is a no-obvious-regression screen, not a keep-alive improvement claim. Many low-concurrency responses finish sending before output completion is known and legitimately use the original close path.
+
+```bash
+cd ~/code/aspnetcore
+source activate.sh
+dotnet build src/Servers/Kestrel/samples/NetworkProtoSample/NetworkProtoSample.csproj -c Release --no-restore
+src/Servers/Kestrel/samples/NetworkProtoSample/scripts/check-final-send.sh
+NETWORKPROTO_FINAL_SEND=3 \
+    src/Servers/Kestrel/samples/NetworkProtoSample/scripts/tcp-short-investigation.sh IoUringTcp 200000 final-send
+```
+
+The new path does not hard-code HTTP close semantics, does not use reset/zero-linger as an optimization, does not change other transports, and leaves the old behavior selectable. It remains experimental: non-Linux portability, every possible cancellation race, and broader latency/backpressure workloads are not established.
+
+Evidence: `NetworkProtoSample/results/tcp-short-finalsend-*/`, `results/final-send-check-20260928-170045/`, `results/final-send-check-20260928-170508/`, `results/final-send-check-20260928-170722/`, and the aggregate `results/final-send-confirm-20260928.json` for the earlier two-order screen. The final drain-aware runs are `tcp-short-finalsend-drained-r1-20260928-170725` and `tcp-short-finalsend-drained-r2-20260928-170745`.
+
+## TCP short-connection regression investigation (2026-09-28 afternoon)
+
+The committed transport implementation at `9e06793bd5` was kept unchanged. The investigation compared stock Sockets with new `IoUringTcp`, using coalesced wakes for the latter. HTTPS/SslStream is not involved in this plaintext case. Native fast-path alternatives and a diagnostic wrk2 build were confined to ignored `artifacts/tmp/tcp-short-probes/`.
+
+**Main finding: client-side source-port/TIME_WAIT pressure is a major contributor to the observed short-connection RPS gap. It is not established that the server has an intrinsic 40k-RPS ceiling.** Server close scheduling differs materially and likely contributes to which endpoint actively closes first. This is still a real end-to-end behavior difference; it must not simply be dismissed as an irrelevant benchmark artifact.
+
+### Fresh reproduction and CPU evidence
+
+Four server cores, twelve distinct client cores, 1,200 connections, 3-second warmup, 1-second settling interval, 15-second measurement, 1,024-byte real Kestrel response. Offered rate 200k unless stated.
+
+| Unmodified client, one source address | Stock Sockets | IoUringTcp |
+|---|---:|---:|
+| First pair, achieved RPS | 71,647 | 41,287 |
+| Client system CPU seconds over the 15-second load | 61.23 | 157.95 |
+| Server CPU microseconds/completed request | 47.0 | 66.2 |
+| Later confirmation pair, achieved RPS | 52,489 | 38,188 |
+| Client-side TIME_WAIT after that load | 936 | 13,748 |
+| Server-side TIME_WAIT after that load | 12,659 | 3,582 |
+
+At a matched 30k offered rate, both achieved about 29.2k and consumed approximately 80 server CPU microseconds/request. IoUringTcp did not allocate more managed bytes at that equal-load point (about 11.8k versus stock 13.5k bytes/request). Allocation totals vary with the load regime. Thus allocation or HTTP parsing alone does not explain the high-load gap.
+
+The high-load prototype used only about 2.7 server cores, while wrk2 used about 10.6 of its twelve client cores, predominantly system CPU. The four ring pumps each consumed roughly 30% of a core, not a single saturated pump. `pidstat` showed scheduling wait as well. Process CPU does not include all kernel/background work.
+
+Targeted `perf` sampling of only the server/client processes found large client-side kernel hotspots in the io_uring case: `__inet_hash_connect`, `__inet_check_established`, connection-table spinlocks and `tcp_twsk_unique`, with stacks rooted in wrk2's `connect()`. The first two alone accounted for roughly 23% of combined sampled CPU in that profiled run. These are real on-CPU samples, not EventPipe thread-wall-time samples; profiled RPS is not used as a benchmark result.
+
+The machine's unmodified ephemeral port range was 32768-60999, `tcp_tw_reuse=2`, and `tcp_tw_reuse_delay=1000`. Although loopback reuse is enabled, finding/reusing a suitable tuple still has costs and timing constraints. Merely counting client connect errors misses expensive successful connects.
+
+### Causal probe: spread client source addresses, leave servers unchanged
+
+An isolated wrk2 variant binds connections across eight loopback source addresses, using `IP_BIND_ADDRESS_NO_PORT` so port allocation still occurs at connect time. The same modified client is used against both servers. No sysctl, interface configuration, or transport code changes were made. This is a different client topology, not a transparent replacement for the original benchmark.
+
+Each clean run started after a 65-second pause to avoid carrying prior TIME_WAIT pressure into the comparison. Neither TCP TIME_WAIT overflow nor TW-kill counters increased. Order was reversed in the second pair.
+
+| Eight-source diagnostic | Stock Sockets | Unchanged IoUringTcp |
+|---|---:|---:|
+| Pair 1 RPS | 61,050 | 66,714 |
+| Pair 2 RPS | 60,453 | 65,053 |
+| Mean RPS | 60,752 | 65,884 |
+| Server CPU us/request, range | 55.6-55.6 | 52.9-53.1 |
+| Client system CPU seconds, range | 61.4-62.0 | 54.3-55.7 |
+| Client-side TIME_WAIT, range | 2,427-2,872 | 111,720-111,721 |
+| Server-side TIME_WAIT, range | 110,901-111,006 | 24-31 |
+
+Stock reported 29/72 timeout counts in these overloaded runs; the io_uring client reported none. The result does not establish a universal 8.4% server improvement, but it does show that the original large loss disappears when client source-port pressure is relieved. The kernel profile, endpoint state distribution, and intervention agree on the mechanism.
+
+An earlier 100-address exploratory probe approached the global 131,072 TIME_WAIT limit. Its favorable numbers are not used as confirmation; the eight-address repeats above explicitly checked overflow counters instead.
+
+### Why close scheduling is a plausible transport-side contributor
+
+The prototype's normal output path crosses from managed output reading to a native send command, then back through send completion, then queues a close command. After native terminal completion, managed disposal queues another command to free the connection. Stock's socket send loop can continue directly from a completed send into shutdown without that same dedicated-pump command cycle.
+
+wrk2 reconnects as soon as it parses a response carrying `Connection: close`; it does not wait for the server FIN first. If the server FIN arrives later, the client can become the active closer and hold TIME_WAIT/source-port state. The observed endpoint distribution is consistent with this difference. We did not packet-trace exact FIN timings or isolate which individual managed handoff dominates, so that attribution remains narrower than a proven per-line latency breakdown.
+
+### Small isolated implementation probes
+
+| Probe, ordinary single-source client | Achieved RPS | Finding |
+|---|---:|---|
+| Immediate nonblocking send on the ring worker, async fallback | 42,047 | Removing send SQEs did not remove the gap. |
+| Shutdown-driven receive termination without explicit receive-cancel SQE | 40,592 | Fewer cancellation operations did not remove the gap. |
+| Nonblocking accepted sockets | 41,158 | No material improvement in this screen. |
+| 120 rather than 1,200 client connections | 31,033 | Lower concurrency did not fix the source-port issue. |
+| One ring pump rather than four | 26,381 | Collapsing the transport onto one core was worse. |
+
+These are exploratory one-run probes, not shipping changes or evidence to promote those alternatives. No reset/zero-linger shortcut or HTTP-specific close rule was introduced.
+
+### What to do next
+
+1. Keep the single-source short test as an end-to-end connection-turnover workload, but also benchmark multiple source addresses or separate client machines, inspect client kernel CPU, and track TIME_WAIT pressure. Do not infer server capacity from RPS alone.
+2. If single-source turnover parity is required, investigate reducing the response-completion-to-FIN delay. A transport command that combines a final send with shutdown is only valid once the output pipe actually signals completion; do not parse `Connection: close` in the transport or close every connection after one write.
+3. Reduce lifecycle command/scheduler handoffs and pool completion/page wrappers only after profiling those costs. The immediate-send probe shows that removing one SQE is insufficient on its own.
+4. Do not change graceful closes to abortive resets simply to improve a benchmark. Close semantics and client behavior are part of the comparison.
+
+There is no evidence from this investigation that changing Kestrel's HTTP parser is the right fix. We have established a major churn-related bottleneck and demonstrated comparable end-to-end throughput with source-port pressure controlled; we have not implemented a general server-side fix for the original single-source workload.
+
+### Evidence and reproduction
+
+- `NetworkProtoSample/results/tcp-short-native-profile-20260928-133047/`: process-scoped `perf.data`, reports, and server/client logs. Sampling used the already installed `/usr/lib/linux-tools-6.8.0-138/perf`; no machine profiling settings changed.
+- `results/tcp-short-*-20260928-13*/`: metrics deltas, per-thread CPU/context-switch samples, client CPU, load output, and applicable TIME_WAIT/netstat snapshots.
+- `results/tcp-short-investigation-20260928.json`: aggregate validated measurements.
+- `scripts/tcp-short-investigation.sh`: direct stock/IoUringTcp comparison; accepts backend, offered rate, and label. `WRK2`, `CONNECTIONS`, and `SAMPLE_DLL` select diagnostic variants.
+- `scripts/wrk-source-addresses.patch`: source-address diagnostic to apply to a separate copy of the already monotonic-clock-patched wrk2 checkout. The ordinary client was not modified.
+
+```bash
+cd ~/code/aspnetcore
+scripts=src/Servers/Kestrel/samples/NetworkProtoSample/scripts
+$scripts/tcp-short-investigation.sh sockets 200000 stock
+$scripts/tcp-short-investigation.sh IoUringTcp 200000 uring
+# Diagnostic client was built separately under artifacts/tmp/tcp-short-probes/wrk2:
+WRK2="$PWD/artifacts/tmp/tcp-short-probes/wrk2/wrk" WRK_SOURCE_IPS=8 \
+    $scripts/tcp-short-investigation.sh IoUringTcp 200000 uring-eight-sources
+```
+
+The native transport source and native baseline binary were unchanged in the source-address confirmation runs. Only investigative scripts, this report, and ignored artifacts were added for this task.
+
 ## Post-fix coalesced rerun (2026-09-28, 12:37 onward)
 
 Per user request, only coalesced configurations were rerun after the rejected-accept cleanup fix. **Stock and non-coalesced rows below are carried forward from the earlier same-day matrix**, not freshly measured controls. Percentages use that earlier stock mean; environmental drift limits direct conclusions about differences between old and new rows.

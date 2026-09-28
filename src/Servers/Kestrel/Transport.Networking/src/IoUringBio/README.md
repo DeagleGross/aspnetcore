@@ -39,6 +39,14 @@ An explicit activation probe is now available via `NETWORKPROTO_KTLS=1`: it requ
 
 TLS reserves 32 MiB of ciphertext pages plus 32 MiB of plaintext pages per worker, as well as connection state including a 32 KiB output buffer. This is intentionally a simple bounded-pool prototype, not a minimal-memory implementation.
 
+### Optional final-send batching
+
+`NETWORKPROTO_FINAL_SEND=3` enables batching only when the managed output pipe identifies a send as its last output. The native engine sets `TCP_CORK` before that send. For TLS, it drains the final application's ciphertext, generates and drains `close_notify`, then initiates socket shutdown without waiting for a separate managed close command. For plaintext, shutdown follows the final send completion directly. Native operations and page leases must still drain before freeing the connection.
+
+Unlike the raw `IoUringTcp` experiment, this BIO implementation does not link a send SQE to a shutdown SQE. The batching mechanism is corking plus native close sequencing, not premature descriptor close or reset. Modes 1 and 2 both select native final-send close without corking; unset or `0` preserves the existing behavior. No HTTP parsing or unconditional response-per-connection rule is added.
+
+The fresh off/on comparison improved this engine's TCP short mean from 36,760 to 57,079 RPS (+55.3%), but TLS short was essentially unchanged (7,758 to 7,723). TLS keep-alive was 2.1% lower across four runs per setting despite zero final sends/cork operations; that remains an observed comparison, not a proven close-path regression. Keep the feature opt-in. See the [full matched results and lifetime evidence](../IoUring/RPS-RESULTS.md#final-send-batching-extended-to-fd-tls-and-layered-bio-2026-09-28-1720-onward), rather than comparing this batch to the historical results below.
+
 ### Copy counters are explicit
 
 `BIO_METRICS` reports:

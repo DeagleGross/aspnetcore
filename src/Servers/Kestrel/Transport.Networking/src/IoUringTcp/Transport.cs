@@ -96,12 +96,15 @@ internal sealed class Engine
     private nint _handle;
     private volatile bool _stop;
     private readonly bool _coalesce = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") == "1";
+    private readonly bool _finalSendEnabled = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") is "1" or "2" or "3";
     private int _wakeScheduled, _pumpThread;
     private long _steps, _wakes, _commandsProcessed, _pages, _bytes;
     private long _rejectedAccepts, _rejectedAcceptsDisposed;
+    private long _sendCommands, _finalSendCommands;
     private int _pendingRejections;
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
+    internal bool FinalSendEnabled => _finalSendEnabled;
 
     internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted, bool layered)
     {
@@ -170,6 +173,14 @@ internal sealed class Engine
                     if (commands[count].Kind == 4)
                     {
                         _connections.Remove(commands[count].Connection);
+                    }
+                    if (commands[count].Kind == 1)
+                    {
+                        _sendCommands++;
+                        if (commands[count].Unused != 0)
+                        {
+                            _finalSendCommands++;
+                        }
                     }
                     count++;
                 }
@@ -261,7 +272,8 @@ internal sealed class Engine
                     sendSqes = counters[2], pollSqes = counters[3], cqes = counters[4],
                     nativeSubmitWaitCalls = counters[5], returnedPages = counters[6], sslReads = counters[7],
                     receiveAdapterCopyBytes = 0, rejectedAccepts = _rejectedAccepts,
-                    rejectedAcceptsDisposed = Interlocked.Read(ref _rejectedAcceptsDisposed)
+                    rejectedAcceptsDisposed = Interlocked.Read(ref _rejectedAcceptsDisposed),
+                    sendCommands = _sendCommands, finalSendCommands = _finalSendCommands
                 }));
                 if (_layered)
                 {
@@ -330,11 +342,13 @@ internal sealed class Connection : DefaultConnectionContext
     private readonly Task _sending;
     private TaskCompletionSource<int>? _send;
     private int _closing;
+    private readonly bool _finalSend;
     internal OwnedPipeReader Input { get; }
 
     internal Connection(Engine engine, ulong id, IPEndPoint endpoint, bool tls) : base($"owned-{id:x}")
     {
         _engine = engine;
+        _finalSend = engine.FinalSendEnabled;
         _id = id;
         LocalEndPoint = endpoint;
         RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 0);
@@ -358,14 +372,24 @@ internal sealed class Connection : DefaultConnectionContext
                 var read = await _output.Reader.ReadAsync().ConfigureAwait(false);
                 try
                 {
+                    var remaining = read.Buffer.Length;
                     foreach (var segment in read.Buffer)
                     {
+                        remaining -= segment.Length;
+                        if (segment.IsEmpty)
+                        {
+                            continue;
+                        }
                         using var pin = segment.Pin();
                         var source = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
                         _send = source;
                         unsafe
                         {
-                            _engine.Enqueue(new Native.Command { Kind = 1, Connection = _id, Data = pin.Pointer, Length = segment.Length });
+                            _engine.Enqueue(new Native.Command
+                            {
+                                Kind = 1, Connection = _id, Data = pin.Pointer, Length = segment.Length,
+                                Unused = _finalSend && read.IsCompleted && !read.IsCanceled && remaining == 0 ? 1 : 0
+                            });
                         }
                         var count = await source.Task.ConfigureAwait(false);
                         if (count < 0)

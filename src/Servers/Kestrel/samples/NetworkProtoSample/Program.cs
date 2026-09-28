@@ -111,6 +111,24 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-final-send", false))
+{
+    if (!((scheme == "http" && backend is "IoUringTcp" or "IoUringBio")
+        || (scheme == "https" && backend is "IoUringTls" or "IoUringBio")))
+    {
+        throw new ArgumentException("Final-send check requires a native TCP or native post-TLS transport.");
+    }
+    try
+    {
+        await FinalSendCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port, certificate);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL final-send: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-rejected-accept", false))
 {
     if (scheme != "https" || backend is not ("IoUringTls" or "IoUringBio"))

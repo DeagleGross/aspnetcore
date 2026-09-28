@@ -17,7 +17,7 @@
 
 /* Prototype ABI: all state mutation is confined to the pump thread. */
 enum { PAGES = 2048, PAGE_SIZE = 16384, EVENTS = 8192 };
-enum { ACCEPT, READ, WRITE, CANCEL, WAKE };
+enum { ACCEPT, READ, WRITE, CANCEL, WAKE, FINAL_SHUTDOWN };
 struct engine;
 struct connection;
 struct op { int kind; struct connection *c; };
@@ -30,8 +30,8 @@ struct connection {
     int fatal, close_requested, read_backpressured;
     SSL *ssl;
     const unsigned char *send_data;
-    int send_length, send_offset;
-    struct op read, write, cr, cw;
+    int send_length, send_offset, final_send, fin_active, fin_complete, corked;
+    struct op read, write, cr, cw, fin;
     struct connection *next, *previous;
 };
 struct engine {
@@ -51,6 +51,10 @@ struct engine {
     uint64_t handshakes, ktls_rx, ktls_tx, ktls_rejected;
     int guard_page_return;
     uint64_t page_read_drives, page_read_skips, tls_read_success, tls_want_read;
+    uint64_t final_send_shutdowns, send_partials;
+    int linked_final_send, final_more;
+    uint64_t final_links, cancelled_links, shutdown_errors, shutdown_after_close, shutdown_not_connected;
+    uint64_t tls_final_shutdowns, tls_close_notify, tls_shutdown_failures, tls_corks;
 };
 
 static void emit(struct engine *e, int kind, struct connection *c, int result, int page, int length)
@@ -101,6 +105,9 @@ static void close_connection(struct connection *c)
 {
     if (!c->closing) {
         c->close_requested = 1;
+        /* The managed send continuation can request close before the linked
+         * shutdown CQE arrives. Do not race a second shutdown against it. */
+        if (c->fin_active && !c->send_data) return;
         if (c->ssl && !c->send_data && c->handshake && !c->fatal) {
             ERR_clear_error();
             int result = SSL_shutdown(c->ssl);
@@ -111,11 +118,22 @@ static void close_connection(struct connection *c)
                     write_start(c);
                     return;
                 }
-                /* Fatal/peer-aborted or close_notify already sent: do not loop. */
+                /* Do not retry TLS after a fatal error. Report failed alerts. */
+                if (c->final_send) c->e->tls_shutdown_failures++;
+            } else if (c->final_send) {
+                c->e->tls_close_notify++;
             }
         }
         c->closing = 1;
-        shutdown(c->fd, SHUT_RDWR);
+        int shutdown_result = shutdown(c->fd, SHUT_RDWR);
+        if (c->ssl && c->final_send) {
+            if (shutdown_result == 0) c->e->tls_final_shutdowns++;
+            else if (errno == ENOTCONN) c->e->shutdown_not_connected++;
+            else {
+                c->e->shutdown_errors++;
+                fprintf(stderr, "TLS final shutdown failed: %s\n", strerror(errno));
+            }
+        }
         if (c->receive_active && !c->cancel_read) {
             c->cancel_read = 1; cancel(c, &c->read, &c->cr);
         }
@@ -148,17 +166,34 @@ static void read_start(struct connection *c)
 static void write_start(struct connection *c)
 {
     if (c->closing || c->write_active) return;
+    int linked = !c->ssl && c->final_send && c->e->linked_final_send;
+    if (linked && io_uring_sq_space_left(&c->e->ring) < 2) {
+        /* Do not submit a link head without its successor in the same batch. */
+        int result = io_uring_submit(&c->e->ring);
+        c->e->enters++;
+        if (result < 0 || io_uring_sq_space_left(&c->e->ring) < 2) abort();
+    }
     struct io_uring_sqe *s = sqe(c->e);
     if (c->ssl) {
         io_uring_prep_poll_add(s, c->fd, POLLOUT);
         c->e->polls++;
     } else {
+        /* MSG_WAITALL makes a short linked send fail the chain, cancelling
+         * shutdown. MSG_MORE defers the known-final tail's push until FIN. */
         io_uring_prep_send(s, c->fd, c->send_data + c->send_offset,
-            c->send_length - c->send_offset, MSG_NOSIGNAL);
+            c->send_length - c->send_offset,
+            MSG_NOSIGNAL | (linked ? MSG_WAITALL : 0) | (linked && c->e->final_more ? MSG_MORE : 0));
+        if (linked) s->flags |= IOSQE_IO_LINK;
         c->e->sends++;
     }
     io_uring_sqe_set_data(s, &c->write);
     c->write_active = 1; c->ops++;
+    if (linked) {
+        struct io_uring_sqe *shutdown_sqe = sqe(c->e);
+        io_uring_prep_shutdown(shutdown_sqe, c->fd, SHUT_WR);
+        io_uring_sqe_set_data(shutdown_sqe, &c->fin);
+        c->fin_active = 1; c->ops++; c->e->final_links++;
+    }
 }
 static int ssl_result(struct connection *c, int result)
 {
@@ -207,6 +242,10 @@ static void tls_drive(struct connection *c)
         if (c->send_offset != c->send_length) { tls_drive(c); return; }
         c->send_data = NULL;
         emit(c->e, 4, c, c->send_length, -1, 0);
+        if (c->final_send) {
+            close_connection(c); /* SSL close_notify before transport FIN. */
+            return;
+        }
         /* No speculative empty SSL_read following each response. */
         if (!SSL_has_pending(c->ssl)) { read_start(c); return; }
     }
@@ -262,6 +301,9 @@ void *np2_create(int port, int tls, const char *cert, const char *key, int cpu, 
         (flags ? IORING_SETUP_DEFER_TASKRUN : 0));
     if (r < 0) { errno = -r; goto failure; }
     e->tls = tls;
+    const char *final_mode = getenv("NETWORKPROTO_FINAL_SEND");
+    e->linked_final_send = final_mode && (!strcmp(final_mode, "2") || !strcmp(final_mode, "3"));
+    e->final_more = final_mode && !strcmp(final_mode, "3");
     e->guard_page_return = getenv("NETWORKPROTO_GUARD_PAGE_READ") && !strcmp(getenv("NETWORKPROTO_GUARD_PAGE_READ"), "1");
     e->require_ktls = getenv("NETWORKPROTO_KTLS") && !strcmp(getenv("NETWORKPROTO_KTLS"), "1");
     if (e->require_ktls && !tls) { errno = EINVAL; goto failure_ring; }
@@ -331,6 +373,17 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
             else {
                 if (c->send_data) abort();
                 c->send_data = cmd->data; c->send_length = cmd->length; c->send_offset = 0;
+                c->final_send = cmd->unused == 1;
+                if (e->tls && c->final_send && e->final_more && !c->corked) {
+                    int one = 1;
+                    if (setsockopt(c->fd, IPPROTO_TCP, TCP_CORK, &one, sizeof(one)) != 0) {
+                        int error = -errno;
+                        c->fatal = 1; c->send_data = NULL;
+                        emit(e, 4, c, error, -1, 0); close_connection(c);
+                        continue;
+                    }
+                    c->corked = 1; e->tls_corks++;
+                }
                 if (e->tls) tls_drive(c); else write_start(c);
             }
         } else if (cmd->kind == 2) {
@@ -385,6 +438,7 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
                     c->e = e; c->fd = res; c->read_page = -1;
                     c->read = (struct op){ READ, c }; c->write = (struct op){ WRITE, c };
                     c->cr = (struct op){ CANCEL, c }; c->cw = (struct op){ CANCEL, c };
+                    c->fin = (struct op){ FINAL_SHUTDOWN, c };
                     c->next = e->connections;
                     if (c->next) c->next->previous = c;
                     e->connections = c;
@@ -425,6 +479,32 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
                 }
             }
             done(c);
+        } else if (op->kind == FINAL_SHUTDOWN) {
+            c->fin_active = 0; c->ops--;
+            if (res == 0) {
+                e->final_send_shutdowns++;
+                c->fin_complete = 1;
+                if (!c->closing && !c->write_active && !c->send_data) close_connection(c);
+            } else if (res == -ECANCELED) {
+                e->cancelled_links++;
+                if (!c->closing && c->send_data && !c->write_active)
+                    write_start(c);
+            } else if (!c->closing) {
+                if (res == -ENOTCONN) {
+                    e->shutdown_not_connected++;
+                    if (e->shutdown_not_connected <= 4)
+                        fprintf(stderr, "final-send shutdown after peer disconnected: %s\n", strerror(-res));
+                } else {
+                    e->shutdown_errors++;
+                    if (e->shutdown_errors <= 4)
+                        fprintf(stderr, "final-send shutdown error: %s\n", strerror(-res));
+                }
+                emit(e, 3, c, res, -1, 0);
+                close_connection(c);
+            } else {
+                e->shutdown_after_close++;
+            }
+            done(c);
         } else if (op->kind == WRITE) {
             c->write_active = 0; c->ops--;
             if (e->tls) {
@@ -433,8 +513,18 @@ int np2_step(void *handle, struct command *commands, int count, struct event **o
             } else if (c->send_data) {
                 if (res > 0 && !c->closing) {
                     c->send_offset += res;
-                    if (c->send_offset < c->send_length) write_start(c);
-                    else { c->send_data = NULL; emit(e, 4, c, c->send_length, -1, 0); }
+                    if (c->send_offset < c->send_length) {
+                        e->send_partials++;
+                        if (!c->fin_active) write_start(c);
+                    }
+                    else {
+                        c->send_data = NULL;
+                        emit(e, 4, c, c->send_length, -1, 0);
+                        if (c->final_send && (!e->linked_final_send || c->fin_complete)) {
+                            if (!e->linked_final_send) e->final_send_shutdowns++;
+                            close_connection(c);
+                        }
+                    }
                 } else { c->send_data = NULL; emit(e, 4, c, res < 0 ? res : -EPIPE, -1, 0); }
             }
             done(c);
@@ -458,6 +548,10 @@ void np2_destroy(void *handle)
         e->require_ktls, e->handshakes, e->ktls_rx, e->ktls_tx, e->ktls_rejected);
     fprintf(stdout, "TLS_READ_METRICS {\"guard\":%d,\"pageDrives\":%lu,\"pageSkips\":%lu,\"sslReads\":%lu,\"successfulReads\":%lu,\"wantReadAllOperations\":%lu}\n",
         e->guard_page_return, e->page_read_drives, e->page_read_skips, e->tls_reads, e->tls_read_success, e->tls_want_read);
+    fflush(stdout);
+    fprintf(stdout, "FINAL_SEND_METRICS {\"shutdowns\":%lu,\"partialSends\":%lu,\"links\":%lu,\"cancelledLinks\":%lu,\"shutdownErrors\":%lu,\"shutdownAfterClose\":%lu,\"shutdownNotConnected\":%lu,\"tlsFinalShutdowns\":%lu,\"tlsCloseNotify\":%lu,\"tlsShutdownFailures\":%lu,\"tlsCorks\":%lu}\n",
+        e->final_send_shutdowns, e->send_partials, e->final_links, e->cancelled_links, e->shutdown_errors, e->shutdown_after_close, e->shutdown_not_connected,
+        e->tls_final_shutdowns, e->tls_close_notify, e->tls_shutdown_failures, e->tls_corks);
     fflush(stdout);
     io_uring_queue_exit(&e->ring);
     close(e->listener); close(e->wakefd);

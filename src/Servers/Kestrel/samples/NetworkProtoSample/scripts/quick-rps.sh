@@ -17,7 +17,7 @@ backend=${1:-sockets}
 trials=${TRIALS:-2}
 duration=${DURATION:-15s}
 port=${PORT:-18720}
-output="$sample/results/quick-$backend${NETWORKPROTO_COALESCE:+-coalesced}${NETWORKPROTO_KTLS:+-ktls$NETWORKPROTO_KTLS}${NETWORKPROTO_GUARD_PAGE_READ:+-guard$NETWORKPROTO_GUARD_PAGE_READ}${RUN_LABEL:+-$RUN_LABEL}-$(date +%Y%m%d-%H%M%S)"
+output="$sample/results/quick-$backend${NETWORKPROTO_COALESCE:+-coalesced}${NETWORKPROTO_KTLS:+-ktls$NETWORKPROTO_KTLS}${NETWORKPROTO_GUARD_PAGE_READ:+-guard$NETWORKPROTO_GUARD_PAGE_READ}${NETWORKPROTO_FINAL_SEND:+-finalsend$NETWORKPROTO_FINAL_SEND}${RUN_LABEL:+-$RUN_LABEL}-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$output"
 dll="$root/artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll"
 cert="$sample/.certs-owned/cert.pem"
