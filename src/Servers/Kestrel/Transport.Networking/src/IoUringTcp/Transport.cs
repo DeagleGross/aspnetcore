@@ -16,10 +16,11 @@ using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging;
+using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
-internal sealed class TransportFactory(bool tls, string cert, string key, ILoggerFactory logging) : IConnectionListenerFactory
+internal sealed class TransportFactory(bool tls, string cert, string key, ILoggerFactory logging, bool layered = false) : IConnectionListenerFactory
 {
     public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
@@ -27,7 +28,7 @@ internal sealed class TransportFactory(bool tls, string cert, string key, ILogge
         {
             throw new NotSupportedException("Prototype supports IPv4 loopback only.");
         }
-        var listener = new Listener(ip, tls, cert, key, logging.CreateLogger("NetworkProto.Owned"));
+        var listener = new Listener(ip, tls, cert, key, logging.CreateLogger("NetworkProto.Owned"), layered);
         await listener.StartAsync().ConfigureAwait(false);
         return listener;
     }
@@ -37,11 +38,11 @@ internal sealed class Listener : IConnectionListener
 {
     private readonly Channel<ConnectionContext> _accepted = Channel.CreateUnbounded<ConnectionContext>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Engine[] _engines;
-    internal Listener(IPEndPoint endpoint, bool tls, string cert, string key, ILogger logger)
+    internal Listener(IPEndPoint endpoint, bool tls, string cert, string key, ILogger logger, bool layered)
     {
         EndPoint = endpoint;
         var cpus = (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") ?? "0,2,4,6").Split(',').Select(int.Parse).ToArray();
-        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, cert, key, logger, _accepted.Writer)).ToArray();
+        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, cert, key, logger, _accepted.Writer, layered)).ToArray();
     }
     public EndPoint EndPoint { get; }
     internal Task StartAsync() => Task.WhenAll(_engines.Select(engine => engine.Started));
@@ -82,6 +83,7 @@ internal sealed class Listener : IConnectionListener
 
 internal sealed class Engine
 {
+    private static readonly Lock ShutdownReportGate = new();
     private readonly ConcurrentQueue<Native.Command> _commands = new();
     private readonly Dictionary<ulong, Connection> _connections = new();
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -89,19 +91,23 @@ internal sealed class Engine
     private readonly ChannelWriter<ConnectionContext> _accepted;
     private readonly ILogger _logger;
     private readonly bool _tls;
+    private readonly bool _layered;
     private readonly IPEndPoint _endpoint;
     private nint _handle;
     private volatile bool _stop;
     private readonly bool _coalesce = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") == "1";
     private int _wakeScheduled, _pumpThread;
     private long _steps, _wakes, _commandsProcessed, _pages, _bytes;
+    private long _rejectedAccepts, _rejectedAcceptsDisposed;
+    private int _pendingRejections;
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted)
+    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted, bool layered)
     {
         _endpoint = endpoint;
         _tls = tls;
+        _layered = layered;
         _logger = logger;
         _accepted = accepted;
         using (ExecutionContext.SuppressFlow())
@@ -118,7 +124,7 @@ internal sealed class Engine
             return;
         }
         Interlocked.Increment(ref _wakes);
-        var error = Native.Wake(_handle);
+        var error = _layered ? BioNative.Wake(_handle) : Native.Wake(_handle);
         if (error < 0)
         {
             throw new IOException($"io_uring eventfd wake failed: {error}");
@@ -128,7 +134,14 @@ internal sealed class Engine
     internal void Stop()
     {
         _stop = true;
-        Native.Wake(_handle);
+        if (_layered)
+        {
+            BioNative.Wake(_handle);
+        }
+        else
+        {
+            Native.Wake(_handle);
+        }
     }
 
     private unsafe void Run(int cpu, string cert, string key)
@@ -136,15 +149,17 @@ internal sealed class Engine
         try
         {
             _pumpThread = Environment.CurrentManagedThreadId;
-            _handle = Native.Create(_endpoint.Port, _tls ? 1 : 0, cert, key, cpu,
-                Environment.GetEnvironmentVariable("NETWORKPROTO_DEFER") == "0" ? 0 : 1, out var error);
+            var flags = Environment.GetEnvironmentVariable("NETWORKPROTO_DEFER") == "0" ? 0 : 1;
+            _handle = _layered
+                ? BioNative.Create(_endpoint.Port, _tls ? 1 : 0, cert, key, cpu, flags, out var error)
+                : Native.Create(_endpoint.Port, _tls ? 1 : 0, cert, key, cpu, flags, out error);
             if (_handle == 0)
             {
                 throw new Win32Exception(error, "Owned transport initialization failed.");
             }
             _started.SetResult();
             var commands = new Native.Command[1024];
-            while (!_stop || _connections.Count != 0 || !_commands.IsEmpty)
+            while (!_stop || _connections.Count != 0 || !_commands.IsEmpty || Volatile.Read(ref _pendingRejections) != 0)
             {
                 // Clear before draining: a concurrent producer either joins this
                 // batch or leaves a wake for the upcoming native wait.
@@ -161,7 +176,9 @@ internal sealed class Engine
                 _commandsProcessed += count;
                 fixed (Native.Command* pointer = commands)
                 {
-                    var length = Native.Step(_handle, pointer, count, out var events);
+                    var length = _layered
+                        ? BioNative.Step(_handle, pointer, count, out var events)
+                        : Native.Step(_handle, pointer, count, out events);
                     _steps++;
                     if (length < 0)
                     {
@@ -176,7 +193,12 @@ internal sealed class Engine
                             _connections.Add(item.Connection, c);
                             if (!_accepted.TryWrite(c))
                             {
+                                _rejectedAccepts++;
+                                Interlocked.Increment(ref _pendingRejections);
                                 c.Abort(new ConnectionAbortedException("Listener stopped."));
+                                // Kestrel never received this connection, so it
+                                // cannot dispose it. Wait off-pump for native completion.
+                                _ = DisposeRejectedAsync(c);
                             }
                         }
                         else if (_connections.TryGetValue(item.Connection, out var c))
@@ -217,19 +239,51 @@ internal sealed class Engine
                     }
                 }
             }
-            var counters = new ulong[8];
-            fixed (ulong* p = counters)
+            // Native stdout and Console have independent locks. Keep complete
+            // per-worker reports together so their JSON cannot interleave.
+            lock (ShutdownReportGate)
             {
-                Native.Stats(_handle, p);
+                var counters = new ulong[8];
+                fixed (ulong* p = counters)
+                {
+                    if (_layered)
+                    {
+                        BioNative.Stats(_handle, p);
+                    }
+                    else
+                    {
+                        Native.Stats(_handle, p);
+                    }
+                }
+                Console.WriteLine("OWNED_METRICS " + JsonSerializer.Serialize(new {
+                    cpu, tls = _tls, layered = _layered, coalesced = _coalesce, stepInterop = _steps, wakeInterop = _wakes, commands = _commandsProcessed,
+                    pages = _pages, bytes = _bytes, acceptSqes = counters[0], receiveSqes = counters[1],
+                    sendSqes = counters[2], pollSqes = counters[3], cqes = counters[4],
+                    nativeSubmitWaitCalls = counters[5], returnedPages = counters[6], sslReads = counters[7],
+                    receiveAdapterCopyBytes = 0, rejectedAccepts = _rejectedAccepts,
+                    rejectedAcceptsDisposed = Interlocked.Read(ref _rejectedAcceptsDisposed)
+                }));
+                if (_layered)
+                {
+                    var bioCounters = new ulong[7];
+                    fixed (ulong* p = bioCounters)
+                    {
+                        BioNative.BioStats(_handle, p);
+                    }
+                    Console.WriteLine("BIO_METRICS " + JsonSerializer.Serialize(new
+                    {
+                        cpu, tls = _tls, inputBioCopyBytes = bioCounters[0], outputBioCopyBytes = bioCounters[1],
+                        ciphertextPagesReceived = bioCounters[2], ciphertextPagesReturned = bioCounters[3],
+                        partialCiphertextSends = bioCounters[4], peerAborts = bioCounters[5], tlsErrors = bioCounters[6],
+                        memoryBioStagingBytes = 0
+                    }));
+                    BioNative.Destroy(_handle);
+                }
+                else
+                {
+                    Native.Destroy(_handle);
+                }
             }
-            Console.WriteLine("OWNED_METRICS " + JsonSerializer.Serialize(new {
-                cpu, tls = _tls, coalesced = _coalesce, stepInterop = _steps, wakeInterop = _wakes, commands = _commandsProcessed,
-                pages = _pages, bytes = _bytes, acceptSqes = counters[0], receiveSqes = counters[1],
-                sendSqes = counters[2], pollSqes = counters[3], cqes = counters[4],
-                nativeSubmitWaitCalls = counters[5], returnedPages = counters[6], sslReads = counters[7],
-                receiveAdapterCopyBytes = 0
-            }));
-            Native.Destroy(_handle);
             _stopped.SetResult();
         }
         catch (Exception ex)
@@ -238,6 +292,24 @@ internal sealed class Engine
             _started.TrySetException(ex);
             _accepted.TryComplete(ex);
             _stopped.TrySetException(ex);
+        }
+    }
+
+    private async Task DisposeRejectedAsync(Connection connection)
+    {
+        try
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            Interlocked.Increment(ref _rejectedAcceptsDisposed);
+        }
+        catch (Exception error)
+        {
+            _logger.LogError(error, "Failed to dispose a connection rejected after listener shutdown.");
+            _stopped.TrySetException(error);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingRejections);
         }
     }
 

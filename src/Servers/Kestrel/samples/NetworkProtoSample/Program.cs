@@ -15,12 +15,13 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 var backend = builder.Configuration["backend"] ?? "sockets";
-if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls"))
+if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio"))
 {
-    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp or IoUringTls.");
+    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls or IoUringBio.");
 }
 var port = builder.Configuration.GetValue("port", 5443);
 var scheme = builder.Configuration["scheme"] ?? "https";
@@ -52,6 +53,10 @@ if (backend == "IoUringTls")
     builder.WebHost.UseIoUringTls(builder.Configuration["cert"]!, builder.Configuration["key"]!);
 }
 var quiet = builder.Configuration.GetValue("minimal", false);
+if (backend == "IoUringBio")
+{
+    builder.WebHost.UseIoUringBio(scheme == "https", builder.Configuration["cert"] ?? string.Empty, builder.Configuration["key"] ?? string.Empty);
+}
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Listen(IPAddress.Loopback, port, listen =>
@@ -77,7 +82,7 @@ builder.WebHost.ConfigureKestrel(options =>
             }
         });
 
-        if (scheme == "https" && backend != "IoUringTls")
+        if (scheme == "https" && backend is not ("IoUringTls" or "IoUringBio"))
         {
             listen.UseHttps(https =>
             {
@@ -95,7 +100,7 @@ builder.WebHost.ConfigureKestrel(options =>
                 await next(connection);
             });
         }
-        else if (backend == "IoUringTls")
+        else if (scheme == "https")
         {
             listen.Use(next => async connection =>
             {
@@ -106,6 +111,23 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-rejected-accept", false))
+{
+    if (scheme != "https" || backend is not ("IoUringTls" or "IoUringBio"))
+    {
+        throw new ArgumentException("Rejected-accept check requires IoUringTls or IoUringBio with HTTPS.");
+    }
+    try
+    {
+        await RejectedAcceptCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port, certificate!);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL rejected-accept: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 app.MapGet("/", async context =>
 {
     var state = context.Features.Get<ConnectionState>() ?? throw new InvalidOperationException("Missing connection state.");

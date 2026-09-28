@@ -46,10 +46,16 @@ curl_local() {
 
 start_server() {
     local backend="$1" logfile="$2"
+    local openssl_lib="${SERVER_OPENSSL_LIB-/opt/openssl-3.5.8/lib}"
+    if [[ -n "$openssl_lib" && ! -f "$openssl_lib/libssl.so.3" ]]; then
+        echo "Requested OpenSSL library directory is missing: $openssl_lib" >&2
+        return 1
+    fi
     [[ -f "$DLL" ]] || { echo "Build NetworkProtoSample in Release first." >&2; return 1; }
     local prefix=()
     if [[ -n "${SERVER_CPUS:-}" ]]; then prefix=(taskset -c "$SERVER_CPUS"); fi
-    DOTNET_PROCESSOR_COUNT="${SERVER_PROCESSORS:-4}" "${prefix[@]}" dotnet "$DLL" \
+    LD_LIBRARY_PATH="${openssl_lib:+$openssl_lib:}${LD_LIBRARY_PATH:-}" \
+        DOTNET_PROCESSOR_COUNT="${SERVER_PROCESSORS:-4}" "${prefix[@]}" dotnet "$DLL" \
         --backend "$backend" --scheme "$SCHEME" --port "$PORT" --cert "$SAMPLE/.certs/cert.pem" \
         --key "$SAMPLE/.certs/key.pem" --Logging:LogLevel:Default Warning \
         --Logging:LogLevel:NetworkProto.IoUring Information \

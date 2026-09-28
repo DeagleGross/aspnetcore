@@ -13,6 +13,7 @@
     <Compile Include="$(SharedSourceRoot)ServerInfrastructure\DuplexPipe.cs" Link="Internal\DuplexPipe.cs" />
     <None Include="$(IntermediateOutputPath)libnetworkproto.so" Link="libnetworkproto.so" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(IntermediateOutputPath)libnetworkproto2.so" Link="libnetworkproto2.so" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(IntermediateOutputPath)libnetworkprotobio.so" Link="libnetworkprotobio.so" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Target Name="BuildIoUringShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUring/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto.so">
     <Error Condition="!$([MSBuild]::IsOSPlatform('Linux'))" Text="NetworkProto requires Linux and liburing-dev." />
@@ -22,5 +23,9 @@
   <Target Name="BuildOwnedShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUringTcp/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto2.so">
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared -I$HOME/.local/include &quot;$(MSBuildProjectDirectory)/IoUringTcp/native.c&quot; -L$HOME/.local/lib -Wl,-rpath,$HOME/.local/lib -luring -lssl -lcrypto -o &quot;$(IntermediateOutputPath)libnetworkproto2.so&quot;" />
+  </Target>
+  <Target Name="BuildLayeredShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUringBio/native.c" Outputs="$(IntermediateOutputPath)libnetworkprotobio.so">
+    <MakeDir Directories="$(IntermediateOutputPath)" />
+    <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared -I$HOME/.local/include &quot;$(MSBuildProjectDirectory)/IoUringBio/native.c&quot; -L$HOME/.local/lib -Wl,-rpath,$HOME/.local/lib -luring -lssl -lcrypto -o &quot;$(IntermediateOutputPath)libnetworkprotobio.so&quot;" />
   </Target>
 </Project>
