@@ -2,6 +2,23 @@
 
 For the day-by-day story, including wake coalescing, unsuccessful experiments, and final-send/shutdown batching, start with the [development history](history/README.md). This report retains the detailed measurement series.
 
+## C# io_uring engines (2026-09-29)
+
+The newer TCP, fd-TLS and custom-BIO transports now dispatch CQEs and own connection/TLS/page state in C#. Their combined C files decreased from 1,178 to 284 lines; C retains liburing/OpenSSL wrappers and BIO callbacks. The original single-ring experiment and epoll are unchanged. [Architecture, lifetime rules, verification limits, and raw evidence](../IoUringTcp/README.md).
+
+Fresh controls and preserved pre-refactor binaries, same four server/twelve client cores, 1,200 connections, 1 KiB responses and two reversed-order 15-second runs per cell. Coalescing, final-send batching and the fd read guard match between old/new runs.
+
+| Rewritten transport | TCP short RPS | TCP long RPS | TLS short RPS | TLS long RPS |
+|---|---:|---:|---:|---:|
+| Stock Sockets / SslStream | 59,443 | 190,437 | 4,519 | 119,829 |
+| IoUringTcp / SslStream | 76,120 (+28.1%) | 209,512 (+10.0%) | 4,466 (-1.2%) | 130,683 (+9.1%) |
+| Fd IoUringTls | N/A | N/A | 7,781 (+72.2%) | 141,072 (+17.7%) |
+| Layered IoUringBio | 76,496 (+28.7%) | 201,080 (+5.6%) | 8,119 (+79.6%) | 153,437 (+28.0%) |
+
+Against their own preserved C engines, persistent means were 1-4% lower and fd TLS short about 4.9% lower; raw TCP short was +1.6% and BIO TCP short +16%. The rewrite preserves useful throughput but does not establish zero regression. All 48 principal runs had complete worker/page accounting; raw TCP native shutdown still recorded classified `ENOTCONN` results and stock TCP short had timeout counts. These remain overloaded achieved rates, not sustainable capacity.
+
+Required-kTLS managed runs separately averaged 7,285 short / 134,602 long with complete RX+TX activation. The old short-kTLS baseline aborted during cleanup twice, leaving only one valid old short run; no precise paired short-kTLS delta is claimed. Full results, failed attempts, and the unresolved diagnostic 4 KiB send-buffer kTLS boundary are retained in the linked report.
+
 ## Native epoll post-TLS comparison (2026-09-28 evening)
 
 The separate [`Epoll` prototype](../Epoll/README.md) provides `epollTls`: configurable dedicated workers, batched level-triggered epoll readiness, and native fd-bound OpenSSL, without runtime `TlsContext`/`TlsSocketSession`. The table below records the original C engine with a reused managed adapter. The later refactor moved event/TLS state into epoll-local C# code and reduced C to a 176-line shim; it no longer depends on the io_uring engine. It has no custom-BIO or plaintext mode.

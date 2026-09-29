@@ -1,23 +1,30 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
-
 using System.Runtime.InteropServices;
-using Abi = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.Native;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio;
 
-internal static unsafe partial class Native
+internal static partial class Native
 {
-    [LibraryImport("networkprotobio", EntryPoint = "np2_create", StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint Create(int port, int tls, string cert, string key, int cpu, int flags, out int error);
-    [LibraryImport("networkprotobio", EntryPoint = "np2_step")]
-    internal static partial int Step(nint engine, Abi.Command* commands, int count, out Abi.Event* events);
-    [LibraryImport("networkprotobio", EntryPoint = "np2_wake")]
-    internal static partial int Wake(nint engine);
-    [LibraryImport("networkprotobio", EntryPoint = "np2_stats")]
-    internal static partial void Stats(nint engine, ulong* counters);
-    [LibraryImport("networkprotobio", EntryPoint = "np2_bio_stats")]
-    internal static partial void BioStats(nint engine, ulong* counters);
-    [LibraryImport("networkprotobio", EntryPoint = "np2_destroy")]
-    internal static partial void Destroy(nint engine);
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Status
+    {
+        public nint Output;
+        public int InputRemaining, OutputRemaining;
+        public ulong InputCopied, OutputCopied;
+    }
+    [LibraryImport("networkprotobio", EntryPoint = "ub_method")]
+    internal static partial nint Method();
+    [LibraryImport("networkprotobio", EntryPoint = "ub_session")]
+    internal static partial nint Session(nint context, nint method, out nint state);
+    [LibraryImport("networkprotobio", EntryPoint = "ub_feed")]
+    internal static partial void Feed(nint state, nint data, int length, int eof);
+    [LibraryImport("networkprotobio", EntryPoint = "ub_status")]
+    internal static partial void GetStatus(nint state, out Status result);
+    [LibraryImport("networkprotobio", EntryPoint = "ub_advance")]
+    internal static partial void Advance(nint state, int count);
+    [LibraryImport("networkprotobio", EntryPoint = "ub_free")]
+    internal static partial void Free(nint state);
+    [LibraryImport("networkprotobio", EntryPoint = "ub_free_method")]
+    internal static partial void FreeMethod(nint method);
 }

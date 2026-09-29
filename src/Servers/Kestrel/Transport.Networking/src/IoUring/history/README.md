@@ -1,6 +1,6 @@
 # io_uring transport development history
 
-This is the chronological story of the experiments, including improvements, unsuccessful approaches, correctness fixes, and the measurements behind them. It covers the earliest preserved Kestrel measurements on September 19 through September 28, 2026. It complements, rather than replaces, the detailed [transport results](../RPS-RESULTS.md) and [original sample investigation](../../../../samples/NetworkProtoSample/RESULTS.md).
+This is the chronological story of the experiments, including improvements, unsuccessful approaches, correctness fixes, and the measurements behind them. It covers the earliest preserved Kestrel measurements on September 19 through September 29, 2026. It complements, rather than replaces, the detailed [transport results](../RPS-RESULTS.md) and [original sample investigation](../../../../samples/NetworkProtoSample/RESULTS.md).
 
 Dates follow the recorded measurement days, not the later commits that collected the work. The early sample's `environment.txt` timestamps place its first iterations on September 19 and 20, using the local UTC+02 calendar. The standalone C report explicitly dates its experiments September 25. No additional dated measurement series was identified for September 21-24; this history does not invent entries for those days.
 
@@ -16,6 +16,7 @@ Approximate changes below are against the stated earlier implementation within t
 | [September 26](2026-09-26.md) | Four-pump owned-buffer Kestrel transports; native fd TLS; wake coalescing | New architectures exceeded stock in several keep-alive/TLS cells, but TCP short still lost. Coalescing improved TLS keep-alive about 7-10% in selected comparisons, with regressions elsewhere; it was not a universal RPS win. |
 | [September 27](2026-09-27.md) | Transport-driven custom BIO; actual kTLS activation | Custom BIO's median TLS keep-alive was about 12% above fd TLS in one matched batch. Verified software kTLS was about 11% slower than equivalent userspace fd TLS on keep-alive. |
 | [September 28](2026-09-28.md) | Guard redundant TLS reads; repair rejected-accept disposal; investigate TCP churn; final-send/shutdown batching | Read guard added about 6-7% in one matched batch. Raw TCP final-send batching took roughly 40k-46k to 84k-85k RPS; BIO TCP improved about 55%. TLS short changed only about +2% for fd TLS and 0% for BIO. |
+| [September 29](2026-09-29.md) | Move newer io_uring TCP, fd TLS and BIO state into C#; retain thin native shims | About 76% less C. Matched persistent means were 1-4% lower; fd TLS short about 5% lower. TCP short gains remained, with raw 76k and BIO 76k RPS. |
 
 ## Three different implementations, not one accumulating speedup
 
@@ -23,7 +24,7 @@ The original `io_uring` backend is the single-ring managed/native Kestrel protot
 
 The standalone C servers from September 25 live in the sibling Network-Transport-Experiments repository. They informed later architecture choices, but use a smaller HTTP implementation and different TLS/workload settings. Their RPS is not directly comparable with Kestrel's.
 
-The newer `IoUringTcp`, `IoUringTls`, and `IoUringBio` backends use four native pumps and the shared owned-page managed adapter. They were added from September 26 onward while preserving the original backend. The new adapter still allocated roughly 4 KB/request in persistent workloads; it did not automatically inherit the older implementation's approximately 1.6 KB/request result.
+The newer `IoUringTcp`, `IoUringTls`, and `IoUringBio` backends initially used four native pumps and a shared owned-page managed adapter. They were added from September 26 onward while preserving the original backend, then moved their pumps/connection state into C# on September 29. The adapter's earlier roughly 4 KB/request persistent allocation did not automatically inherit the older implementation's approximately 1.6 KB/request result.
 
 ## Afternoon snapshot: September 28, before the epoll experiment
 

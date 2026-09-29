@@ -1,15 +1,15 @@
 # IoUringBio: TCP with an optional custom-BIO TLS layer
 
-Non-shipping WSL prototype, measured 2026-09-27. The existing `IoUringTcp` and fd-bound `IoUringTls` native implementations are preserved. This experiment shares their managed listener/owned-PipeReader adapter, but selects a separate native library: `libnetworkprotobio.so`.
+Non-shipping WSL prototype, first measured 2026-09-27. On September 29, the newer io_uring backends moved worker/completion/TLS state into C#. This experiment shares that managed engine and owned-PipeReader adapter; `libnetworkprotobio.so` now contains only BIO callbacks/buffer helpers. The separate `libnetworkproto2.so` provides liburing and OpenSSL wrappers. See the [managed-engine architecture and matched old/new results](../IoUringTcp/README.md).
 
 ## Architecture
 
 ```text
 HTTP mode:
-    io_uring multishot receive -> native page -> PipeReader -> Kestrel
+    io_uring multishot receive -> pinned page -> C# dispatch -> PipeReader -> Kestrel
 
 HTTPS mode:
-    io_uring multishot receive -> ciphertext page queue
+    io_uring multishot receive -> C# ciphertext page queue
         -> custom BIO read -> OpenSSL -> plaintext page -> PipeReader -> Kestrel
 
 HTTPS output:
@@ -29,9 +29,9 @@ An explicit activation probe is now available via `NETWORKPROTO_KTLS=1`: it requ
 
 - Raw receives use ordinary (non-incremental) provided-buffer multishot receive.
 - In TCP mode, those pages become the managed reader's input and are returned on consumption.
-- In TLS mode, ciphertext page IDs form a per-connection queue. The BIO references the existing received pages; no copy into `BIO_s_mem()` occurs.
-- OpenSSL's BIO read interface supplies a destination. The callback copies from the queued ciphertext pages into that destination. Completely consumed pages return to the provided-buffer ring.
-- `SSL_read_ex` writes plaintext directly into a different native page pool. The managed `PipeReader` exposes those same plaintext pages without another payload copy.
+- In TLS mode, ciphertext page IDs form a managed per-connection queue. C# lends one existing received page at a time to the BIO; no copy into `BIO_s_mem()` occurs.
+- OpenSSL's BIO read interface supplies a destination. The native callback copies from the borrowed ciphertext page into that destination. C# observes consumption, returns exhausted pages to the ring, and feeds subsequent pages before retrying OpenSSL.
+- `SSL_read_ex` writes plaintext directly into a different pinned managed page pool. The managed `PipeReader` exposes those same plaintext pages without another payload copy.
 - BIO output copies into a bounded per-connection ciphertext buffer. It must not borrow OpenSSL's pointer after returning success. This buffer remains unchanged until the send's terminal CQE; partial sends advance its offset.
 - Pending output causes BIO retry-write rather than overwriting the buffer. Handshake, application writes, and close-notify all drain through the same send path.
 - Application output pipe storage remains pinned through its native operation's completion. TLS completion is not reported to that sender until generated ciphertext has drained.
@@ -41,7 +41,7 @@ TLS reserves 32 MiB of ciphertext pages plus 32 MiB of plaintext pages per worke
 
 ### Optional final-send batching
 
-`NETWORKPROTO_FINAL_SEND=3` enables batching only when the managed output pipe identifies a send as its last output. The native engine sets `TCP_CORK` before that send. For TLS, it drains the final application's ciphertext, generates and drains `close_notify`, then initiates socket shutdown without waiting for a separate managed close command. For plaintext, shutdown follows the final send completion directly. Native operations and page leases must still drain before freeing the connection.
+`NETWORKPROTO_FINAL_SEND=3` enables batching only when the output pipe identifies a send as its last output. The owning C# pump sets `TCP_CORK` through the native shim. For TLS, it drains the final application's ciphertext, generates and drains `close_notify`, then initiates socket shutdown without waiting for a separate output-loop close command. For plaintext, shutdown follows the final send completion directly. Native operations and page leases must still drain before freeing the connection.
 
 Unlike the raw `IoUringTcp` experiment, this BIO implementation does not link a send SQE to a shutdown SQE. The batching mechanism is corking plus native close sequencing, not premature descriptor close or reset. Modes 1 and 2 both select native final-send close without corking; unset or `0` preserves the existing behavior. No HTTP parsing or unconditional response-per-connection rule is added.
 
@@ -84,7 +84,7 @@ NETWORKPROTO_COALESCE=1 src/Servers/Kestrel/samples/NetworkProtoSample/scripts/q
 
 Use `SCHEME=https` to limit that script to TLS, or `SCHEME=http` for plaintext. The runner retains the same four server cores and twelve separate client cores. It prints results; no service is left running afterward.
 
-## Fresh results
+## Historical September 27 results
 
 All results below use the same sample, 1,024-byte response, HTTP/1.1, four server cores (`0,2,4,6`), twelve client cores, 1,200 connections and 15-second wrk2 runs. All native variants use coalesced wakes. TLS uses TLS 1.2, RSA-2048, AES-128-GCM and disabled resumption, matching the existing sample. These are new controls, not a comparison against yesterday's lower baseline.
 

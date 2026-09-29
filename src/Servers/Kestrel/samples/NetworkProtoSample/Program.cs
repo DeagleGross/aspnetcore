@@ -119,6 +119,23 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-uring-lifecycle", false))
+{
+    if (backend is not ("IoUringTcp" or "IoUringTls" or "IoUringBio"))
+    {
+        throw new ArgumentException("Ring lifecycle check requires a managed io_uring backend.");
+    }
+    try
+    {
+        await RingLifecycleCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL ring lifecycle: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-epoll-lifecycle", false))
 {
     if (backend != "epollTls")
