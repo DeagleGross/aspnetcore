@@ -10,7 +10,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class TransportFactory(string certificate, string key, int workers, ILoggerFactory logging) : IConnectionListenerFactory
+internal sealed class TransportFactory(string certificate, string key, int workers, ILoggerFactory logging, bool tls = true) : IConnectionListenerFactory
 {
     public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
@@ -18,7 +18,7 @@ internal sealed class TransportFactory(string certificate, string key, int worke
         if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip
             || !IPAddress.IsLoopback(ip.Address))
         {
-            throw new NotSupportedException("EpollTls requires IPv4 loopback and a fixed nonzero port.");
+            throw new NotSupportedException("Epoll requires IPv4 loopback and a fixed nonzero port.");
         }
         var cpus = Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") is { } setting
             ? setting.Split(',').Select(value => int.Parse(value, CultureInfo.InvariantCulture)).ToArray()
@@ -30,9 +30,9 @@ internal sealed class TransportFactory(string certificate, string key, int worke
         }
         if (Environment.GetEnvironmentVariable("NETWORKPROTO_KTLS") is { } ktls && ktls != "0")
         {
-            throw new NotSupportedException("EpollTls currently supports userspace TLS only; unset NETWORKPROTO_KTLS.");
+            throw new NotSupportedException("The epoll prototypes do not support kTLS; unset NETWORKPROTO_KTLS.");
         }
-        var listener = new Listener(ip, cpus, certificate, key, logging.CreateLogger("NetworkProto.Epoll"));
+        var listener = new Listener(ip, cpus, tls, certificate, key, logging.CreateLogger("NetworkProto.Epoll"));
         await listener.StartAsync().ConfigureAwait(false);
         return listener;
     }
@@ -44,10 +44,10 @@ internal sealed class Listener : IConnectionListener
     private readonly Engine[] _engines;
     private int _unbound;
 
-    internal Listener(IPEndPoint endpoint, int[] cpus, string certificate, string key, ILogger logger)
+    internal Listener(IPEndPoint endpoint, int[] cpus, bool tls, string certificate, string key, ILogger logger)
     {
         EndPoint = endpoint;
-        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, certificate, key, _accepted.Writer, logger)).ToArray();
+        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, certificate, key, _accepted.Writer, logger)).ToArray();
     }
 
     public EndPoint EndPoint { get; }

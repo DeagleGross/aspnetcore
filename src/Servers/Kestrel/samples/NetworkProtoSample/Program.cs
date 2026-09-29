@@ -19,15 +19,19 @@ using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 var backend = builder.Configuration["backend"] ?? "sockets";
-if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls"))
+if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls" or "epollTcp"))
 {
-    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls, IoUringBio or epollTls.");
+    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls, IoUringBio, epollTls or epollTcp.");
 }
 var port = builder.Configuration.GetValue("port", 5443);
-var scheme = builder.Configuration["scheme"] ?? "https";
+var scheme = builder.Configuration["scheme"] ?? (backend == "epollTcp" ? "http" : "https");
 if (scheme is not ("http" or "https"))
 {
     throw new ArgumentException("Use --scheme http or --scheme https.");
+}
+if (backend == "epollTcp" && scheme != "http")
+{
+    throw new ArgumentException("The epollTcp sample is HTTP-only; use epollTls for native TLS.");
 }
 using var certificate = scheme == "https"
     ? X509Certificate2.CreateFromPemFile(
@@ -60,6 +64,10 @@ if (backend == "epollTls")
     }
     builder.WebHost.UseEpollTls(builder.Configuration["cert"]!, builder.Configuration["key"]!, builder.Configuration.GetValue("workers", 4));
 }
+if (backend == "epollTcp")
+{
+    builder.WebHost.UseEpollTcp(builder.Configuration.GetValue("workers", 4));
+}
 var quiet = builder.Configuration.GetValue("minimal", false);
 if (backend == "IoUringBio")
 {
@@ -73,7 +81,7 @@ builder.WebHost.ConfigureKestrel(options =>
         listen.Use(next => async connection =>
         {
             if ((backend == "io_uring" && !connection.ConnectionId.StartsWith("io-uring-", StringComparison.Ordinal))
-                || ((backend.StartsWith("IoUring", StringComparison.Ordinal) || backend == "epollTls") && !connection.ConnectionId.StartsWith("owned-", StringComparison.Ordinal)))
+                || ((backend.StartsWith("IoUring", StringComparison.Ordinal) || backend is "epollTls" or "epollTcp") && !connection.ConnectionId.StartsWith("owned-", StringComparison.Ordinal)))
             {
                 throw new InvalidOperationException("Configured backend does not match the actual connection.");
             }
@@ -119,6 +127,23 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-epoll-tcp", false))
+{
+    if (backend != "epollTcp")
+    {
+        throw new ArgumentException("Raw epoll TCP check requires epollTcp.");
+    }
+    try
+    {
+        await EpollTcpCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL epoll TCP: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-uring-lifecycle", false))
 {
     if (backend is not ("IoUringTcp" or "IoUringTls" or "IoUringBio"))
@@ -138,13 +163,13 @@ if (builder.Configuration.GetValue("check-uring-lifecycle", false))
 }
 if (builder.Configuration.GetValue("check-epoll-lifecycle", false))
 {
-    if (backend != "epollTls")
+    if (backend is not ("epollTls" or "epollTcp"))
     {
-        throw new ArgumentException("Epoll lifecycle check requires epollTls.");
+        throw new ArgumentException("Epoll lifecycle check requires epollTls or epollTcp.");
     }
     try
     {
-        await EpollLifecycleCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port);
+        await EpollLifecycleCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port, backend == "epollTls");
     }
     catch (Exception error)
     {
@@ -155,7 +180,7 @@ if (builder.Configuration.GetValue("check-epoll-lifecycle", false))
 }
 if (builder.Configuration.GetValue("check-final-send", false))
 {
-    if (!((scheme == "http" && backend is "IoUringTcp" or "IoUringBio")
+    if (!((scheme == "http" && backend is "IoUringTcp" or "IoUringBio" or "epollTcp")
         || (scheme == "https" && backend is "IoUringTls" or "IoUringBio" or "epollTls")))
     {
         throw new ArgumentException("Final-send check requires a native TCP or native post-TLS transport.");

@@ -9,9 +9,24 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Hosting;
 
-/// <summary>Registers the non-shipping native epoll TLS experiment.</summary>
+/// <summary>Registers the non-shipping epoll transport experiments.</summary>
 public static class EpollTransportExtensions
 {
+    /// <summary>Uses nonblocking TCP I/O on dedicated managed epoll workers without TLS.</summary>
+    /// <param name="builder">The host builder.</param>
+    /// <param name="workerCount">The number of dedicated socket workers.</param>
+    /// <returns>The host builder.</returns>
+    public static IWebHostBuilder UseEpollTcp(this IWebHostBuilder builder, int workerCount = 4)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(workerCount);
+        return builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IConnectionListenerFactory>();
+            services.AddSingleton<IConnectionListenerFactory>(provider => new TransportFactory(
+                string.Empty, string.Empty, workerCount, provider.GetRequiredService<ILoggerFactory>(), tls: false));
+        });
+    }
+
     /// <summary>Uses native OpenSSL on dedicated managed epoll workers and exposes post-TLS plaintext to Kestrel.</summary>
     /// <param name="builder">The host builder.</param>
     /// <param name="certificatePath">The PEM certificate chain file.</param>

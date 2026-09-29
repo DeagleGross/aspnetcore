@@ -2,6 +2,7 @@
   <PropertyGroup>
     <TargetFramework>$(DefaultNetCoreTargetFramework)</TargetFramework>
     <NoDefaultLaunchSettingsFile>true</NoDefaultLaunchSettingsFile>
+    <DefaultItemExcludes>$(DefaultItemExcludes);results\**</DefaultItemExcludes>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\Transport.Networking\src\Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.csproj" />

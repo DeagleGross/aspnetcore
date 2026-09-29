@@ -52,6 +52,7 @@ trap 'exit 143' TERM
 printf 'backend\tscheme\tmode\ttrial\toffered_rps\tachieved_rps\n' > "$output/summary.tsv"
 schemes=(http https)
 if [[ $backend == IoUringTls || $backend == epollTls ]]; then schemes=(https); fi
+if [[ $backend == epollTcp ]]; then schemes=(http); fi
 if [[ -n ${SCHEME:-} ]]; then schemes=("$SCHEME"); fi
 for scheme in "${schemes[@]}"; do
     modes=(close keepalive)

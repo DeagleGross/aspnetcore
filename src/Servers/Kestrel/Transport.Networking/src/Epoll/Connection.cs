@@ -35,9 +35,12 @@ internal sealed class Connection : DefaultConnectionContext
         Input = new OwnedPipeReader(page => engine.Enqueue(new(Engine.CommandKind.ReturnPage, id, Page: page)));
         Transport = new DuplexPipe(Input, _output.Writer);
         ConnectionClosed = _closed.Token;
-        var tls = new TlsFeature();
-        Features.Set<ITlsConnectionFeature>(tls);
-        Features.Set<ITlsHandshakeFeature>(tls);
+        if (engine.Tls)
+        {
+            var tls = new TlsFeature();
+            Features.Set<ITlsConnectionFeature>(tls);
+            Features.Set<ITlsHandshakeFeature>(tls);
+        }
         _sending = SendLoop();
     }
 

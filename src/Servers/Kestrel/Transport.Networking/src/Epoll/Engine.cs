@@ -21,7 +21,7 @@ internal sealed class Engine
     internal readonly record struct Command(CommandKind Kind, ulong Id = 0, nint Data = 0, int Length = 0, int Page = 0, bool Final = false);
 
     private readonly ConcurrentQueue<Command> _commands = new();
-    private readonly Dictionary<ulong, TlsConnection> _connections = new();
+    private readonly Dictionary<ulong, ConnectionState> _connections = new();
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Lock _wakeGate = new();
@@ -44,19 +44,21 @@ internal sealed class Engine
     internal readonly bool CorkFinal = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") == "3";
     internal readonly Counters Metrics = new();
     internal readonly ILogger Logger;
+    internal bool Tls { get; }
 
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger)
+    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger)
     {
         _endpoint = endpoint;
         _cpu = cpu;
+        Tls = tls;
         _accepted = accepted;
         Logger = logger;
         using (ExecutionContext.SuppressFlow())
         {
-            new Thread(() => Run(certificate, key)) { IsBackground = true, Name = $"Epoll TLS CPU {cpu}" }.Start();
+            new Thread(() => Run(certificate, key)) { IsBackground = true, Name = $"Epoll {(tls ? "TLS" : "TCP")} CPU {cpu}" }.Start();
         }
     }
 
@@ -87,17 +89,23 @@ internal sealed class Engine
             _pumpThread = Environment.CurrentManagedThreadId;
             ArgumentOutOfRangeException.ThrowIfNegative(_sendBufferSize);
             Native.Check(Native.SetCpu(_cpu), "affinity");
-            _context = Native.CreateContext(certificate, key, out var error);
-            if (_context == 0)
+            if (Tls)
             {
-                throw new IOException($"OpenSSL context creation failed: 0x{error:x}.");
+                _context = Native.CreateContext(certificate, key, out var error);
+                if (_context == 0)
+                {
+                    throw new IOException($"OpenSSL context creation failed: 0x{error:x}.");
+                }
             }
             _epoll = Native.Check(Native.Create(), "create");
             _wake = Native.Check(Native.CreateWake(), "eventfd");
             _listener = Native.Check(Native.Listen(_endpoint.Port), "listen");
             Control(Native.Add, _wake, Native.Readable, WakeId);
             Control(Native.Add, _listener, Native.Readable, ListenerId);
-            Console.WriteLine($"EPOLL_TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" cpu={_cpu} batch=128 managed=true");
+            if (Tls)
+            {
+                Console.WriteLine($"EPOLL_TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" cpu={_cpu} batch=128 managed=true");
+            }
             _started.SetResult();
             var events = new Native.ReadyEvent[128];
             long nextSweep = 0;
@@ -124,7 +132,7 @@ internal sealed class Engine
                     }
                     _iterations++;
                     var now = Environment.TickCount64;
-                    if (now >= nextSweep)
+                    if (Tls && now >= nextSweep)
                     {
                         nextSweep = now + 1000;
                         foreach (var state in _connections.Values.ToArray())
@@ -226,20 +234,29 @@ internal sealed class Engine
                 {
                     Native.Check(Native.SetSocketOption(fd, Native.SocketOption.SendBuffer, _sendBufferSize), "SO_SNDBUF");
                 }
-                session = Native.CreateSession(_context, fd, out var error);
-                if (session == 0)
+                if (Tls)
                 {
-                    throw new IOException($"OpenSSL session creation failed: 0x{error:x}.");
+                    session = Native.CreateSession(_context, fd, out var error);
+                    if (session == 0)
+                    {
+                        throw new IOException($"OpenSSL session creation failed: 0x{error:x}.");
+                    }
                 }
             }
             catch
             {
-                Native.FreeSession(session);
+                if (session != 0)
+                {
+                    Native.FreeSession(session);
+                }
                 CloseDescriptor(ref fd);
                 Metrics.Closed++;
                 throw;
             }
-            var state = new TlsConnection(this, checked(++_nextId), fd, session);
+            var id = checked(++_nextId);
+            ConnectionState state = Tls
+                ? new TlsConnection(this, id, fd, session)
+                : new TcpConnection(this, id, fd);
             _connections.Add(state.Id, state);
             state.Drive(Native.Readable | Native.Writable);
         }
@@ -319,7 +336,7 @@ internal sealed class Engine
         Native.Check(Native.Control(_epoll, operation, fd, events, id), "control");
     }
 
-    internal Connection Publish(TlsConnection state)
+    internal Connection Publish(ConnectionState state)
     {
         var connection = new Connection(this, state.Id, _endpoint);
         if (!_accepted.TryWrite(connection))
@@ -420,12 +437,13 @@ internal sealed class Engine
     {
         Console.WriteLine("OWNED_METRICS " + JsonSerializer.Serialize(new
         {
-            cpu = _cpu, tls = true, layered = false, epoll = true, managedEngine = true, coalesced = _coalesced,
+            cpu = _cpu, tls = Tls, layered = false, epoll = true, managedEngine = true, coalesced = _coalesced,
             pumpIterations = _iterations, stepInterop = 0, wakeInterop = _wakes, commands = _commandsProcessed,
             pages = _pagesRead, bytes = _bytes, acceptSqes = 0, receiveSqes = 0, sendSqes = 0, pollSqes = 0, cqes = 0,
             nativeSubmitWaitCalls = 0, returnedPages = Metrics.ReturnedPages, sslReads = Metrics.SslReads,
             receiveAdapterCopyBytes = 0, rejectedAccepts = _rejectedAccepts, rejectedAcceptsDisposed = _rejectedDisposed,
-            sendCommands = _sendCommands, finalSendCommands = _finalSendCommands
+            sendCommands = _sendCommands, finalSendCommands = _finalSendCommands,
+            liveConnections = _connections.Count, leasedPages = PageCount - _freePages.Count
         }));
         Console.WriteLine("EPOLL_METRICS " + JsonSerializer.Serialize(Metrics, new JsonSerializerOptions { IncludeFields = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         Console.WriteLine("EPOLL_FINAL_SEND_METRICS " + JsonSerializer.Serialize(new
@@ -441,5 +459,6 @@ internal sealed class Engine
         public long SslReads, ReadSuccess, SslWrites, WriteSuccess, WantRead, WantWrite, WriteRetries, ReturnedPages;
         public long Closed, PeerAborts, TlsErrors, HandshakeTimeouts, ShutdownTimeouts, ReadPauses, PageResumes;
         public long Corks, FinalShutdowns, CloseNotify, ShutdownFailures, NotConnected;
+        public long RecvCalls, SendCalls, RecvBytes, SendBytes, ReceiveWouldBlock, SendWouldBlock, PartialSends, ReadEofs, SocketErrors;
     }
 }

@@ -28,20 +28,29 @@ import assert from 'node:assert/strict';
 const log = fs.readFileSync(process.argv[2], 'utf8');
 const mode = Number(process.argv[3]);
 const backend = process.argv[4], tls = process.argv[5] === 'https';
+const epollBackend = backend === 'epollTls' || backend === 'epollTcp';
 assert.equal([...log.matchAll(/^PASS final-send:/gm)].length, 3);
 const parse = prefix => [...log.matchAll(new RegExp('^' + prefix + ' (.*)$', 'gm'))].map(m => JSON.parse(m[1]));
 const managed = parse('OWNED_METRICS');
-const native = parse(backend === 'epollTls' ? 'EPOLL_FINAL_SEND_METRICS' : backend === 'IoUringBio' ? 'BIO_FINAL_SEND_METRICS' : 'FINAL_SEND_METRICS');
+const native = parse(epollBackend ? 'EPOLL_FINAL_SEND_METRICS' : backend === 'IoUringBio' ? 'BIO_FINAL_SEND_METRICS' : 'FINAL_SEND_METRICS');
 const sum = (rows, name) => rows.reduce((total, row) => total + row[name], 0);
 assert.equal(managed.length, Number(process.argv[6]));
 assert.equal(native.length, Number(process.argv[6]));
 assert.equal(sum(managed, 'finalSendCommands'), mode ? 3 : 0);
 assert.equal(sum(managed, 'pages'), sum(managed, 'returnedPages'));
-if (backend === 'epollTls') {
+if (epollBackend) {
     assert.equal(sum(native, 'shutdownFailures'), 0);
     const epoll = parse('EPOLL_METRICS');
     assert.equal(epoll.length, managed.length);
     assert.equal(sum(epoll, 'accepts'), sum(epoll, 'closed'));
+    if (backend === 'epollTcp') {
+        assert.equal(sum(epoll, 'handshakes'), 0);
+        assert.equal(sum(epoll, 'sslReads'), 0);
+        assert.equal(sum(epoll, 'sslWrites'), 0);
+        assert.equal(sum(native, 'closeNotify'), 0);
+        assert.ok(sum(epoll, 'sendCalls') > 0);
+        assert.ok(managed.every(w => !w.tls && !w.liveConnections && !w.leasedPages));
+    }
 } else if (backend !== 'IoUringBio') assert.equal(sum(native, 'shutdownErrors'), 0);
 if (backend === 'IoUringBio') {
     const bio = parse('BIO_METRICS');
@@ -54,7 +63,7 @@ if (mode) {
     if (tls && backend !== 'epollTls') assert.equal(sum(native, backend === 'IoUringTls' ? 'tlsCloseNotify' : 'closeNotify'), 2);
 }
 if (backend === 'epollTls') assert.equal(sum(native, 'closeNotify'), 2);
-if (tls || backend === 'IoUringBio') {
+if (tls || backend === 'IoUringBio' || backend === 'epollTcp') {
     assert.equal(sum(native, backend === 'IoUringTls' ? 'tlsCorks' : 'corks'), mode === 3 ? 3 : 0);
 }
 if (mode >= 2 && backend === 'IoUringTcp') {

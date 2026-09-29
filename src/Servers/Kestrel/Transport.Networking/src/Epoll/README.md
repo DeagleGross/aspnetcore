@@ -1,10 +1,10 @@
-# EpollTls: a managed event loop with a thin native TLS shim
+# Epoll TCP and TLS: managed workers with a thin native shim
 
 This is a non-shipping Linux experiment beside the io_uring transports. It follows the fd-bound TLS/event-pump idea in [dotnet/aspnetcore#67912](https://github.com/dotnet/aspnetcore/pull/67912), but uses native OpenSSL `SSL_CTX` and `SSL` objects directly. It does not depend on the runtime's experimental `TlsContext` or `TlsSocketSession` types and does not run the PR's implementation.
 
-The transport is **post-TLS only**. There is no plaintext mode, custom BIO, client transport, or TLS callback/selection framework. The existing `IoUringBio` implementation is separate; an epoll custom-BIO/TCP layering experiment is deferred.
+There are now two separate connection modes: **`epollTcp`**, using nonblocking `recv`/`send`, and **`epollTls`**, using fd-bound OpenSSL and exposing post-TLS plaintext. They share the epoll worker/command/page plumbing, not a TLS implementation. There is no custom BIO, client transport, or TLS callback/selection framework. The existing `IoUringBio` implementation is separate; an epoll custom-BIO layering experiment remains deferred.
 
-The initial implementation put the event dispatch and TLS state machine in C. The September 28 late-evening refactor moves these into epoll-specific C# code. The native file is now 176 lines instead of approximately 520. There is no native engine, connection list, page pool, command dispatcher, timeout scan, or metrics registry. Epoll no longer uses any implementation type from `IoUringTcp`; that backend's source is unchanged from before the epoll addition. A shared base engine is deliberately deferred.
+The initial implementation put the event dispatch and TLS state machine in C. The September 28 late-evening refactor moved these into epoll-specific C# code, reducing the native file from approximately 520 to 176 lines. Raw TCP adds just two Linux-call wrappers, bringing it to 190 lines. There is no native engine, connection list, page pool, command dispatcher, timeout scan, or metrics registry. Epoll uses no implementation type from `IoUringTcp`; a common base engine across transports remains deferred.
 
 ## Architecture
 
@@ -13,16 +13,16 @@ N dedicated managed pump threads, each running Engine.Run in C#:
 
     process typed send / page-return / close commands
         -> Native.Wait -> epoll_wait(up to 128 readiness events)
-        -> dispatch readiness IDs to TlsConnection.Drive
-        -> Native.Tls -> one OpenSSL call plus its error result
-        -> C# advances TLS state, manages page leases, completes sends
+        -> dispatch readiness IDs to TcpConnection or TlsConnection
+        -> TCP: recv / send; TLS: one OpenSSL call plus its error result
+        -> C# advances state, manages page leases, completes sends
         -> epoll-local owned PipeReader / output-pipe adapter
         -> normal Kestrel HTTP and application work on the ThreadPool
 ```
 
-Every accepted fd stays with the worker that accepted it. All OpenSSL calls and epoll-interest changes for that connection run on that worker, never concurrently with application threads. Cross-thread commands use eventfd, with epoll's own copy of the optional wake-coalescing policy. A small lifetime gate protects the eventfd against a last producer reaching its wake call after the pump has processed its final command and finished.
+Every accepted fd stays with the worker that accepted it. All socket data I/O, OpenSSL calls where applicable, and epoll-interest changes for that connection run on that worker, never concurrently with application threads. Cross-thread commands use eventfd, with epoll's own copy of the optional wake-coalescing policy. A small lifetime gate protects the eventfd against a last producer reaching its wake call after the pump has processed its final command and finished.
 
-Each C# worker owns one nonblocking `SO_REUSEPORT` listener, epoll fd, eventfd, native OpenSSL context handle, and dictionary of managed TLS connection states. This deliberately matches the existing four-pump io_uring experiment. The reference PR instead shares one listener across workers using `EPOLLEXCLUSIVE`.
+Each C# worker owns one nonblocking `SO_REUSEPORT` listener, epoll fd, eventfd, and dictionary of managed connection states. Only TLS workers create OpenSSL contexts/sessions. This deliberately matches the existing four-pump io_uring experiment. The reference PR instead shares one listener across workers using `EPOLLEXCLUSIVE`.
 
 The loop is blocking readiness I/O, not a busy-spin loop: waits are immediate when managed commands remain queued and otherwise bounded to 10 ms. Up to 64 accepts and 16 application TLS records per writing connection are processed before yielding. Ordinary OpenSSL writes are not epoll operations; readiness tells the worker when to retry them.
 
@@ -32,8 +32,10 @@ The loop is blocking readiness I/O, not a busy-spin loop: waits are immediate wh
 |---|---|
 | `Transport.cs` | Listener factory, N-worker startup/unbind/disposal, accepted-connection channel |
 | `Engine.cs` | Dedicated C# thread and loop, typed commands, readiness dispatch, acceptance, pinned-page pool, deadlines and counters |
+| `ConnectionState.cs` | Small epoll-local dispatch contract for TCP and TLS connection states |
+| `TcpConnection.cs` | Nonblocking recv/send, partial writes, half-close, read backpressure, final TCP shutdown; no OpenSSL calls |
 | `TlsConnection.cs` | Handshake/read/write/shutdown state, OpenSSL retry directions, interest masks, per-connection memory ownership |
-| `Connection.cs` | Kestrel connection, output-pipe send loop, completion notifications, fixed TLS features |
+| `Connection.cs` | Kestrel connection, output-pipe send loop, completion notifications, TLS features only in TLS mode |
 | `OwnedPipeReader.cs` | Epoll-local input reader, page leases, consumed/examined positions and asynchronous reader continuation |
 | `Native.cs` | P/Invoke declarations, typed operation/status values, errno checks |
 | `native.c` | Thin Linux calls, normalized epoll-event layout, OpenSSL context/session calls and per-call error decoding |
@@ -52,7 +54,7 @@ Each incomplete `SSL_write_ex` is retried with the identical pointer and length.
 
 ### Buffer and descriptor ownership
 
-Each worker owns 2,048 plaintext pages of 16 KiB, or 32 MiB, backed by a pinned managed array. `SSL_read_ex` writes into these pages, and epoll's `OwnedPipeReader` exposes the same `Memory<byte>` slices to Kestrel. It does not need the native-pointer `MemoryManager` used by the io_uring adapter. A connection can lease at most four pages; returning pages resumes paused input. The pool is bounded, but this is not a production admission/memory policy.
+Each worker owns 2,048 input pages of 16 KiB, or 32 MiB, backed by a pinned managed array. Raw `recv` or TLS `SSL_read_ex` writes into these pages, and epoll's `OwnedPipeReader` exposes the same `Memory<byte>` slices to Kestrel. It does not need the native-pointer `MemoryManager` used by the io_uring adapter. A connection can lease at most four pages; returning pages resumes paused input. The pool is bounded, but this is not a production admission/memory policy.
 
 There is no extra plaintext copy into a separate pipe buffer. This is not NIC-to-application zero-copy and does not claim that OpenSSL has no internal copies.
 
@@ -60,7 +62,17 @@ Closing removes the socket from epoll and closes its fd and OpenSSL session on t
 
 Normal output closure sends `close_notify` before socket shutdown. `NETWORKPROTO_FINAL_SEND=3` also corks known-final application output and initiates shutdown on the same pump immediately after the alert; it is the fd-TLS equivalent of the existing final-send experiment, not a linked send/shutdown SQE. Modes 1 and 2 select the same final-close path without corking. Eligibility still comes from real output-pipe completion, not HTTP parsing.
 
-Handshakes have a fixed ten-second deadline, and stalled graceful shutdown has a five-second deadline, checked by the worker. Listener unbind stops acceptance without silently discarding already-progressing handshakes. Connections finishing after the accepted channel closes use the existing rejected-accept disposal path. Final listener stop also closes sockets that never completed a handshake. A failed worker initialization stops successfully started sibling workers.
+TLS handshakes have a fixed ten-second deadline, and stalled graceful TLS shutdown has a five-second deadline, checked by the worker. TCP has no handshake or TLS timeout sweep. Listener unbind stops acceptance without silently discarding already-progressing handshakes. Connections finishing after the accepted channel closes use the existing rejected-accept disposal path. Final listener stop also closes sockets that never completed a handshake. A failed worker initialization stops successfully started sibling workers.
+
+### Raw TCP behavior
+
+TCP connections are handed to Kestrel immediately after acceptance. Their state machine never creates an `SSL_CTX`/`SSL`, calls an SSL operation, or publishes TLS features. The combined native library still links OpenSSL for its TLS entry points; a loaded dependency is not evidence that the raw data path uses it.
+
+Readable events drive `recv` into the existing page pool. A connection drains available input until `EAGAIN` or its four-page lease limit. On backpressure, readable interest is removed; returning a consumed page resumes reading. `recv == 0` completes the input reader but does not close the write side: an application may still produce a response after the peer has half-closed its output.
+
+Output commands drive `send(MSG_NOSIGNAL)` directly. Positive partial results advance the offset; `EAGAIN` arms writable interest and retains the pinned buffer. Work per connection is bounded to 256 KiB per write drive, with remaining output resumed through level-triggered readiness. Writable interest is removed when output finishes, rather than waking continuously for idle writable sockets.
+
+`NETWORKPROTO_FINAL_SEND=3` applies `TCP_CORK` to known-final output and initiates socket shutdown on the same worker after all bytes have been accepted. No TLS alert exists in this mode, and there is no linked SQE. Modes 1 and 2 perform immediate final-send shutdown without corking; unset/0 follows the normal output-loop close command. Input/output lifetimes and stale readiness IDs retain the same ownership rules as the TLS worker.
 
 ## Relation to the DirectTls PR
 
@@ -81,9 +93,11 @@ The public registration follows this non-shipping project's existing experiment 
 
 ```csharp
 builder.WebHost.UseEpollTls("cert.pem", "key.pem", workerCount: 4);
+// Or raw TCP, without certificates or TLS termination:
+builder.WebHost.UseEpollTcp(workerCount: 4);
 ```
 
-Do not add `UseHttps` to this endpoint: the transport already supplies plaintext and the prototype's TLS features. The sample selects it with `--backend epollTls --scheme https --workers N`. `N` must be positive. Without `NETWORKPROTO_CPUS`, workers inherit process affinity; with it, the comma-separated list must contain exactly N nonnegative CPU IDs and pins one worker per entry. The new worker-count option does not change how existing io_uring backends select their workers.
+Do not add `UseHttps` to `epollTls`: the transport already supplies plaintext and the prototype's TLS features. The sample selects it with `--backend epollTls --scheme https --workers N`. Raw TCP uses `--backend epollTcp --scheme http --workers N` and needs no certificate/key; its sample rejects HTTPS rather than silently adding another layer. The raw listener itself exposes protocol-agnostic bytes. `N` must be positive. Without `NETWORKPROTO_CPUS`, workers inherit process affinity; with it, the comma-separated list must contain exactly N nonnegative CPU IDs and pins one worker per entry. This option does not change how existing io_uring backends select their workers.
 
 Example from the WSL repository root:
 
@@ -102,6 +116,52 @@ dotnet artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll \
 The sample expects the existing local test certificate/key. The native epoll library links to OpenSSL and libc, not liburing; building the containing experiment project still builds the neighboring io_uring libraries and therefore retains that project's existing liburing prerequisite.
 
 Scope limits: IPv4 loopback and a fixed nonzero port, TLS 1.2 with `ECDHE-RSA-AES128-GCM-SHA256`, no resumption or renegotiation, no TLS 1.3, ALPN/HTTP2, mTLS, callback selection, custom BIO, or kTLS. A nonzero `NETWORKPROTO_KTLS` request fails explicitly. The shared sample's TLS features reflect these fixed settings, not a general negotiated-feature API. PublicAPI.Unshipped tracks the experiment registration, not approval for a framework API.
+
+## Raw TCP comparison, September 29
+
+The new raw backend was compared with fresh stock Sockets and the C# IoUringTcp engine. All runs used the same binary/application, original single-source wrk2 client, four server cores/workers (`0,2,4,6`), twelve separate client cores, 1,200 connections, 1,024-byte response, and 15-second measurements. Coalesced wakes and mode-3 final-send batching were enabled for both experimental transports. No TLS layer or handshake ran. Two rounds reversed backend order.
+
+| Transport | TCP short RPS, runs | Mean and change vs stock | TCP long RPS, runs | Mean and change vs stock |
+|---|---|---:|---|---:|
+| Stock Sockets | 47,830 / 42,966 | 45,398 | 158,045 / 136,645 | 147,345 |
+| C# IoUringTcp | 56,502 / 58,361 | 57,432 (+26.5%) | 169,784 / 180,540 | 175,162 (+18.9%) |
+| **C# epollTcp** | **61,616 / 57,090** | **59,353 (+30.7%)** | **160,399 / 160,935** | **160,667 (+9.0%)** |
+
+Epoll was about +3.3% short / -8.3% long compared with io_uring in this batch. The short ordering changed between rounds, so it does not establish a stable short-connection lead. This is not a comparison against the higher stock/transport numbers from earlier sessions; the unchanged stock baseline drifted substantially even within this batch.
+
+The raw epoll path reported zero handshakes, SSL reads/writes, and TLS close notifications. Its short runs recorded 917,643 / 848,832 corked final sends with successful final shutdowns, approximately 99% of sends. All workers exited and all input pages returned. TCP TIME_WAIT-overflow deltas were zero in all twelve load runs.
+
+The initial implementation drains reads until `EAGAIN`: the keep-alive runs had about two recv calls per delivered input page (roughly one successful read plus one would-block read), and one send per response. This is actual syscall accounting, not proof that it explains the entire gap to io_uring. Stable keep-alive read interest required about 2,418 `epoll_ctl` calls per run, not one registration per request.
+
+Neither experimental transport reported wrk socket/HTTP errors. Stock short reported 55 / 50 timeout counts. Raw epoll separately counted peer disconnects, including 1,139 / 1,172 peer-abort results in keep-alive runs and 2 / 24 already-disconnected shutdowns in short runs. No unexpected socket-error or shutdown-failure counter was recorded. Do not call this zero native teardown errors.
+
+Offered load exceeded achieved capacity: 200k short and 1M long, with corrected latency growing to seconds. These are overloaded throughput measurements on a shared WSL/Windows loopback host, not sustainable latency-SLO capacity or a general epoll-versus-io_uring ranking.
+
+Reproduce the raw run or its matched comparison:
+
+```bash
+cd ~/code/aspnetcore
+source activate.sh
+sample=src/Servers/Kestrel/samples/NetworkProtoSample
+dotnet build "$sample/NetworkProtoSample.csproj" -c Release --no-restore
+LD_LIBRARY_PATH=/opt/openssl-3.5.8/lib:$HOME/.local/lib \
+NETWORKPROTO_CPUS=0,2,4,6 NETWORKPROTO_COALESCE=1 NETWORKPROTO_FINAL_SEND=3 \
+DOTNET_PROCESSOR_COUNT=4 taskset -c 0,2,4,6 \
+dotnet artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll \
+    --backend epollTcp --scheme http --workers 4 --port 19800
+
+# After stopping the foreground server:
+SANITIZE=1 "$sample/scripts/check-epoll-tcp.sh"
+"$sample/scripts/compare-epoll-tcp.sh"
+```
+
+The raw checks exercised one/two/four workers through real Kestrel framing, a fragmented 40 KiB body, 3,001 pipelined responses with a paused reader, reset/continued service, and idle listener disposal. The direct transport check recovered a cancelled read, consumed 256 KiB after filling the four-page lease limit, then produced a response after observing real peer half-close. No fake readiness was injected.
+
+The 1 KiB/4 MiB final-output and blocked 16 MiB reset cases passed in modes 0-3. With a diagnostic 4 KiB send buffer and final mode 3, one/two/four-worker checks reached respectively 69/69/130 partial sends and 48/48/85 actual `EAGAIN` results, while preserving exact payloads and EOF. Native ASan/UBSan was enabled for the raw checks; mixed managed/native leak detection was disabled. The existing TLS sanitizer, handshake-deadline, and late-accept rejection checks also passed after sharing the worker contract.
+
+The sanitizer scripts now exclude old `results` directories when copying deployments, and the sample excludes benchmark evidence from default MSBuild items. This prevents nested benchmark artifacts from being repeatedly copied into later sanitizer deployments. Original measurement evidence remains untouched; only duplicate copies made by this task were cleaned.
+
+Raw evidence is `NetworkProtoSample/results/epoll-tcp-matrix-20260929-114236/validated-summary.json` with per-run logs, binary hashes, counters and kernel snapshots. Correctness evidence is `epoll-tcp-check-20260929-113413`; TLS regression evidence is `epoll-check-20260929-114211` and `rejected-accept-20260929-114235`. These paths are local/gitignored. The first TLS sanitizer attempt was interrupted during deployment copying, not accepted as a test run; it was rerun after fixing the copy scope.
 
 ## Original native-engine results, September 28 evening
 

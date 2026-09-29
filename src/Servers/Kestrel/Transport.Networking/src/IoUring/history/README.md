@@ -16,7 +16,7 @@ Approximate changes below are against the stated earlier implementation within t
 | [September 26](2026-09-26.md) | Four-pump owned-buffer Kestrel transports; native fd TLS; wake coalescing | New architectures exceeded stock in several keep-alive/TLS cells, but TCP short still lost. Coalescing improved TLS keep-alive about 7-10% in selected comparisons, with regressions elsewhere; it was not a universal RPS win. |
 | [September 27](2026-09-27.md) | Transport-driven custom BIO; actual kTLS activation | Custom BIO's median TLS keep-alive was about 12% above fd TLS in one matched batch. Verified software kTLS was about 11% slower than equivalent userspace fd TLS on keep-alive. |
 | [September 28](2026-09-28.md) | Guard redundant TLS reads; repair rejected-accept disposal; investigate TCP churn; final-send/shutdown batching | Read guard added about 6-7% in one matched batch. Raw TCP final-send batching took roughly 40k-46k to 84k-85k RPS; BIO TCP improved about 55%. TLS short changed only about +2% for fd TLS and 0% for BIO. |
-| [September 29](2026-09-29.md) | Move newer io_uring TCP, fd TLS and BIO state into C#; retain thin native shims | About 76% less C. Matched persistent means were 1-4% lower; fd TLS short about 5% lower. TCP short gains remained, with raw 76k and BIO 76k RPS. |
+| [September 29](2026-09-29.md) | Move newer io_uring TCP, fd TLS and BIO state into C#; add raw TCP epoll workers | About 76% less C for io_uring; matched persistent means 1-4% lower. A separate raw-epoll batch measured 59k short / 161k long versus fresh stock 45k / 147k. |
 
 ## Three different implementations, not one accumulating speedup
 

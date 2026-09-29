@@ -64,6 +64,20 @@ int ep_socket_option(int fd, int option, int value)
 int ep_shutdown(int fd) { return shutdown(fd, SHUT_RDWR) ? -errno : 0; }
 int ep_close(int fd) { return close(fd) ? -errno : 0; }
 
+int ep_recv(int fd, void *buffer, int length)
+{
+    ssize_t result;
+    do { result = recv(fd, buffer, length, 0); } while (result < 0 && errno == EINTR);
+    return result < 0 ? -errno : (int)result;
+}
+
+int ep_send(int fd, const void *buffer, int length)
+{
+    ssize_t result;
+    do { result = send(fd, buffer, length, MSG_NOSIGNAL); } while (result < 0 && errno == EINTR);
+    return result < 0 ? -errno : (int)result;
+}
+
 int ep_eventfd(void)
 {
     int fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);

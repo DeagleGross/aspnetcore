@@ -1,5 +1,6 @@
 #nullable enable
 Microsoft.AspNetCore.Hosting.EpollTransportExtensions
+static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTcp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 Microsoft.AspNetCore.Hosting.LayeredTransportExtensions
 static Microsoft.AspNetCore.Hosting.LayeredTransportExtensions.UseIoUringBio(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, bool tls, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!

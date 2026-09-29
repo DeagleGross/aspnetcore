@@ -17,7 +17,7 @@ prefix=()
 if [[ ${SANITIZE:-0} == 1 ]]; then
     deployment="$output/deployment"
     mkdir -p "$deployment"
-    cp -a "$(dirname "$dll")/." "$deployment/"
+    find "$(dirname "$dll")" -mindepth 1 -maxdepth 1 ! -name results -exec cp -a -t "$deployment" {} +
     cc -std=c11 -O1 -g -Wall -Wextra -Werror -fPIC -shared -fsanitize=address,undefined -fno-omit-frame-pointer \
         "$native/native.c" -lssl -lcrypto -o "$deployment/libnetworkprotoepoll.so"
     dll="$deployment/NetworkProtoSample.dll"

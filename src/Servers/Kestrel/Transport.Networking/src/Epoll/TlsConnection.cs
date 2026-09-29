@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
 // Only the owning Engine thread mutates TLS and readiness state.
-internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint session)
+internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint session) : ConnectionState(id)
 {
     private int _fd = fd;
     private nint _session = session;
@@ -16,12 +16,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
     private nint _sendData;
     private uint _interest, _handshakeWant, _readWant, _writeWant, _shutdownWant;
     private long _deadline = Environment.TickCount64 + 10000;
-    internal ulong Id { get; } = id;
-    internal bool Closed { get; private set; }
-    internal int Leased { get; private set; }
-    internal Connection? Application { get; private set; }
-
-    internal void Drive(uint ready)
+    internal override void Drive(uint ready)
     {
         if (Closed)
         {
@@ -84,7 +79,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         }
     }
 
-    internal void Send(nint data, int length, bool final)
+    internal override void Send(nint data, int length, bool final)
     {
         if (Closed || _closeRequested)
         {
@@ -216,7 +211,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         }
     }
 
-    internal void RequestClose()
+    internal override void RequestClose()
     {
         _closeRequested = true;
         Drive(Native.Readable | Native.Writable);
@@ -279,7 +274,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         }
     }
 
-    internal void ReturnPage(int page)
+    internal override void ReturnPage(int page)
     {
         if (Leased <= 0)
         {
@@ -291,7 +286,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         ResumeReader();
     }
 
-    internal void ResumeForPool()
+    internal override void ResumeForPool()
     {
         if (!Closed && _readPaused && Leased < 4)
         {
@@ -310,7 +305,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         }
     }
 
-    internal void CheckDeadline(long now)
+    internal override void CheckDeadline(long now)
     {
         if (!Closed && _deadline != 0 && now >= _deadline)
         {
@@ -326,7 +321,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
         }
     }
 
-    internal void Finish(Exception? error)
+    internal override void Finish(Exception? error)
     {
         if (Closed)
         {

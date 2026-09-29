@@ -2,6 +2,22 @@
 
 For the day-by-day story, including wake coalescing, unsuccessful experiments, and final-send/shutdown batching, start with the [development history](history/README.md). This report retains the detailed measurement series.
 
+## Raw TCP epoll workers (2026-09-29, late morning)
+
+The separate `epollTcp` mode now performs nonblocking `recv`/`send` on the owning C# epoll worker, with no OpenSSL session or TLS layer. It shares epoll's worker/queue/page infrastructure with `epollTls`, but has a separate TCP state machine. The io_uring implementation is unchanged. See the [architecture and complete TCP report](../Epoll/README.md#raw-tcp-comparison-september-29).
+
+Fresh matched controls, four server/twelve client cores, 1,200 connections, 1,024-byte HTTP response, two reversed-order 15-second runs per cell, coalescing and final-send batching enabled:
+
+| Transport | TCP short mean RPS | TCP long mean RPS |
+|---|---:|---:|
+| Stock Sockets | 45,398 | 147,345 |
+| C# IoUringTcp | 57,432 (+26.5%) | 175,162 (+18.9%) |
+| C# epollTcp | 59,353 (+30.7%) | 160,667 (+9.0%) |
+
+Epoll was +3.3% short / -8.3% long against io_uring in this batch; short ordering changed between rounds. Do not compare these lower absolute rates with earlier-session baselines as an implementation regression. Every epoll run reported actual recv/send calls, zero TLS operations, balanced page ownership, complete worker shutdown, and no unexpected socket errors. Stock short reported 55/50 timeouts; epoll counted peer disconnects separately. TIME_WAIT-overflow deltas were zero. Offered load was 200k short / 1M long, so these remain overloaded throughput measurements, not sustainable capacity.
+
+Evidence: `NetworkProtoSample/results/epoll-tcp-matrix-20260929-114236/validated-summary.json`. Native-sanitizer TCP data/partial-send/half-close checks and the existing TLS regression checks are linked from the epoll report.
+
 ## C# io_uring engines (2026-09-29)
 
 The newer TCP, fd-TLS and custom-BIO transports now dispatch CQEs and own connection/TLS/page state in C#. Their combined C files decreased from 1,178 to 284 lines; C retains liburing/OpenSSL wrappers and BIO callbacks. The original single-ring experiment and epoll are unchanged. [Architecture, lifetime rules, verification limits, and raw evidence](../IoUringTcp/README.md).

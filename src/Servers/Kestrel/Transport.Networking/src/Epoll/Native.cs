@@ -9,6 +9,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 internal static unsafe partial class Native
 {
     internal const int Again = -11, Interrupted = -4, ConnectionAborted = -103, NotConnected = -107;
+    internal const int ConnectionReset = -104, BrokenPipe = -32;
     internal const int Add = 1, Delete = 2, Modify = 3;
     internal const uint Readable = 1, Writable = 4, Error = 8, Hangup = 16;
     internal enum SocketOption { NoDelay, Cork, SendBuffer }
@@ -44,6 +45,10 @@ internal static unsafe partial class Native
     internal static partial int Shutdown(int fd);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_close")]
     internal static partial int Close(int fd);
+    [LibraryImport("networkprotoepoll", EntryPoint = "ep_recv")]
+    internal static partial int Receive(int fd, nint buffer, int length);
+    [LibraryImport("networkprotoepoll", EntryPoint = "ep_send")]
+    internal static partial int Send(int fd, nint buffer, int length);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_eventfd")]
     internal static partial int CreateWake();
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_wake")]
