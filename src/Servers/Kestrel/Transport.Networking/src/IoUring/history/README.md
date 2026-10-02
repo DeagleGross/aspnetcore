@@ -1,6 +1,6 @@
 # io_uring transport development history
 
-This is the chronological story of the experiments, including improvements, unsuccessful approaches, correctness fixes, and the measurements behind them. It covers the earliest preserved Kestrel measurements on September 19 through September 29, 2026. It complements, rather than replaces, the detailed [transport results](../RPS-RESULTS.md) and [original sample investigation](../../../../samples/NetworkProtoSample/RESULTS.md).
+This is the chronological story of the experiments, including improvements, unsuccessful approaches, correctness fixes, and the measurements behind them. It covers the earliest preserved Kestrel measurements on September 19 through October 1, 2026. It complements, rather than replaces, the detailed [transport results](../RPS-RESULTS.md) and [original sample investigation](../../../../samples/NetworkProtoSample/RESULTS.md).
 
 Dates follow the recorded measurement days, not the later commits that collected the work. The early sample's `environment.txt` timestamps place its first iterations on September 19 and 20, using the local UTC+02 calendar. The standalone C report explicitly dates its experiments September 25. No additional dated measurement series was identified for September 21-24; this history does not invent entries for those days.
 
@@ -17,6 +17,7 @@ Approximate changes below are against the stated earlier implementation within t
 | [September 27](2026-09-27.md) | Transport-driven custom BIO; actual kTLS activation | Custom BIO's median TLS keep-alive was about 12% above fd TLS in one matched batch. Verified software kTLS was about 11% slower than equivalent userspace fd TLS on keep-alive. |
 | [September 28](2026-09-28.md) | Guard redundant TLS reads; repair rejected-accept disposal; investigate TCP churn; final-send/shutdown batching | Read guard added about 6-7% in one matched batch. Raw TCP final-send batching took roughly 40k-46k to 84k-85k RPS; BIO TCP improved about 55%. TLS short changed only about +2% for fd TLS and 0% for BIO. |
 | [September 29](2026-09-29.md) | Move newer io_uring TCP, fd TLS and BIO state into C#; add raw TCP epoll workers | About 76% less C for io_uring; matched persistent means 1-4% lower. A separate raw-epoll batch measured 59k short / 161k long versus fresh stock 45k / 147k. |
+| [October 1](2026-10-01.md) | Epoll worker directly drains output; remove send/completion handoffs; sweep cores, workers and concurrency | Four-core TCP improved about 9% short / 13% long over previous epoll. Eight-core epoll reached about 147k TCP short / 483k TCP long and 15.8k TLS short / 367k TLS long; TLS long +22% versus matched stock, TCP long -4%. |
 
 ## Three different implementations, not one accumulating speedup
 

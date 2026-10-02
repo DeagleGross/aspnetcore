@@ -9,9 +9,11 @@ The initial implementation put the event dispatch and TLS state machine in C. Th
 ## Architecture
 
 ```text
-N dedicated managed pump threads, each running Engine.Run in C#:
+N dedicated managed pump threads, each running EpollWorker.Run in C#:
 
-    process typed send / page-return / close commands
+    process output-ready / page-return / close work
+        -> worker directly drains ready output pipe segments
+        -> send / SSL_write; retry unfinished output on readiness
         -> Native.Wait -> epoll_wait(up to 128 readiness events)
         -> dispatch readiness IDs to TcpConnection or TlsConnection
         -> TCP: recv / send; TLS: one OpenSSL call plus its error result
@@ -31,16 +33,20 @@ The loop is blocking readiness I/O, not a busy-spin loop: waits are immediate wh
 | File | Responsibility |
 |---|---|
 | `Transport.cs` | Listener factory, N-worker startup/unbind/disposal, accepted-connection channel |
-| `Engine.cs` | Dedicated C# thread and loop, typed commands, readiness dispatch, acceptance, pinned-page pool, deadlines and counters |
+| `EpollWorker.cs` | Concrete epoll thread/loop, direct connection work, readiness dispatch, acceptance, pinned-page pool, deadlines and counters |
 | `ConnectionState.cs` | Small epoll-local dispatch contract for TCP and TLS connection states |
 | `TcpConnection.cs` | Nonblocking recv/send, partial writes, half-close, read backpressure, final TCP shutdown; no OpenSSL calls |
 | `TlsConnection.cs` | Handshake/read/write/shutdown state, OpenSSL retry directions, interest masks, per-connection memory ownership |
-| `Connection.cs` | Kestrel connection, output-pipe send loop, completion notifications, TLS features only in TLS mode |
+| `Connection.cs` | Kestrel connection, worker-owned output-pipe draining and borrowed-memory lifetime, TLS features only in TLS mode |
 | `OwnedPipeReader.cs` | Epoll-local input reader, page leases, consumed/examined positions and asynchronous reader continuation |
 | `Native.cs` | P/Invoke declarations, typed operation/status values, errno checks |
 | `native.c` | Thin Linux calls, normalized epoll-event layout, OpenSSL context/session calls and per-call error decoding |
 
 The C# loop is synchronous on its dedicated thread; there is no `await` that can migrate TLS work to another thread. The C wrapper keeps `SSL_get_error` immediately adjacent to the corresponding OpenSSL call because its interpretation depends on thread-local error state. It also hides OpenSSL configuration macros and Linux's packed `epoll_event` layout. Those are interop concerns, not transport scheduling.
+
+The October 1 output path removes the separate asynchronous send loop, per-send completion task, send-command lookup, and completion-to-ThreadPool round trip. The output pipe uses an inline reader notification whose only action is to queue worker work; its writer scheduler remains the ThreadPool, so application flush continuations do not run on the epoll worker. The worker consumes each pending `ValueTask<ReadResult>` once, pins a segment through partial/TLS retries, and advances output directly on completion. Work per drain is bounded. Cross-thread output-ready/page-return/close notifications remain necessary, but they carry direct connection references rather than looking up a connection ID again.
+
+This is not a generic engine abstraction or a new layered transport API. The small epoll-local TCP/TLS connection-state contract and readiness-ID dictionary remain; no measurement justified deleting lifetime bookkeeping or claiming a class rename itself makes the transport faster. io_uring and all native wrappers are unchanged by the October 1 work.
 
 BIO callbacks are not inherently impossible in C#: native-callable managed entry points can implement them with explicit lifetime and exception constraints. This version needs no custom BIO callbacks because OpenSSL's existing socket BIO owns fd-based TLS I/O. Whether a future custom BIO callback stays native is a separate decision, not a reason to retain the entire engine in C.
 
@@ -68,11 +74,11 @@ TLS handshakes have a fixed ten-second deadline, and stalled graceful TLS shutdo
 
 TCP connections are handed to Kestrel immediately after acceptance. Their state machine never creates an `SSL_CTX`/`SSL`, calls an SSL operation, or publishes TLS features. The combined native library still links OpenSSL for its TLS entry points; a loaded dependency is not evidence that the raw data path uses it.
 
-Readable events drive `recv` into the existing page pool. A connection drains available input until `EAGAIN` or its four-page lease limit. On backpressure, readable interest is removed; returning a consumed page resumes reading. `recv == 0` completes the input reader but does not close the write side: an application may still produce a response after the peer has half-closed its output.
+Readable events drive `recv` into the existing page pool. Full reads can continue until `EAGAIN` or the four-page lease limit; after a short successful read, the worker returns to level-triggered readiness rather than immediately making another usually-empty receive. This does not assume the socket is drained: remaining bytes/EOF still generate readiness. On backpressure, readable interest is removed; returning a consumed page resumes reading. `recv == 0` completes the input reader but does not close the write side: an application may still produce a response after the peer has half-closed its output.
 
 Output commands drive `send(MSG_NOSIGNAL)` directly. Positive partial results advance the offset; `EAGAIN` arms writable interest and retains the pinned buffer. Work per connection is bounded to 256 KiB per write drive, with remaining output resumed through level-triggered readiness. Writable interest is removed when output finishes, rather than waking continuously for idle writable sockets.
 
-`NETWORKPROTO_FINAL_SEND=3` applies `TCP_CORK` to known-final output and initiates socket shutdown on the same worker after all bytes have been accepted. No TLS alert exists in this mode, and there is no linked SQE. Modes 1 and 2 perform immediate final-send shutdown without corking; unset/0 follows the normal output-loop close command. Input/output lifetimes and stale readiness IDs retain the same ownership rules as the TLS worker.
+`NETWORKPROTO_FINAL_SEND=3` applies `TCP_CORK` to known-final output and initiates socket shutdown on the same worker after all bytes have been accepted. No TLS alert exists in this mode, and there is no linked SQE. Modes 1 and 2 perform immediate final-send shutdown without corking; unset/0 closes when the worker observes completed output. Input/output lifetimes and stale readiness IDs retain the same ownership rules as the TLS worker.
 
 ## Relation to the DirectTls PR
 
@@ -117,7 +123,88 @@ The sample expects the existing local test certificate/key. The native epoll lib
 
 Scope limits: IPv4 loopback and a fixed nonzero port, TLS 1.2 with `ECDHE-RSA-AES128-GCM-SHA256`, no resumption or renegotiation, no TLS 1.3, ALPN/HTTP2, mTLS, callback selection, custom BIO, or kTLS. A nonzero `NETWORKPROTO_KTLS` request fails explicitly. The shared sample's TLS features reflect these fixed settings, not a general negotiated-feature API. PublicAPI.Unshipped tracks the experiment registration, not approval for a framework API.
 
-## Raw TCP comparison, September 29
+## Direct worker output and scaling, October 1
+
+The September 28 matched C# TLS result really was approximately 27% above its own stock control. Later consolidated tables divided older epoll results by newer stock numbers, making that advantage appear smaller. The experiments here use fresh matched controls and the preserved pre-tuning epoll binary (`artifacts/tmp/epoll-before-tuning-20261001`), not those cross-date percentages.
+
+### Changes and unsuccessful first iteration
+
+The retained change is direct output-pipe draining on the owning worker, with inline notification-only callbacks and no per-send task/completion hop. TCP also avoids a speculative empty receive after a short read. Socket I/O remains in C#, through the existing native syscall/OpenSSL wrappers; no canned-response fast path, SslStream substitution, or HTTP parsing shortcut was introduced.
+
+An initial attempt only replaced completion tasks with a reusable source, renamed the concrete worker, and removed queued ID lookups. It did not establish a broad gain and was superseded: TLS persistent RPS improved only about 2.5%, while short connections and TCP persistent traffic got slower in that first comparison. The direct-output path was then measured separately before the final synchronous-completion/inline-notification refinements. Those earlier stages remain in the raw evidence.
+
+### Matched four- and eight-core results
+
+All workloads use real Kestrel HTTP/1.1, a 1,024-byte response, 1,200 connections, a three-second warmup, one-second settling pause, and 15-second wrk2 measurement. The client always has eight disjoint physical cores (`16,18,20,22,24,26,28,30`) and eight threads. Server affinity, .NET processor count, and epoll worker count are N, using the first N even-numbered CPUs. TLS remains TLS 1.2/RSA/AES-128-GCM without resumption. Coalescing and final-send mode 3 match between old/new builds.
+
+Values are means of two runs with reversed order. Percentages use stock from the same N-core matrix:
+
+| Server cores / workers | Transport | TCP short RPS | TCP long RPS | TLS short RPS | TLS long RPS |
+|---|---|---:|---:|---:|---:|
+| 4 | Stock Sockets / SslStream | 67,614 | 247,507 | 4,843 | 153,019 |
+| 4 | Previous epoll | 94,556 | 249,329 | 8,250 | 176,220 |
+| 4 | Direct-output epoll | 103,190 (+52.6%) | 281,038 (+13.5%) | 8,268 (+70.7%) | 178,823 (+16.9%) |
+| 8 | Stock Sockets / SslStream | 58,447 | 502,467 | 8,647 | 300,411 |
+| 8 | Previous epoll | 143,128 | 478,321 | 15,610 | 364,614 |
+| 8 | Direct-output epoll | 147,079 (+151.7%) | 483,249 (-3.8%) | 15,769 (+82.4%) | 366,683 (+22.1%) |
+
+Against the previous epoll build, the retained four-core changes are about +9.1% TCP short, +12.7% TCP long, +0.2% TLS short and +1.5% TLS long. At eight cores, they are +2.8%, +1.0%, +1.0% and +0.6%. Thus most of the eight-core TLS advantage over stock already existed. Removing handoffs is not proof that the old wrapper names were the main TLS bottleneck.
+
+TCP receive counters improved from approximately two calls per delivered input page to one in the four-core persistent workload. TLS was already close to one read attempt per successful read, so there was less analogous work to remove.
+
+Allocation is a real tradeoff, not a claimed improvement: persistent allocation rose from about 3,595 to 3,864 B/request for four-core TCP and 3,255 to 4,057 for TLS. At eight cores the corresponding values were 2,524 -> 3,351 and 2,478 -> 3,261. Stock stayed around 1.6 KiB/request. Process-wide allocation changes include pipe scheduling/buffering effects; no allocation-stack profile isolates each cause. Four-core TCP short allocation did fall about 440 bytes/request.
+
+### Scaling and what "maximum" means here
+
+With server core budget and worker count increased together:
+
+| Cores / workers | TCP short RPS | TCP long RPS | TLS short RPS | TLS long RPS |
+|---|---:|---:|---:|---:|
+| 1 | 14,894 | 34,196 | 1,994 | 23,753 |
+| 2 | 39,798 | 129,068 | 4,204 | 86,072 |
+| 4 | 103,190 | 281,038 | 8,268 | 178,823 |
+| 8 | 147,079 | 483,249 | 15,769 | 366,683 |
+
+One/two-core cells are screening runs; four/eight-core cells are the paired means above. This changes the whole server's CPU/GC/ThreadPool budget, not just epoll thread count, so superlinear low-core steps must not be interpreted as pure transport scalability.
+
+A separate screen held the process at eight cores and varied only the epoll workers:
+
+| Workers, fixed eight-core server budget | TCP long RPS | TLS long RPS |
+|---|---:|---:|
+| 1 | 91,785 | 48,568 |
+| 2 | 225,143 | 111,705 |
+| 4 | 396,836 | 273,972 |
+| 8 | 483,399 | 377,030 |
+
+The one-worker TLS thread averaged about 92% CPU in pidstat despite using only about two whole-process cores. Eight TLS workers used roughly 56-61% each, with total server use about seven of eight cores. This supports a single-worker serialization limit when too few workers serve a larger application CPU budget.
+
+At 1,200 connections, the repeatable eight-core observations are approximately 147k TCP short / 483k TCP long and 15.8k TLS short / 367k TLS long. These are **highest measured capacity-region results within this sweep**, not an established physical-NIC maximum or a latency-SLO service rate. Client TLS-short CPU was about 7.4 of its eight cores, limiting further inference about the server's handshake ceiling. Server persistent use was about 7.3/8 TCP and 6.9/8 TLS cores; client persistent use about 4.6-5/8 cores.
+
+Concurrency screens did not give a universal higher setting. At eight workers, 120 TCP connections reached 416k long RPS and 4,800 reached 377k; a two-run 600-connection confirmation gave 484k versus previous epoll 500k and stock 529k. TLS at 120 connections reached 386k in an initial screen, but subsequent new runs varied 322k-379k while previous epoll varied 325k-391k and stock 375k-384k. That does not establish a stable 386k TLS ceiling or a low-concurrency TLS win. At 4,800 connections TLS fell to about 282k.
+
+### Measurement and ownership caveats
+
+The client offered 200k TCP short, 50k TLS short and 1M persistent requests/s, deliberately above achieved capacity; corrected latency grew to seconds. The same WSL/Windows host and a single client source address were used, with CPU affinity but no exclusive host reservation. Eight server plus eight client physical cores is the largest disjoint allocation tested here. There was no new physical network or external load-generator measurement.
+
+Stock TCP short reported 144/62 timeouts at four cores and 503/367 at eight cores; its eight-core short RPS is not a clean intrinsic server limit. Epoll runs completed without wrk socket/HTTP errors, unexpected socket/TLS errors, or handshake/shutdown timeout counters. Peer aborts and disconnected teardown were counted separately, not suppressed. TIME_WAIT-overflow deltas were zero. Every epoll run supplied all worker reports, accepted/closed totals matched, and input pages returned.
+
+The direct output path passed actual partial/would-block sends, SSL retries, fragmented/page-spanning input, 3,001-response slow-reader pipelines, peer reset/half-close, cancellation recovery, idle-handshake timeouts, and late-accept disposal under ASan/UBSan. Final output modes 0-3 were rechecked at eight workers as well. Native wrappers were unchanged; mixed managed/native leak detection remained disabled. No claim of exhaustive failure recovery or production fairness is made.
+
+The capacity runner saves process CPU/allocation deltas, per-thread pidstat, client user/system CPU, native counters, library maps, hashes, errors and kernel snapshots:
+
+```bash
+cd ~/code/aspnetcore
+scripts=src/Servers/Kestrel/samples/NetworkProtoSample/scripts
+$scripts/epoll-capacity.sh epollTcp 4 http keepalive tcp-four
+$scripts/epoll-capacity.sh epollTls 8 https keepalive tls-eight
+$scripts/epoll-capacity.sh sockets 8 https keepalive stock-eight
+SERVER_CORES=8 $scripts/epoll-capacity.sh epollTls 2 https keepalive two-workers-eight-cores
+CONNECTIONS=120 $scripts/epoll-capacity.sh epollTls 8 https keepalive concurrency-screen
+```
+
+`SAMPLE_DLL` can select the preserved deployment. Raw evidence is in sample `results/epoll-tuning-20261001.json` (136 explicitly labeled runs across candidate stages, comparisons and screens), with final matched groups `epoll-final-four-core-20261001-210728` and `epoll-final-eight-core-20261001-211543`; fixed-worker/concurrency screens `epoll-peak-screen-20261001-212419`; peak confirmation `epoll-peak-confirm-20261001-212851`. Final sanitizer evidence: `epoll-tcp-check-20261001-210054` and `epoll-check-20261001-210118`; eight-worker output/rejection evidence: `final-send-check-20261001-213314`, `final-send-check-20261001-213318`, `rejected-accept-20261001-213321`.
+
+## Historical raw TCP comparison, September 29
 
 The new raw backend was compared with fresh stock Sockets and the C# IoUringTcp engine. All runs used the same binary/application, original single-source wrk2 client, four server cores/workers (`0,2,4,6`), twelve separate client cores, 1,200 connections, 1,024-byte response, and 15-second measurements. Coalesced wakes and mode-3 final-send batching were enabled for both experimental transports. No TLS layer or handshake ran. Two rounds reversed backend order.
 

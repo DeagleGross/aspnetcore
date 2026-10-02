@@ -13,12 +13,12 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class Engine
+internal sealed class EpollWorker
 {
     internal const int PageCount = 2048, PageSize = 16384;
     private const ulong ListenerId = 1, WakeId = 2;
-    internal enum CommandKind { Send, ReturnPage, Close, Forget, Unbind, Stop }
-    internal readonly record struct Command(CommandKind Kind, ulong Id = 0, nint Data = 0, int Length = 0, int Page = 0, bool Final = false);
+    internal enum CommandKind { OutputReady, ReturnPage, Close, Forget, Unbind, Stop }
+    internal readonly record struct Command(CommandKind Kind, ConnectionState? State = null, int Page = 0);
 
     private readonly ConcurrentQueue<Command> _commands = new();
     private readonly Dictionary<ulong, ConnectionState> _connections = new();
@@ -49,7 +49,7 @@ internal sealed class Engine
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger)
+    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger)
     {
         _endpoint = endpoint;
         _cpu = cpu;
@@ -274,23 +274,15 @@ internal sealed class Engine
             StopConnections(null);
             return;
         }
-        if (!_connections.TryGetValue(command.Id, out var state))
+        var state = command.State;
+        if (state is null)
         {
-            if (command.Kind == CommandKind.Close)
-            {
-                return;
-            }
-            throw new InvalidOperationException($"Command {command.Kind} targeted a released epoll connection.");
+            throw new InvalidOperationException($"Command {command.Kind} requires an epoll connection.");
         }
         switch (command.Kind)
         {
-            case CommandKind.Send:
-                _sendCommands++;
-                if (command.Final)
-                {
-                    _finalSendCommands++;
-                }
-                state.Send(command.Data, command.Length, command.Final);
+            case CommandKind.OutputReady:
+                state.Application!.PumpOutput();
                 break;
             case CommandKind.ReturnPage:
                 state.ReturnPage(command.Page);
@@ -336,9 +328,19 @@ internal sealed class Engine
         Native.Check(Native.Control(_epoll, operation, fd, events, id), "control");
     }
 
+    internal void Send(ConnectionState state, nint data, int length, bool final)
+    {
+        _sendCommands++;
+        if (final)
+        {
+            _finalSendCommands++;
+        }
+        state.Send(data, length, final);
+    }
+
     internal Connection Publish(ConnectionState state)
     {
-        var connection = new Connection(this, state.Id, _endpoint);
+        var connection = new Connection(this, state, _endpoint);
         if (!_accepted.TryWrite(connection))
         {
             _rejectedAccepts++;

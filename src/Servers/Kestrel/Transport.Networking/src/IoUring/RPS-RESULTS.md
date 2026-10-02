@@ -2,6 +2,23 @@
 
 For the day-by-day story, including wake coalescing, unsuccessful experiments, and final-send/shutdown batching, start with the [development history](history/README.md). This report retains the detailed measurement series.
 
+## Direct epoll output and scaling (2026-10-01)
+
+Epoll now drains ready output on its concrete C# worker, without a separate asynchronous send loop/per-send completion task or queued connection-ID lookup. TCP avoids a speculative empty receive after a short successful read. Native code, TLS protocol settings and io_uring are unchanged. The [epoll report](../Epoll/README.md#direct-worker-output-and-scaling-october-1) explains the actual scheduling changes, unsuccessful first iteration, allocation tradeoffs, and scaling limits; no general layered API was introduced.
+
+Fresh stock and preserved original-epoll controls, 1,200 connections, 1,024-byte Kestrel responses, three-second warmup, one-second settle, two reversed-order 15-second measurements per cell. Client affinity is eight separate physical cores. Server core/.NET processor/epoll worker counts match:
+
+| Server cores | Transport | TCP short RPS | TCP long RPS | TLS short RPS | TLS long RPS |
+|---|---|---:|---:|---:|---:|
+| 4 | Stock Sockets / SslStream | 67,614 | 247,507 | 4,843 | 153,019 |
+| 4 | Direct-output epoll | 103,190 (+52.6%) | 281,038 (+13.5%) | 8,268 (+70.7%) | 178,823 (+16.9%) |
+| 8 | Stock Sockets / SslStream | 58,447 | 502,467 | 8,647 | 300,411 |
+| 8 | Direct-output epoll | 147,079 (+151.7%) | 483,249 (-3.8%) | 15,769 (+82.4%) | 366,683 (+22.1%) |
+
+Against previous epoll, four-core TCP improved about +9% short / +13% long, while TLS changed little. Eight-core gains over previous epoll were only about 0.6-2.8%; its TLS advantage over stock largely predated the tuning. Persistent allocations increased and stock retained lower allocation. A fixed-eight-core process with 1/2/4/8 epoll workers showed real worker-count scaling, but lower-concurrency peak probes did not establish one universally best setting.
+
+All epoll runs had complete ownership accounting and no wrk error summary. Stock TCP short had timeout counts, so the large short percentage is not an intrinsic server-capacity advantage. The client was close to its CPU budget on short TLS, and the workloads were deliberately overloaded. Approximately 483k TCP / 367k TLS persistent RPS at eight cores are measured capacity-region observations, not a proven physical-NIC maximum or sustainable latency-SLO rate. The full stage-labeled evidence index is sample `results/epoll-tuning-20261001.json`.
+
 ## Raw TCP epoll workers (2026-09-29, late morning)
 
 The separate `epollTcp` mode now performs nonblocking `recv`/`send` on the owning C# epoll worker, with no OpenSSL session or TLS layer. It shares epoll's worker/queue/page infrastructure with `epollTls`, but has a separate TCP state machine. The io_uring implementation is unchanged. See the [architecture and complete TCP report](../Epoll/README.md#raw-tcp-comparison-september-29).

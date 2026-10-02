@@ -7,7 +7,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class TcpConnection(Engine engine, ulong id, int fd) : ConnectionState(id)
+internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : ConnectionState(id)
 {
     private const int WriteBudget = 256 * 1024;
     private int _fd = fd, _sendLength, _sendOffset;
@@ -107,7 +107,7 @@ internal sealed class TcpConnection(Engine engine, ulong id, int fd) : Connectio
             engine.Metrics.RecvCalls++;
             fixed (byte* pointer = engine.Page(page).Span)
             {
-                count = Native.Receive(_fd, (nint)pointer, Engine.PageSize);
+                count = Native.Receive(_fd, (nint)pointer, EpollWorker.PageSize);
             }
             if (count <= 0)
             {
@@ -132,6 +132,12 @@ internal sealed class TcpConnection(Engine engine, ulong id, int fd) : Connectio
             engine.Metrics.RecvBytes += count;
             Leased++;
             engine.Received(Application!, page, count);
+            // Level-triggered epoll will report any remaining input. Do not make
+            // another usually-empty recv after the common small request.
+            if (count < EpollWorker.PageSize && Leased < 4)
+            {
+                return;
+            }
         }
         _readPaused = true;
         engine.Metrics.ReadPauses++;

@@ -6,8 +6,8 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-// Only the owning Engine thread mutates TLS and readiness state.
-internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint session) : ConnectionState(id)
+// Only the owning epoll thread mutates TLS and readiness state.
+internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint session) : ConnectionState(id)
 {
     private int _fd = fd;
     private nint _session = session;
@@ -107,7 +107,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
     {
         for (var i = 0; i < 16 && _sendData != 0; i++)
         {
-            var remaining = Math.Min(_sendLength - _sendOffset, Engine.PageSize);
+            var remaining = Math.Min(_sendLength - _sendOffset, EpollWorker.PageSize);
             engine.Metrics.SslWrites++;
             var result = Call(Native.TlsOperation.Write, _sendData + _sendOffset, remaining);
             if (!ApplyResult(result, ref _writeWant))
@@ -149,7 +149,7 @@ internal sealed class TlsConnection(Engine engine, ulong id, int fd, nint sessio
             Native.TlsResult result;
             fixed (byte* pointer = engine.Page(_readPage).Span)
             {
-                result = Call(Native.TlsOperation.Read, (nint)pointer, Engine.PageSize);
+                result = Call(Native.TlsOperation.Read, (nint)pointer, EpollWorker.PageSize);
             }
             if (!ApplyResult(result, ref _readWant))
             {

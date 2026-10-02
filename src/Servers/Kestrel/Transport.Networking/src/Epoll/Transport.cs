@@ -41,13 +41,13 @@ internal sealed class TransportFactory(string certificate, string key, int worke
 internal sealed class Listener : IConnectionListener
 {
     private readonly Channel<ConnectionContext> _accepted = Channel.CreateUnbounded<ConnectionContext>(new UnboundedChannelOptions { SingleReader = true });
-    private readonly Engine[] _engines;
+    private readonly EpollWorker[] _workers;
     private int _unbound;
 
     internal Listener(IPEndPoint endpoint, int[] cpus, bool tls, string certificate, string key, ILogger logger)
     {
         EndPoint = endpoint;
-        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, certificate, key, _accepted.Writer, logger)).ToArray();
+        _workers = cpus.Select(cpu => new EpollWorker(endpoint, cpu, tls, certificate, key, _accepted.Writer, logger)).ToArray();
     }
 
     public EndPoint EndPoint { get; }
@@ -56,16 +56,16 @@ internal sealed class Listener : IConnectionListener
     {
         try
         {
-            await Task.WhenAll(_engines.Select(engine => engine.Started)).ConfigureAwait(false);
+            await Task.WhenAll(_workers.Select(worker => worker.Started)).ConfigureAwait(false);
         }
         catch
         {
             _accepted.Writer.TryComplete();
-            foreach (var engine in _engines)
+            foreach (var worker in _workers)
             {
-                engine.Stop();
+                worker.Stop();
             }
-            await Task.WhenAll(_engines.Select(engine => engine.Stopped)).ConfigureAwait(false);
+            await Task.WhenAll(_workers.Select(worker => worker.Stopped)).ConfigureAwait(false);
             throw;
         }
     }
@@ -87,9 +87,9 @@ internal sealed class Listener : IConnectionListener
         if (Interlocked.Exchange(ref _unbound, 1) == 0)
         {
             _accepted.Writer.TryComplete();
-            foreach (var engine in _engines)
+            foreach (var worker in _workers)
             {
-                engine.Enqueue(new(Engine.CommandKind.Unbind));
+                worker.Enqueue(new(EpollWorker.CommandKind.Unbind));
             }
         }
         return default;
@@ -102,10 +102,10 @@ internal sealed class Listener : IConnectionListener
         {
             await connection.DisposeAsync().ConfigureAwait(false);
         }
-        foreach (var engine in _engines)
+        foreach (var worker in _workers)
         {
-            engine.Stop();
+            worker.Stop();
         }
-        await Task.WhenAll(_engines.Select(engine => engine.Stopped)).ConfigureAwait(false);
+        await Task.WhenAll(_workers.Select(worker => worker.Stopped)).ConfigureAwait(false);
     }
 }
