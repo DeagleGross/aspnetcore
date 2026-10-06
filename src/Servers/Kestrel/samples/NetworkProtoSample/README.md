@@ -1,6 +1,43 @@
 # NetworkProtoSample
 
-Non-shipping Linux io_uring experiment. All work is intentionally uncommitted in the designated local checkout. No existing framework API or default is changed.
+Non-shipping network transport experiments. The Linux history below describes the original io_uring work; newer epoll and Windows IOCP/RIO paths are separate implementations. No shipping framework API or default is changed.
+
+## Windows IOCP and RIO
+
+Stock Kestrel on Windows uses `System.Net.Sockets` backed by IOCP, not RIO or HTTP.sys. The new `--backend iocp` and `--backend rio` paths use dedicated owning workers and native operation lifetimes. Both are raw TCP transports; `--scheme https` adds Kestrel's existing `UseHttps`/`SslStream`/SChannel layer. There is no TLS baked into IOCP or RIO and no fd-bound OpenSSL wrapper on Windows.
+
+Beginner-friendly architecture guides: [IOCP](../../Transport.Networking/src/Iocp/README.md) and [RIO](../../Transport.Networking/src/Rio/README.md). They describe the actual worker loop, buffer ownership, idle-memory differences, and unsupported features.
+
+From the repository root, build and check a backend:
+
+```powershell
+. .\activate.ps1
+dotnet build src\Servers\Kestrel\samples\NetworkProtoSample\NetworkProtoSample.csproj -c Release -p:UseIisNativeAssets=false
+$env:NETWORKPROTO_WINDOWS_SNDBUF = '4096'
+$env:NETWORKPROTO_CPUS = '0,2,4,6'
+dotnet artifacts\bin\NetworkProtoSample\Release\net11.0\NetworkProtoSample.dll --backend iocp --scheme http --workers 4 --port 5801 --check-windows true
+dotnet artifacts\bin\NetworkProtoSample\Release\net11.0\NetworkProtoSample.dll --backend rio --scheme http --workers 4 --port 5802 --check-windows true
+```
+
+`UseIisNativeAssets=false` avoids building unrelated ANCM native assets; the sample is hosted directly by Kestrel. Linux shim build/copy targets are now Linux-only, so Windows needs neither liburing nor OpenSSL development libraries. The test above reaches real socket producers, not injected completions.
+
+To run a matched Windows throughput comparison:
+
+```powershell
+.\src\Servers\Kestrel\samples\NetworkProtoSample\scripts\windows-bench.ps1 -Repetitions 3 -Seconds 10 -Warmup 5 -Connections 256 -ShortConnections 64 -ServerCpus 0,2,4,6 -ClientCpus 16,18,20,22,24,26,28,30
+```
+
+The runner validates physical-core sibling mappings, gives every server the same affinity/processor budget, pins custom workers, keeps the load generator on disjoint physical cores, rotates backend order, verifies every response, and checks native ownership at shutdown. It rejects measured errors and non-resource startup errors. Known startup `WSAENOBUFS` retries are reported explicitly and can only proceed after every load lane completed a verified response. Short mode opens a connection per response and waits for TCP EOF; long mode keeps connections alive. Both use HTTP/1.1, pipeline depth one, and a 1024-byte response.
+
+All Windows HTTPS arms explicitly use TLS 1.3 with the same RSA fixture and disabled-resumption options. The local machine disables SChannel's TLS 1.2 server path; no registry settings are modified. Use `-TlsProtocol Tls12` only on a machine where that server protocol is available. The standalone sample preserves its old TLS 1.2 default unless `--tls-protocol Tls13` is supplied.
+
+The runner creates credentials only under ignored `artifacts`, never in source. Windows PEM credentials are reimported through PKCS#12 for SChannel key-provider compatibility. Core-affinity examples must be adjusted to your machine; the defaults above match the measured 7950X3D.
+
+The Windows load generator is not wrk2. Its results are achieved closed-loop throughput on native Windows loopback, not directly comparable with the older Linux/WSL tables or a physical-NIC capacity claim. Current diagnostic defaults use fresh loopback sources, the per-socket `SO_PORT_SCALABILITY` option, and cooldowns after short runs; these did not eliminate all load-client `WSAENOBUFS` bind/connect failures on this machine. No global TCP limits are modified, and measured failures remain rejected.
+
+Raw JSON, process metrics, topology, and server/client logs are retained under the runner's printed `RESULTS` directory. The implementation and measurements stay local and uncommitted.
+
+The [Windows results report](../../Transport.Networking/src/Windows/RESULTS.md) preserves one complete error-free matched round and explicitly records the incomplete repeated campaign.
 
 ## Acceptance and scope
 

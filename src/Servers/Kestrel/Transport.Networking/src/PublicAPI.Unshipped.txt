@@ -9,3 +9,6 @@ static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTcp(this 
 static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions
 static Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions.UseIoUring(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+Microsoft.AspNetCore.Hosting.WindowsTransportExtensions
+static Microsoft.AspNetCore.Hosting.WindowsTransportExtensions.UseIocp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+static Microsoft.AspNetCore.Hosting.WindowsTransportExtensions.UseRio(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!

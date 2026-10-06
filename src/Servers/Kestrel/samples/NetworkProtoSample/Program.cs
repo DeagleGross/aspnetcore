@@ -19,12 +19,12 @@ using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 var backend = builder.Configuration["backend"] ?? "sockets";
-if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls" or "epollTcp"))
+if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls" or "epollTcp" or "iocp" or "rio"))
 {
-    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls, IoUringBio, epollTls or epollTcp.");
+    throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls, IoUringBio, epollTls, epollTcp, iocp or rio.");
 }
 var port = builder.Configuration.GetValue("port", 5443);
-var scheme = builder.Configuration["scheme"] ?? (backend == "epollTcp" ? "http" : "https");
+var scheme = builder.Configuration["scheme"] ?? (backend is "epollTcp" or "iocp" or "rio" ? "http" : "https");
 if (scheme is not ("http" or "https"))
 {
     throw new ArgumentException("Use --scheme http or --scheme https.");
@@ -34,10 +34,18 @@ if (backend == "epollTcp" && scheme != "http")
     throw new ArgumentException("The epollTcp sample is HTTP-only; use epollTls for native TLS.");
 }
 using var certificate = scheme == "https"
-    ? X509Certificate2.CreateFromPemFile(
-        builder.Configuration["cert"] ?? throw new ArgumentException("Pass --cert <PEM certificate>."),
-        builder.Configuration["key"] ?? throw new ArgumentException("Pass --key <PEM private key>."))
+    ? LoadCertificate(builder.Configuration)
     : null;
+var tlsProtocols = builder.Configuration["tls-protocol"] switch
+{
+    null or nameof(SslProtocols.Tls12) => SslProtocols.Tls12,
+    nameof(SslProtocols.Tls13) => SslProtocols.Tls13,
+    _ => throw new ArgumentException("Use --tls-protocol Tls12 or Tls13.")
+};
+if (tlsProtocols != SslProtocols.Tls12 && backend is "IoUringTls" or "IoUringBio" or "epollTls")
+{
+    throw new ArgumentException("The native Linux TLS prototypes are fixed to TLS 1.2.");
+}
 var counters = new Counters();
 var payload = new string('x', 1023) + "\n";
 if (backend == "io_uring")
@@ -68,6 +76,14 @@ if (backend == "epollTcp")
 {
     builder.WebHost.UseEpollTcp(builder.Configuration.GetValue("workers", 4));
 }
+if (backend == "iocp")
+{
+    builder.WebHost.UseIocp(builder.Configuration.GetValue("workers", 4));
+}
+if (backend == "rio")
+{
+    builder.WebHost.UseRio(builder.Configuration.GetValue("workers", 4));
+}
 var quiet = builder.Configuration.GetValue("minimal", false);
 if (backend == "IoUringBio")
 {
@@ -81,7 +97,8 @@ builder.WebHost.ConfigureKestrel(options =>
         listen.Use(next => async connection =>
         {
             if ((backend == "io_uring" && !connection.ConnectionId.StartsWith("io-uring-", StringComparison.Ordinal))
-                || ((backend.StartsWith("IoUring", StringComparison.Ordinal) || backend is "epollTls" or "epollTcp") && !connection.ConnectionId.StartsWith("owned-", StringComparison.Ordinal)))
+                || ((backend.StartsWith("IoUring", StringComparison.Ordinal) || backend is "epollTls" or "epollTcp") && !connection.ConnectionId.StartsWith("owned-", StringComparison.Ordinal))
+                || (backend is "iocp" or "rio" && !connection.ConnectionId.StartsWith($"owned-{backend}-", StringComparison.Ordinal)))
             {
                 throw new InvalidOperationException("Configured backend does not match the actual connection.");
             }
@@ -103,10 +120,13 @@ builder.WebHost.ConfigureKestrel(options =>
             listen.UseHttps(https =>
             {
                 https.ServerCertificate = certificate;
-                https.SslProtocols = SslProtocols.Tls12;
+                https.SslProtocols = tlsProtocols;
                 https.OnAuthenticate = (_, ssl) =>
                 {
-                    ssl.CipherSuitesPolicy = new CipherSuitesPolicy([TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]);
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        ssl.CipherSuitesPolicy = new CipherSuitesPolicy([TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]);
+                    }
                     ssl.AllowTlsResume = false;
                 };
             });
@@ -127,6 +147,23 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-windows", false))
+{
+    if (backend is not ("iocp" or "rio") || scheme != "http")
+    {
+        throw new ArgumentException("The Windows transport check requires iocp or rio with --scheme http.");
+    }
+    try
+    {
+        await WindowsTransportCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL Windows transport: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-epoll-tcp", false))
 {
     if (backend != "epollTcp")
@@ -257,10 +294,39 @@ app.MapGet("/metrics", (HttpContext context) =>
         gen2 = GC.CollectionCount(2),
         workingSet = process.WorkingSet64,
         runtime = RuntimeInformation.FrameworkDescription,
+        tlsProtocolRequested = tlsProtocols.ToString(),
         tlsResumption = scheme == "http" ? "not applicable" : "disabled in SslStream options / native SSL_CTX"
     });
 });
+if (builder.Configuration.GetValue("benchmark", false))
+{
+    app.MapPost("/shutdown", (HttpContext context) =>
+    {
+        context.Response.OnCompleted(() =>
+        {
+            app.Lifetime.StopApplication();
+            return Task.CompletedTask;
+        });
+        return context.Response.WriteAsync("stopping\n");
+    });
+}
 await app.RunAsync();
+
+static X509Certificate2 LoadCertificate(IConfiguration configuration)
+{
+    var certificate = X509Certificate2.CreateFromPemFile(
+        configuration["cert"] ?? throw new ArgumentException("Pass --cert <PEM certificate>."),
+        configuration["key"] ?? throw new ArgumentException("Pass --key <PEM private key>."));
+    if (!OperatingSystem.IsWindows())
+    {
+        return certificate;
+    }
+    using (certificate)
+    {
+        // SChannel cannot use the ephemeral key produced by this PEM import.
+        return X509CertificateLoader.LoadPkcs12(certificate.Export(X509ContentType.Pkcs12), null, X509KeyStorageFlags.DefaultKeySet);
+    }
+}
 
 internal sealed class ConnectionState
 {

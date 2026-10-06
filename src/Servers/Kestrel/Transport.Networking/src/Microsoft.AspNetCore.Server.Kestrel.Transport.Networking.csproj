@@ -11,25 +11,26 @@
     <Reference Include="Microsoft.AspNetCore.Connections.Abstractions" />
     <Reference Include="Microsoft.AspNetCore.Http.Features" />
     <Compile Include="$(SharedSourceRoot)ServerInfrastructure\DuplexPipe.cs" Link="Internal\DuplexPipe.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
     <None Include="$(IntermediateOutputPath)libnetworkproto.so" Link="libnetworkproto.so" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(IntermediateOutputPath)libnetworkproto2.so" Link="libnetworkproto2.so" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(IntermediateOutputPath)libnetworkprotobio.so" Link="libnetworkprotobio.so" CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(IntermediateOutputPath)libnetworkprotoepoll.so" Link="libnetworkprotoepoll.so" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
-  <Target Name="BuildIoUringShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUring/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto.so">
-    <Error Condition="!$([MSBuild]::IsOSPlatform('Linux'))" Text="NetworkProto requires Linux and liburing-dev." />
+  <Target Name="BuildIoUringShim" BeforeTargets="CoreCompile" Condition="$([MSBuild]::IsOSPlatform('Linux'))" Inputs="$(MSBuildProjectDirectory)/IoUring/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto.so">
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared &quot;$(MSBuildProjectDirectory)/IoUring/native.c&quot; -luring -o &quot;$(IntermediateOutputPath)libnetworkproto.so&quot;" />
   </Target>
-  <Target Name="BuildOwnedShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUringTcp/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto2.so">
+  <Target Name="BuildOwnedShim" BeforeTargets="CoreCompile" Condition="$([MSBuild]::IsOSPlatform('Linux'))" Inputs="$(MSBuildProjectDirectory)/IoUringTcp/native.c" Outputs="$(IntermediateOutputPath)libnetworkproto2.so">
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared -I$HOME/.local/include &quot;$(MSBuildProjectDirectory)/IoUringTcp/native.c&quot; -L$HOME/.local/lib -Wl,-rpath,$HOME/.local/lib -luring -lssl -lcrypto -o &quot;$(IntermediateOutputPath)libnetworkproto2.so&quot;" />
   </Target>
-  <Target Name="BuildLayeredShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/IoUringBio/native.c" Outputs="$(IntermediateOutputPath)libnetworkprotobio.so">
+  <Target Name="BuildLayeredShim" BeforeTargets="CoreCompile" Condition="$([MSBuild]::IsOSPlatform('Linux'))" Inputs="$(MSBuildProjectDirectory)/IoUringBio/native.c" Outputs="$(IntermediateOutputPath)libnetworkprotobio.so">
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared -I$HOME/.local/include &quot;$(MSBuildProjectDirectory)/IoUringBio/native.c&quot; -L$HOME/.local/lib -Wl,-rpath,$HOME/.local/lib -luring -lssl -lcrypto -o &quot;$(IntermediateOutputPath)libnetworkprotobio.so&quot;" />
   </Target>
-  <Target Name="BuildEpollShim" BeforeTargets="CoreCompile" Inputs="$(MSBuildProjectDirectory)/Epoll/native.c" Outputs="$(IntermediateOutputPath)libnetworkprotoepoll.so">
+  <Target Name="BuildEpollShim" BeforeTargets="CoreCompile" Condition="$([MSBuild]::IsOSPlatform('Linux'))" Inputs="$(MSBuildProjectDirectory)/Epoll/native.c" Outputs="$(IntermediateOutputPath)libnetworkprotoepoll.so">
     <MakeDir Directories="$(IntermediateOutputPath)" />
     <Exec Command="cc -std=c11 -O2 -g -Wall -Wextra -Werror -fPIC -shared &quot;$(MSBuildProjectDirectory)/Epoll/native.c&quot; -lssl -lcrypto -o &quot;$(IntermediateOutputPath)libnetworkprotoepoll.so&quot;" />
   </Target>
