@@ -52,10 +52,10 @@
     <Project Path="src/Components/AI/src/Microsoft.AspNetCore.Components.AI.csproj" />
     <Project Path="src/Components/AI/test/Microsoft.AspNetCore.Components.AI.Tests.csproj" />
     <Project Path="src/Components/AI/testassets/AGUIDojoApi/AGUIDojoApi.csproj" />
-    <Project Path="src/Components/AI/testassets/AIApp/AIApp.csproj" />
     <Project Path="src/Components/AI/testassets/AIApp.E2E.Tests/AIApp.E2E.Tests.csproj" />
-    <Project Path="src/Components/AI/testassets/DojoClient/DojoClient.csproj" />
+    <Project Path="src/Components/AI/testassets/AIApp/AIApp.csproj" />
     <Project Path="src/Components/AI/testassets/DojoClient.E2E.Tests/DojoClient.E2E.Tests.csproj" />
+    <Project Path="src/Components/AI/testassets/DojoClient/DojoClient.csproj" />
   </Folder>
   <Folder Name="/src/Components/Authorization/">
     <Project Path="src/Components/Authorization/src/Microsoft.AspNetCore.Components.Authorization.csproj" />
@@ -78,8 +78,8 @@
     <Project Path="src/Components/CustomElements/src/Microsoft.AspNetCore.Components.CustomElements.csproj" />
   </Folder>
   <Folder Name="/src/Components/Gateway/">
-    <Project Path="src/Components/Gateway/src/Microsoft.AspNetCore.Components.Gateway.csproj" />
     <Project Path="src/Components/Gateway/cli/Microsoft.AspNetCore.Components.Gateway.Cli.csproj" />
+    <Project Path="src/Components/Gateway/src/Microsoft.AspNetCore.Components.Gateway.csproj" />
     <Project Path="src/Components/Gateway/test/Microsoft.AspNetCore.Components.Gateway.Tests.csproj" />
   </Folder>
   <Folder Name="/src/Components/Media/">
@@ -1068,6 +1068,7 @@
     <Project Path="src/Servers/Kestrel/samples/Http3SampleApp/Http3SampleApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/HttpClientApp/HttpClientApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/LargeResponseApp/LargeResponseApp.csproj" />
+    <Project Path="src/Servers/Kestrel/samples/NetworkProtoSample/NetworkProtoSample.csproj" />
     <Project Path="src/Servers/Kestrel/samples/PlaintextApp/PlaintextApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/SampleApp/Kestrel.SampleApp.csproj" />
     <Project Path="src/Servers/Kestrel/samples/SystemdTestApp/SystemdTestApp.csproj" />
@@ -1080,6 +1081,9 @@
   </Folder>
   <Folder Name="/src/Servers/Kestrel/tools/">
     <Project Path="src/Servers/Kestrel/tools/CodeGenerator/CodeGenerator.csproj" />
+  </Folder>
+  <Folder Name="/src/Servers/Kestrel/Transport.Networking/">
+    <Project Path="src/Servers/Kestrel/Transport.Networking/src/Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.csproj" />
   </Folder>
   <Folder Name="/src/Servers/Kestrel/Transport.Quic/">
     <Project Path="src/Servers/Kestrel/Transport.Quic/src/Microsoft.AspNetCore.Server.Kestrel.Transport.Quic.csproj" />
