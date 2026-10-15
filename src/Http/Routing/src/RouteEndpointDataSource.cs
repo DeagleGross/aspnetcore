@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Metadata;
@@ -12,13 +13,15 @@ using Microsoft.AspNetCore.Http.Validation;
 using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Extensions.Validation;
 
 namespace Microsoft.AspNetCore.Routing;
 
-internal sealed class RouteEndpointDataSource : EndpointDataSource
+internal sealed partial class RouteEndpointDataSource : EndpointDataSource
 {
     private readonly List<RouteEntry> _routeEntries = new();
     private readonly IServiceProvider _applicationServices;
@@ -258,7 +261,22 @@ internal sealed class RouteEndpointDataSource : EndpointDataSource
 
             // We ignore the returned EndpointMetadata has been already populated since we passed in non-null EndpointMetadata.
             // We always set factoryRequestDelegate in case something is still referencing the redirected version of the RequestDelegate.
-            factoryCreatedRequestDelegate = entry.CreateHandlerRequestDelegateFunc(entry.RouteHandler, rdfOptions, rdfMetadataResult).RequestDelegate;
+            try
+            {
+                factoryCreatedRequestDelegate = entry.CreateHandlerRequestDelegateFunc(entry.RouteHandler, rdfOptions, rdfMetadataResult).RequestDelegate;
+            }
+            catch (Exception exception)
+            {
+                // Preserve this route and its conventions so a handler creation failure only affects requests to this endpoint.
+                var logger = _applicationServices.GetService<ILogger<RouteEndpointDataSource>>() ?? NullLogger<RouteEndpointDataSource>.Instance;
+                Log.RequestDelegateCreationFailed(logger, builder.DisplayName, exception);
+                var failure = ExceptionDispatchInfo.Capture(exception);
+                factoryCreatedRequestDelegate = context =>
+                {
+                    failure.Throw();
+                    return Task.CompletedTask;
+                };
+            }
         }
 
         Debug.Assert(factoryCreatedRequestDelegate is not null);
@@ -376,5 +394,11 @@ internal sealed class RouteEndpointDataSource : EndpointDataSource
 
             Add(convention);
         }
+    }
+
+    private static partial class Log
+    {
+        [LoggerMessage(1, LogLevel.Error, "Failed to create the request delegate for endpoint '{EndpointName}'. Requests to this endpoint will throw the original exception.")]
+        public static partial void RequestDelegateCreationFailed(ILogger logger, string? endpointName, Exception exception);
     }
 }
