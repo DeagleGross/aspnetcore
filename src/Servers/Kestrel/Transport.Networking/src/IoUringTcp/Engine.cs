@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
@@ -38,8 +39,10 @@ internal sealed class Engine
     private long _wakes, _iterations, _commandsProcessed, _pagesRead, _bytesRead, _sendCommands, _finalCommands;
     private long _rejected, _rejectedDisposed;
     internal readonly bool Tls, Layered, RequireKtls, GuardPageReads;
+    internal readonly bool Shared;
     internal readonly int FinalMode, SendBufferSize;
     internal readonly ILogger Logger;
+    internal Action<ReadOnlySpan<byte>>? HandshakePrefixCallback { get; }
     internal readonly Counters Metrics = new();
     internal nint Context
     {
@@ -54,7 +57,8 @@ internal sealed class Engine
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted, bool layered)
+    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted, bool layered, bool shared = false,
+        Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
         _cpu = cpu;
@@ -62,6 +66,12 @@ internal sealed class Engine
         Layered = layered;
         Logger = logger;
         _accepted = accepted;
+        Shared = shared;
+        HandshakePrefixCallback = handshakePrefixCallback;
+        if (layered && handshakePrefixCallback is not null)
+        {
+            throw new NotSupportedException("Raw handshake-prefix observation currently requires the fd-bound TLS path, not the separate BIO experiment.");
+        }
         RequireKtls = Environment.GetEnvironmentVariable("NETWORKPROTO_KTLS") == "1";
         GuardPageReads = Environment.GetEnvironmentVariable("NETWORKPROTO_GUARD_PAGE_READ") == "1";
         FinalMode = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") switch
@@ -388,15 +398,18 @@ internal sealed class Engine
                 state.Dispose();
                 _connections.Remove(state.Id);
                 break;
+            case 7:
+                state.Application!.PumpOutput();
+                break;
             default:
                 throw new InvalidOperationException("Unknown transport command.");
         }
     }
 
-    internal Connection Publish(RingConnection state)
+    internal IProviderConnection Publish(RingConnection state)
     {
-        var connection = new Connection(this, state.Id, _endpoint, Tls);
-        if (!_accepted.TryWrite(connection))
+        IProviderConnection connection = Shared ? SharedConnectionContext.ForRing(this, state, _endpoint) : new Connection(this, state.Id, _endpoint, Tls);
+        if (!_accepted.TryWrite(connection.Context))
         {
             _rejected++;
             Interlocked.Increment(ref _pendingRejections);
@@ -405,7 +418,7 @@ internal sealed class Engine
         }
         return connection;
     }
-    private async Task DisposeRejectedAsync(Connection connection)
+    private async Task DisposeRejectedAsync(IProviderConnection connection)
     {
         try
         {
@@ -468,11 +481,18 @@ internal sealed class Engine
             Metrics.CipherReturned++;
         }
     }
-    internal unsafe void Received(Connection connection, int page, int length)
+    internal unsafe void Received(IProviderConnection connection, int page, int length)
     {
         _pagesRead++;
         _bytesRead += length;
-        connection.Input.Append((void*)Buffer(page), length, page);
+        if (connection is SharedConnectionContext shared)
+        {
+            shared.Receive(Buffer(page), length, page);
+        }
+        else
+        {
+            ((Connection)connection).Input.Append((void*)Buffer(page), length, page);
+        }
     }
     internal void CloseFd(ref int fd)
     {

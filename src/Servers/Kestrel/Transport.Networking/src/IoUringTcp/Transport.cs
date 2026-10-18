@@ -9,7 +9,8 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
-internal sealed class TransportFactory(bool tls, string cert, string key, ILoggerFactory logging, bool layered = false) : IConnectionListenerFactory
+internal sealed class TransportFactory(bool tls, string cert, string key, ILoggerFactory logging, bool layered = false, bool shared = false, int[]? processors = null,
+    Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null) : IConnectionListenerFactory
 {
     public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
@@ -18,7 +19,7 @@ internal sealed class TransportFactory(bool tls, string cert, string key, ILogge
         {
             throw new NotSupportedException("Prototype supports IPv4 loopback and a fixed port only.");
         }
-        var listener = new Listener(ip, tls, cert, key, logging.CreateLogger("NetworkProto.Owned"), layered);
+        var listener = new Listener(ip, tls, cert, key, logging.CreateLogger("NetworkProto.Owned"), layered, shared, processors, handshakePrefixCallback);
         await listener.StartAsync().ConfigureAwait(false);
         return listener;
     }
@@ -30,12 +31,13 @@ internal sealed class Listener : IConnectionListener
     private readonly Engine[] _engines;
     private int _unbound;
 
-    internal Listener(IPEndPoint endpoint, bool tls, string cert, string key, ILogger logger, bool layered)
+    internal Listener(IPEndPoint endpoint, bool tls, string cert, string key, ILogger logger, bool layered, bool shared = false, int[]? processors = null,
+        Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         EndPoint = endpoint;
-        var cpus = (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") ?? "0,2,4,6")
+        var cpus = processors ?? (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") ?? "0,2,4,6")
             .Split(',').Select(value => int.Parse(value, CultureInfo.InvariantCulture)).ToArray();
-        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, cert, key, logger, _accepted.Writer, layered)).ToArray();
+        _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, cert, key, logger, _accepted.Writer, layered, shared, handshakePrefixCallback)).ToArray();
     }
     public EndPoint EndPoint
     {

@@ -3,6 +3,7 @@
 
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
@@ -16,6 +17,7 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
     private nint _sendData;
     private uint _interest, _handshakeWant, _readWant, _writeWant, _shutdownWant;
     private long _deadline = Environment.TickCount64 + 10000;
+    private bool _prefixObserved;
     internal override void Drive(uint ready)
     {
         if (Closed)
@@ -30,6 +32,25 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
             }
             if (!_handshake)
             {
+                if (!_prefixObserved && engine.HandshakePrefixCallback is { } callback)
+                {
+                    try
+                    {
+                        if (!TlsHandshakePrefix.TryPeek(_fd, callback))
+                        {
+                            _handshakeWant = Native.Readable;
+                            return;
+                        }
+                        _prefixObserved = true;
+                    }
+                    catch (IOException error)
+                    {
+                        engine.Metrics.TlsErrors++;
+                        engine.Logger.LogError(error, "Epoll TLS handshake-prefix observation failed.");
+                        Finish(error);
+                        return;
+                    }
+                }
                 if (_handshakeWant != 0 && (ready & _handshakeWant) == 0)
                 {
                     return;
@@ -195,7 +216,7 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
                 engine.Metrics.WantWrite++;
                 return false;
             case Native.TlsStatus.Closed:
-                Application?.Input.End(null);
+                Application?.EndReceive(null);
                 _closeRequested = true;
                 return false;
             case Native.TlsStatus.PeerAbort:

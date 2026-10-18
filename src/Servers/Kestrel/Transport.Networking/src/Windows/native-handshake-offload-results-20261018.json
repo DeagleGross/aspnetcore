@@ -1,0 +1,247 @@
+{
+  "status": "Short-connection medians reached stock/wrapper parity, not a stable per-run +/-5% guarantee. No production or mixed-application claim.",
+  "branch": "dmkorolev/network-proto",
+  "profile": {
+    "operatingSystem": "Windows 11 Enterprise 10.0.26100",
+    "processor": "AMD Ryzen 9 7950X3D",
+    "runtime": ".NET 11.0.0-rc.1.26453.108",
+    "configuration": "Release",
+    "serverCpus": [0, 2, 4, 6],
+    "clientCpus": [16, 18, 20, 22, 24, 26, 28, 30],
+    "workers": 4,
+    "shortConnections": 32,
+    "keepAliveConnections": 256,
+    "warmupSeconds": 5,
+    "measurementSeconds": 8,
+    "repetitions": 3,
+    "tlsProtocol": "TLS 1.3",
+    "cipher": "TLS_AES_256_GCM_SHA384",
+    "certificate": "RSA-2048, same PEM fixture for all arms",
+    "resumption": "disabled in client/server configuration",
+    "http": "HTTP/1.1",
+    "pipeline": 1,
+    "bodyBytes": 1024,
+    "shortWaitsForTlsAndTcpEof": true,
+    "diagnosticTiming": false,
+    "sourceNetworkMode": "auto",
+    "connectApi": "async",
+    "threadPoolMinimumsOrMaximumsChanged": false,
+    "runner": "src\\Servers\\Kestrel\\samples\\NetworkProtoSample\\scripts\\windows-bench.ps1"
+  },
+  "sha256": {
+    "certificatePem": "C666BCC952D621049B93E94C04AFEF4DA903A5AE08B072CAEAC5E90794ACBD7D",
+    "provider": "3EA4CEAE54CCBDDA6A2DCE5A4F6DCA77A27BDD9F5A67DCF4C686D8C5BFAA228D",
+    "sample": "6DD97DB3C929D124F285B3E17ACB83A5679D199EA9210642AA83C595AA233BD0",
+    "load": "6E1F8B29BCD7829027626D959D44E803273DACD50675ED30977F2B9823F3DE13"
+  },
+  "freshComparisons": {
+    "ordering": "sharedIocp, sharedIocpTls, sharedRio, sharedRioTls, sockets; reversed in round 2",
+    "handshakeOffload": true,
+    "short": {
+      "artifactDirectory": "artifacts\\native-short-offload-matched-20261018",
+      "sockets": {
+        "rpsSamples": [1887.013324630821, 1917.993714903262, 2064.4129534675403],
+        "medianRps": 1917.993714903262,
+        "medianAllocatedBytesPerRequest": 16494.586073500966,
+        "medianServerCpuMicrosecondsPerRequest": 498.6702127659575
+      },
+      "sharedIocp": {
+        "rpsSamples": [1745.0678893701609, 1935.3083718188657, 2069.4634081492345],
+        "medianRps": 1935.3083718188657,
+        "medianAllocatedBytesPerRequest": 16318.575355678804,
+        "medianServerCpuMicrosecondsPerRequest": 532.8879504867513
+      },
+      "sharedIocpTls": {
+        "rpsSamples": [1976.4091510177539, 1944.1051252299337, 1664.2965111663123],
+        "medianRps": 1944.1051252299337,
+        "versusStockPercent": 1.361391860868988,
+        "versusWrapperPercent": 0.45454014146595334,
+        "medianAllocatedBytesPerRequest": 13175.028986422481,
+        "medianServerCpuMicrosecondsPerRequest": 458.1729226820661,
+        "threadPoolThreadSamples": [7, 8, 7],
+        "peakExecutorSlots": 8,
+        "peakQueuedJobs": 24
+      },
+      "sharedRio": {
+        "rpsSamples": [1989.8162200640259, 1840.9873744067254, 1946.6201975407398],
+        "medianRps": 1946.6201975407398,
+        "medianAllocatedBytesPerRequest": 16318.296718199077,
+        "medianServerCpuMicrosecondsPerRequest": 545.6248304854896
+      },
+      "sharedRioTls": {
+        "rpsSamples": [1988.880081294273, 1925.6656123233413, 1979.8208719454008],
+        "medianRps": 1979.8208719454008,
+        "versusStockPercent": 3.2235328281697395,
+        "versusWrapperPercent": 1.7055548096441608,
+        "medianAllocatedBytesPerRequest": 13323.57215091404,
+        "medianServerCpuMicrosecondsPerRequest": 455.8051341890315,
+        "threadPoolThreadSamples": [12, 12, 8],
+        "peakExecutorSlots": 8,
+        "peakQueuedJobs": 24
+      },
+      "limitation": "All three arms retained. IOCP native round 3 was -19.6% versus its same-round wrapper; median parity does not establish a per-run bound."
+    },
+    "keepAlive": {
+      "artifactDirectory": "artifacts\\native-short-offload-keepalive-20261018",
+      "sockets": {
+        "rpsSamples": [93820.03450212113, 91693.47154084266, 91217.30951203615],
+        "medianRps": 91693.47154084266,
+        "medianAllocatedBytesPerRequest": 1536.1326322233938,
+        "medianServerCpuMicrosecondsPerRequest": 39.94336927315398
+      },
+      "sharedIocp": {
+        "rpsSamples": [90290.41331314978, 91180.39778513445, 90671.62385338277],
+        "medianRps": 90671.62385338277,
+        "medianAllocatedBytesPerRequest": 2063.070917806605,
+        "medianServerCpuMicrosecondsPerRequest": 40.48462746394479
+      },
+      "sharedIocpTls": {
+        "rpsSamples": [89863.58861967767, 92790.65994990544, 93407.47118657766],
+        "medianRps": 92790.65994990544,
+        "versusStockPercent": 1.1965829089305213,
+        "versusWrapperPercent": 2.337044387722864,
+        "medianAllocatedBytesPerRequest": 1918.7357949493153,
+        "medianServerCpuMicrosecondsPerRequest": 39.57570330561977,
+        "threadPoolThreadSamples": [10, 11, 11],
+        "peakExecutorSlots": 8,
+        "peakQueuedJobs": 164
+      },
+      "sharedRio": {
+        "rpsSamples": [100235.71717686122, 100956.31861256999, 98243.10165345143],
+        "medianRps": 100235.71717686122,
+        "medianAllocatedBytesPerRequest": 2059.7354652754616,
+        "medianServerCpuMicrosecondsPerRequest": 36.46445585596733
+      },
+      "sharedRioTls": {
+        "rpsSamples": [103761.28619216887, 102389.4782268381, 102506.83024343174],
+        "medianRps": 102506.83024343174,
+        "versusStockPercent": 11.792942857194078,
+        "versusWrapperPercent": 2.2657722521835844,
+        "medianAllocatedBytesPerRequest": 1918.5833514881913,
+        "medianServerCpuMicrosecondsPerRequest": 35.498067039011985,
+        "threadPoolThreadSamples": [10, 10, 9],
+        "peakExecutorSlots": 8,
+        "peakQueuedJobs": 177
+      },
+      "limitation": "Fresh final-implementation guard against stock/wrappers, not a separate off/on isolation of keep-alive overhead. Small differences are not definitive."
+    }
+  },
+  "sameBinaryShortOffOn": {
+    "artifactDirectories": [
+      "artifacts\\native-short-offload-paired-r1-1",
+      "artifacts\\native-short-offload-paired-r1-0",
+      "artifacts\\native-short-offload-paired-r2-0",
+      "artifacts\\native-short-offload-paired-r2-1",
+      "artifacts\\native-short-offload-paired-r3-1",
+      "artifacts\\native-short-offload-paired-r3-0"
+    ],
+    "ordering": "On/off, off/on, on/off; provider order reverses between each paired setting",
+    "setting": "NETWORKPROTO_TLS_HANDSHAKE_OFFLOAD=0 or 1; same binaries and certificate",
+    "commandFairness": "Enabled in both controls",
+    "sharedIocpTls": {
+      "offRpsSamples": [1422.7629384525862, 1448.384119460944, 1450.4779060852545],
+      "onRpsSamples": [1896.8155312453687, 1876.557568044268, 1695.8557042677226],
+      "offMedianRps": 1448.384119460944,
+      "onMedianRps": 1876.557568044268,
+      "gainPercent": 29.562147418647513,
+      "offThreadPoolThreadSamples": [6, 6, 6],
+      "onThreadPoolThreadSamples": [12, 11, 8],
+      "medianOfPerRunMeanClientPhasesMicroseconds": {
+        "off": {
+          "handshake": 14438.451922249935,
+          "requestResponse": 6364.4654769071985,
+          "tcpEof": 541.7450336264874
+        },
+        "on": {
+          "handshake": 12671.928673048797,
+          "requestResponse": 2440.9537627975005,
+          "tcpEof": 343.33526126844833
+        }
+      }
+    },
+    "sharedRioTls": {
+      "offRpsSamples": [1494.3376414263103, 1485.119277010401, 1492.9230332482757],
+      "onRpsSamples": [1911.7530400719822, 1958.676189577433, 1871.7489031066052],
+      "offMedianRps": 1492.9230332482757,
+      "onMedianRps": 1911.7530400719822,
+      "gainPercent": 28.05436030499333,
+      "offThreadPoolThreadSamples": [6, 8, 8],
+      "onThreadPoolThreadSamples": [11, 9, 10],
+      "medianOfPerRunMeanClientPhasesMicroseconds": {
+        "off": {
+          "handshake": 11758.405975762642,
+          "requestResponse": 6370.021328875889,
+          "tcpEof": 2383.9922273297116
+        },
+        "on": {
+          "handshake": 11992.080657172719,
+          "requestResponse": 2813.7041930537966,
+          "tcpEof": 537.027750195976
+        }
+      }
+    },
+    "interpretation": "Lower head-of-line delay, not proof of faster cryptographic work. Absolute rates must not be compared across campaigns."
+  },
+  "validation": {
+    "includedBenchmarkArms": 42,
+    "warmupErrors": 0,
+    "measuredErrors": 0,
+    "startupResourceErrors": 0,
+    "teardownErrors": 0,
+    "nativeConnectionErrors": 0,
+    "nativeGracefulTimeouts": 0,
+    "remainingNativeIo": 0,
+    "remainingHandshakeHolds": 0,
+    "remainingInputOrOutputLeases": 0,
+    "remainingConnections": 0,
+    "executorRejected": 0,
+    "executorActiveAtShutdown": 0,
+    "executorQueuedAtShutdown": 0,
+    "allExecutorSubmittedEqualCompleted": true,
+    "allNativeHttpReceiveCompactionCopyBytes": 0,
+    "sameFixtureAndBinaryHashesAcrossAllArms": true,
+    "executorMaximumActive": 8,
+    "executorMaximumQueued": 512,
+    "nativeCorrectness": {
+      "artifactDirectory": "artifacts\\native-short-offload-ownership",
+      "serverProcessAffinity": "0x55",
+      "scenarios": [
+        "Authenticated publication and retained plaintext during later fragmented traffic",
+        "Owned sends and exact 4 MiB output with withheld reader",
+        "Peer TLS/TCP half-close with response",
+        "Explicit truncated TLS input failure",
+        "Real reset during pending encrypted output",
+        "Incomplete handshake/accept disposal",
+        "64 real clients, observed running initial-handshake job, listener cancellation and full drain"
+      ],
+      "runningJobCancellations": [
+        { "provider": "sharedIocpTls", "workers": 1, "observed": 1 },
+        { "provider": "sharedRioTls", "workers": 1, "observed": 2 },
+        { "provider": "sharedIocpTls", "workers": 4, "observed": 1 },
+        { "provider": "sharedRioTls", "workers": 4, "observed": 2 }
+      ],
+      "allSubmittedJobsCompletedAndOwnershipDrained": true
+    },
+    "tcpOwnershipGuard": {
+      "artifactDirectory": "artifacts\\native-handshake-offload-tcp-guard",
+      "providers": ["iocp", "rio", "sharedIocp", "sharedRio"],
+      "workerCounts": [1, 4],
+      "result": "All eight combinations passed actual four-page receive pressure, native producer, cancellation and ownership-drain assertions."
+    },
+    "linuxCompatibility": {
+      "branch": "dmkorolev/network-proto",
+      "areaBuildCommand": "./src/Servers/Kestrel/build.sh --build --projects \"$PWD/src/Servers/Kestrel/Transport.Networking/samples/NativeTlsHttp1/NativeTlsHttp1.csproj\" --configuration Debug --no-restore --no-build-native --no-build-nodejs --no-build-java",
+      "build": "passed; zero warnings/errors",
+      "epollNativeTlsHttp1": "passed",
+      "ioUringNativeTlsHttp1": "passed",
+      "linuxExecutorAdded": false
+    },
+    "notEstablished": [
+      "Stable +/-5% per-run parity",
+      "Mixed real-application ThreadPool contention or starvation behavior",
+      "Queue-full admission path under real load",
+      "Physical-NIC capacity, production recovery or universal workload improvement"
+    ]
+  },
+  "historicalEvidence": "native-tls-results-20261018.json is the preserved earlier inline-only implementation, not the latest result."
+}

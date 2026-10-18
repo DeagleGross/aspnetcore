@@ -10,6 +10,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
@@ -45,15 +46,20 @@ internal sealed class EpollWorker
     internal readonly Counters Metrics = new();
     internal readonly ILogger Logger;
     internal bool Tls { get; }
+    internal bool Shared { get; }
+    internal Action<ReadOnlySpan<byte>>? HandshakePrefixCallback { get; }
 
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger)
+    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger, bool shared = false,
+        Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
         _cpu = cpu;
         Tls = tls;
+        Shared = shared;
+        HandshakePrefixCallback = handshakePrefixCallback;
         _accepted = accepted;
         Logger = logger;
         using (ExecutionContext.SuppressFlow())
@@ -338,10 +344,10 @@ internal sealed class EpollWorker
         state.Send(data, length, final);
     }
 
-    internal Connection Publish(ConnectionState state)
+    internal IProviderConnection Publish(ConnectionState state)
     {
-        var connection = new Connection(this, state, _endpoint);
-        if (!_accepted.TryWrite(connection))
+        IProviderConnection connection = Shared ? SharedConnectionContext.ForEpoll(this, state, _endpoint) : new Connection(this, state, _endpoint);
+        if (!_accepted.TryWrite(connection.Context))
         {
             _rejectedAccepts++;
             Interlocked.Increment(ref _pendingRejections);
@@ -351,7 +357,7 @@ internal sealed class EpollWorker
         return connection;
     }
 
-    private async Task DisposeRejectedAsync(Connection connection)
+    private async Task DisposeRejectedAsync(IProviderConnection connection)
     {
         try
         {
@@ -415,11 +421,18 @@ internal sealed class EpollWorker
         }
     }
 
-    internal void Received(Connection application, int page, int length)
+    internal void Received(IProviderConnection application, int page, int length)
     {
         _pagesRead++;
         _bytes += length;
-        application.Input.Append(Page(page)[..length], page);
+        if (application is SharedConnectionContext shared)
+        {
+            shared.Receive(Page(page), length, page);
+        }
+        else
+        {
+            ((Connection)application).Input.Append(Page(page)[..length], page);
+        }
     }
 
     internal void CloseDescriptor(ref int fd)

@@ -9,13 +9,14 @@ using System.Net.Sockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Rio;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
 internal sealed class WindowsWorker
 {
-    internal enum CommandKind { Accepted, OutputReady, ReturnPage, Close, Forget, Unbind, Stop, DisposalCompleted }
+    internal enum CommandKind { Accepted, OutputReady, ReturnPage, Close, Forget, Unbind, Stop, DisposalCompleted, HandshakeCompleted }
     internal readonly record struct Command(CommandKind Kind, ConnectionState? State = null,
         IMemoryOwner<byte>? Page = null, SocketHandle? Socket = null, Exception? Error = null);
 
@@ -41,10 +42,16 @@ internal sealed class WindowsWorker
     private nuint _nextId = 16;
     private Exception? _failure;
     private long _stopStarted;
+    private int _pendingHandshakes;
 
     internal int Index { get; }
     internal string Backend => IsRio ? "rio" : "iocp";
     internal bool IsRio => _rio is not null;
+    internal bool Shared => _listener.Shared;
+    internal bool TlsTiming { get; } = Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_TIMING") == "1";
+    internal Schannel.Credential? TlsCredential => _listener.TlsCredential;
+    internal HandshakeScheduler? Handshakes => _listener.Handshakes;
+    internal bool IsCurrentThread => Environment.CurrentManagedThreadId == _threadId;
     internal bool ZeroByteReads { get; } = Environment.GetEnvironmentVariable("NETWORKPROTO_IOCP_ZERO_BYTE") != "0";
     internal NativeMemoryPool InputPool { get; private set; } = null!;
     internal NativeMemoryPool OutputPool { get; private set; } = null!;
@@ -74,6 +81,10 @@ internal sealed class WindowsWorker
 
     internal void Enqueue(Command command)
     {
+        if (command.Kind == CommandKind.OutputReady)
+        {
+            command.State!.OutputQueued();
+        }
         _commands.Enqueue(command);
         if (Environment.CurrentManagedThreadId == _threadId || Interlocked.Exchange(ref _wakeScheduled, 1) != 0)
         {
@@ -115,13 +126,11 @@ internal sealed class WindowsWorker
             while (!_stopping || _connections.Count != 0 || _pendingIo != 0 || !_commands.IsEmpty || Volatile.Read(ref _pendingDisposals) != 0)
             {
                 Volatile.Write(ref _wakeScheduled, 0);
-                for (var i = 0; i < 1024 && _commands.TryDequeue(out var command); i++)
-                {
-                    Process(command);
-                }
+                DrainCommands(1024);
                 for (var i = 0; i < 1024 && _immediate.TryDequeue(out var completed); i++)
                 {
                     Complete(completed.Operation, completed.Bytes, 0);
+                    DrainCommands(16);
                 }
                 if (_rio is not null)
                 {
@@ -148,6 +157,7 @@ internal sealed class WindowsWorker
                         continue;
                     }
                     Complete((nint)completion.Operation, checked((int)completion.Bytes), Native.CompletionError(completion.Status));
+                    ServiceLocalWork();
                 }
                 var now = Environment.TickCount64;
                 if (now >= nextSweep)
@@ -158,7 +168,7 @@ internal sealed class WindowsWorker
                         state.CheckDeadline(now);
                     }
                 }
-                if (_stopping && Environment.TickCount64 - _stopStarted > 15000 && (_pendingIo != 0 || _connections.Count != 0))
+                if (_stopping && Environment.TickCount64 - _stopStarted > 15000 && (_pendingIo != 0 || _connections.Count != 0 || _pendingHandshakes != 0))
                 {
                     Environment.FailFast("Windows transport shutdown did not drain native ownership; refusing to release live buffers.");
                 }
@@ -170,7 +180,7 @@ internal sealed class WindowsWorker
             Logger.LogError(error, "{Backend} worker {Worker} failed.", Backend, Index);
             _started.TrySetException(error);
             _listener.Failed(error);
-            if (_pendingIo != 0)
+            if (_pendingIo != 0 || _pendingHandshakes != 0)
             {
                 Environment.FailFast("Windows completion worker failed while native I/O still owns memory.", error);
             }
@@ -201,15 +211,36 @@ internal sealed class WindowsWorker
             _unbound.TrySetResult();
             Console.WriteLine("WINDOWS_TRANSPORT " + JsonSerializer.Serialize(new
             {
-                backend = Backend, worker = Index, cpu = _cpu,
+                backend = Backend, shared = Shared, nativeTls = TlsCredential is not null, worker = Index, cpu = _cpu,
                 accepted = Metrics.Accepted, closed = Metrics.Closed, rejected = Metrics.Rejected,
                 polls = Metrics.Polls, wakes = Metrics.Wakes, completions = Metrics.Completions,
                 probes = Metrics.Probes, receives = Metrics.Receives, sends = Metrics.Sends,
                 synchronousCompletions = Metrics.SynchronousCompletions,
                 receivedBytes = Metrics.ReceivedBytes, sentBytes = Metrics.SentBytes,
+                sendAdapterCopyBytes = Metrics.SendAdapterCopyBytes,
                 partialSends = Metrics.PartialSends, backpressure = Metrics.ReceiveBackpressure,
                 maxLeasedPages = Metrics.MaxLeasedPages, rioNotifications = Metrics.RioNotifications,
                 connectionErrors = Metrics.ConnectionErrors, pendingIo = _pendingIo,
+                firstConnectionError = Metrics.FirstConnectionError,
+                tlsHandshakes = Metrics.TlsHandshakes, tlsEncryptCalls = Metrics.TlsEncryptCalls, tlsDecryptCalls = Metrics.TlsDecryptCalls,
+                tlsPlaintextBytes = Metrics.TlsPlaintextBytes, tlsReceiveCopyBytes = Metrics.TlsReceiveCopyBytes,
+                tlsSendCopyBytes = Metrics.TlsSendCopyBytes, tlsHandshakeCopyBytes = Metrics.TlsHandshakeCopyBytes,
+                tlsIncompleteRecords = Metrics.TlsIncompleteRecords, tlsCloseNotify = Metrics.TlsCloseNotify,
+                tlsSendBufferRentals = Metrics.TlsSendBufferRentals,
+                tlsFinalSendHints = Metrics.TlsFinalSendHints,
+                tlsTiming = TlsTiming,
+                tlsHandshakeToPlainTicks = Metrics.TlsHandshakeToPlainTicks, tlsTimedPlaintext = Metrics.TlsTimedPlaintext,
+                tlsApplicationTicks = Metrics.TlsApplicationTicks, tlsTimedApplication = Metrics.TlsTimedApplication,
+                tlsEncryptTicks = Metrics.TlsEncryptTicks, tlsSendTicks = Metrics.TlsSendTicks, tlsTimedSend = Metrics.TlsTimedSend,
+                tlsCloseTicks = Metrics.TlsCloseTicks, tlsTimedClose = Metrics.TlsTimedClose,
+                tlsOutputQueueTicks = Metrics.TlsOutputQueueTicks, tlsOutputQueueRuns = Metrics.TlsOutputQueueRuns,
+                tlsOutputQueueMaxTicks = Metrics.TlsOutputQueueMaxTicks,
+                tlsHandshakeTicks = Metrics.TlsHandshakeTicks, tlsHandshakeCalls = Metrics.TlsHandshakeCalls,
+                tlsInfoTicks = Metrics.TlsInfoTicks,
+                handshakeOffload = Handshakes is not null, pendingHandshakes = _pendingHandshakes,
+                offloadedHandshakes = Metrics.OffloadedHandshakes, cancelledHandshakeWork = Metrics.CancelledHandshakeWork,
+                cancelledRunningHandshake = Metrics.CancelledRunningHandshake, tlsHandshakeQueueTicks = Metrics.TlsHandshakeQueueTicks,
+                timestampFrequency = System.Diagnostics.Stopwatch.Frequency,
                 gracefulTimeouts = Metrics.GracefulTimeouts,
                 connections = _connections.Count, inputLeases = InputPool?.Outstanding ?? 0,
                 outputLeases = OutputPool?.Outstanding ?? 0,
@@ -226,6 +257,23 @@ internal sealed class WindowsWorker
         }
     }
 
+    private void DrainCommands(int budget)
+    {
+        for (var index = 0; index < budget && _commands.TryDequeue(out var command); index++)
+        {
+            Process(command);
+        }
+    }
+
+    private void ServiceLocalWork()
+    {
+        DrainCommands(16);
+        if (_immediate.TryDequeue(out var completion))
+        {
+            Complete(completion.Operation, completion.Bytes, 0);
+        }
+    }
+
     private void Process(Command command)
     {
         switch (command.Kind)
@@ -234,6 +282,7 @@ internal sealed class WindowsWorker
                 Adopt(command.Socket!);
                 break;
             case CommandKind.OutputReady:
+                command.State!.OutputDequeued();
                 command.State!.Application.PumpOutput();
                 break;
             case CommandKind.ReturnPage:
@@ -263,6 +312,9 @@ internal sealed class WindowsWorker
                 }
                 break;
             case CommandKind.DisposalCompleted:
+                break;
+            case CommandKind.HandshakeCompleted:
+                command.State!.HandshakeCompleted();
                 break;
         }
     }
@@ -405,11 +457,9 @@ internal sealed class WindowsWorker
             }
             Metrics.Accepted++;
             state.StartRead();
-            if (!_listener.Publish(state.Application))
+            if (!state.HasTls)
             {
-                Metrics.Rejected++;
-                state.Close(new ConnectionAbortedException("The accepted-connection queue is closed or full."), abortive: true);
-                _ = DisposeRejected(state.Application);
+                Publish(state);
             }
         }
         catch (Exception error)
@@ -417,7 +467,33 @@ internal sealed class WindowsWorker
             Logger.LogError(error, "Windows socket adoption failed.");
             Metrics.Rejected++;
             state.Close(error, abortive: true);
-            _ = DisposeRejected(state.Application);
+        }
+    }
+
+    internal void Publish(ConnectionState state)
+    {
+        if (_stopping || !_listener.Publish(state.Application))
+        {
+            Metrics.Rejected++;
+            state.Close(new ConnectionAbortedException("The accepted-connection queue is closed or full."), abortive: true);
+        }
+        else
+        {
+            state.Published = true;
+        }
+    }
+
+    internal void DisposeUnpublished(IProviderConnection connection) => _ = DisposeRejected(connection);
+    internal void HandshakeQueued()
+    {
+        _pendingHandshakes++;
+        Metrics.OffloadedHandshakes++;
+    }
+    internal void HandshakeFinished()
+    {
+        if (--_pendingHandshakes < 0)
+        {
+            throw new InvalidOperationException("Native TLS handshake ownership underflow.");
         }
     }
 
@@ -461,7 +537,7 @@ internal sealed class WindowsWorker
         }
     }
 
-    internal unsafe void SubmitSend(ConnectionState state, ReadOnlyMemory<byte> memory)
+    internal unsafe void SubmitSend(ConnectionState state, ReadOnlyMemory<byte> memory, nint pinnedAddress = 0)
     {
         var operation = state.Write;
         operation.Reset();
@@ -469,17 +545,26 @@ internal sealed class WindowsWorker
         uint bytes = 0;
         if (_rio is not null)
         {
+            if (!state.HasTls && Logger.IsEnabled(LogLevel.Trace))
+            {
+                using var pin = memory.Pin();
+                NativeSendTrace.Write(Logger, (nint)pin.Pointer, memory.Length);
+            }
             _rio.Send(state.RequestQueue, NativeMemoryPool.RegisteredBuffer(memory), (nint)operation.Pointer);
         }
         else
         {
-            using var pin = memory.Pin();
-            var buffer = new Native.SocketBuffer { Data = (byte*)pin.Pointer, Length = checked((uint)memory.Length) };
+            using var pin = pinnedAddress == 0 ? memory.Pin() : default;
+            var buffer = new Native.SocketBuffer { Data = pinnedAddress == 0 ? (byte*)pin.Pointer : (byte*)pinnedAddress, Length = checked((uint)memory.Length) };
             var result = Native.WSASend(state.Socket, &buffer, 1, &bytes, 0, operation.Pointer, 0);
             if (result == -1
                 && Native.WSAGetLastError() != Native.IoPending)
             {
                 throw Native.SocketError("WSASend");
+            }
+            if (!state.HasTls)
+            {
+                NativeSendTrace.Write(Logger, (nint)buffer.Data, memory.Length);
             }
             synchronous = result == 0;
         }
@@ -502,6 +587,7 @@ internal sealed class WindowsWorker
             {
                 var result = results[i];
                 Complete((nint)result.Request, checked((int)result.Bytes), result.Status);
+                ServiceLocalWork();
             }
             if (count < 128)
             {
@@ -548,7 +634,7 @@ internal sealed class WindowsWorker
         Metrics.Closed++;
     }
 
-    private async Task DisposeRejected(Connection connection)
+    private async Task DisposeRejected(IProviderConnection connection)
     {
         Interlocked.Increment(ref _pendingDisposals);
         try
@@ -585,9 +671,19 @@ internal sealed class WindowsWorker
     internal sealed class Counters
     {
         internal long Accepted, Closed, Rejected, Polls, Wakes, Completions, Probes, Receives, Sends;
-        internal long ReceivedBytes, SentBytes, PartialSends, ReceiveBackpressure, RioNotifications, ConnectionErrors;
+        internal long ReceivedBytes, SentBytes, PartialSends, ReceiveBackpressure, RioNotifications, ConnectionErrors, SendAdapterCopyBytes;
         internal long SynchronousCompletions;
         internal long GracefulTimeouts;
+        internal long TlsHandshakes, TlsEncryptCalls, TlsDecryptCalls, TlsPlaintextBytes;
+        internal long TlsReceiveCopyBytes, TlsSendCopyBytes, TlsHandshakeCopyBytes, TlsIncompleteRecords, TlsCloseNotify;
+        internal long TlsSendBufferRentals;
+        internal long TlsFinalSendHints;
+        internal long TlsHandshakeToPlainTicks, TlsApplicationTicks, TlsEncryptTicks, TlsSendTicks, TlsCloseTicks;
+        internal long TlsTimedPlaintext, TlsTimedApplication, TlsTimedSend, TlsTimedClose;
+        internal long TlsOutputQueueTicks, TlsOutputQueueRuns, TlsOutputQueueMaxTicks;
+        internal long TlsHandshakeTicks, TlsHandshakeCalls, TlsInfoTicks;
+        internal long OffloadedHandshakes, CancelledHandshakeWork, CancelledRunningHandshake, TlsHandshakeQueueTicks;
+        internal string? FirstConnectionError;
         internal int MaxLeasedPages;
     }
 }

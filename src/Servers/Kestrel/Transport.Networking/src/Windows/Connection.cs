@@ -4,11 +4,17 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
-internal sealed class Connection : DefaultConnectionContext
+internal sealed class Connection : DefaultConnectionContext, IProviderConnection
 {
+    ConnectionContext IProviderConnection.Context => this;
+    void IProviderConnection.Sent(int count, Exception? error) => Sent(error);
+    void IProviderConnection.Closed(Exception? error) => NativeClosed(error);
+    void IProviderConnection.EndReceive(Exception? error) => Input.End(error);
+    void IProviderConnection.PumpOutput() => PumpOutput();
     private readonly WindowsWorker _worker;
     private readonly ConnectionState _state;
     private readonly Pipe _output;

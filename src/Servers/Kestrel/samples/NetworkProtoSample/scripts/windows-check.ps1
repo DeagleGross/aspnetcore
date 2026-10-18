@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string[]]$Backends = @('iocp', 'rio'),
     [int[]]$WorkerCounts = @(1, 2, 4),
     [int[]]$Cpus = @(0, 2, 4, 6),
     [switch]$SkipBuild,
@@ -25,7 +26,7 @@ try {
     $dotnet = (Get-Command dotnet).Source
     foreach ($count in $WorkerCounts) {
         if ($count -le 0 -or $count -gt $Cpus.Count) { throw 'Worker count exceeds the supplied CPU list.' }
-        foreach ($backend in @('iocp', 'rio')) {
+        foreach ($backend in $Backends) {
             $info = [System.Diagnostics.ProcessStartInfo]::new($dotnet)
             $info.UseShellExecute = $false
             $info.RedirectStandardOutput = $true
@@ -57,7 +58,7 @@ try {
                 if (($reports | Measure-Object backpressure -Sum).Sum -eq 0 -or ($reports | Measure-Object maxLeasedPages -Maximum).Maximum -ne 4) {
                     throw "$backend/$count did not reach the actual four-page receive pressure boundary."
                 }
-                if ($backend -eq 'rio' -and ($reports | Measure-Object rioNotifications -Sum).Sum -eq 0) {
+                if ($backend -in @('rio', 'sharedRio') -and ($reports | Measure-Object rioNotifications -Sum).Sum -eq 0) {
                     throw 'The actual RIO producer path did not run.'
                 }
                 if (@($text -split "`n" | Where-Object { $_.StartsWith('PASS Windows ', [StringComparison]::Ordinal) }).Count -ne 3) {

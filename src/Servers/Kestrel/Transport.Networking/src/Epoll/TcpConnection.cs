@@ -4,6 +4,7 @@
 using System.ComponentModel;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
@@ -79,6 +80,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             {
                 engine.Metrics.PartialSends++;
             }
+            NativeSendTrace.Write(engine.Logger, _sendData + _sendOffset, count);
             engine.Metrics.SendBytes += count;
             _sendOffset += count;
             budget -= count;
@@ -121,7 +123,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
                     // A TCP half-close ends input, not the response still being produced.
                     _readEnded = true;
                     engine.Metrics.ReadEofs++;
-                    Application!.Input.End(null);
+                    Application!.EndReceive(null);
                 }
                 else
                 {

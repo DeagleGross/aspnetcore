@@ -4,6 +4,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
+using System.Net.Transport;
 using System.Runtime.InteropServices;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
@@ -19,7 +20,9 @@ using Microsoft.Extensions.DependencyInjection;
 
 var builder = WebApplication.CreateBuilder(args);
 var backend = builder.Configuration["backend"] ?? "sockets";
-if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls" or "epollTcp" or "iocp" or "rio"))
+if (backend is not ("sockets" or "io_uring" or "IoUringTcp" or "IoUringTls" or "IoUringBio" or "epollTls" or "epollTcp" or "iocp" or "rio"
+    or "sharedEpollTcp" or "sharedEpollTls" or "sharedIoUringTcp" or "sharedIoUringTls" or "sharedIocp" or "sharedRio"
+    or "sharedIocpTls" or "sharedRioTls"))
 {
     throw new ArgumentException("Use --backend sockets, io_uring, IoUringTcp, IoUringTls, IoUringBio, epollTls, epollTcp, iocp or rio.");
 }
@@ -38,7 +41,8 @@ using var certificate = scheme == "https"
     : null;
 var tlsProtocols = builder.Configuration["tls-protocol"] switch
 {
-    null or nameof(SslProtocols.Tls12) => SslProtocols.Tls12,
+    null => backend is "sharedIocpTls" or "sharedRioTls" ? SslProtocols.Tls13 : SslProtocols.Tls12,
+    nameof(SslProtocols.Tls12) => SslProtocols.Tls12,
     nameof(SslProtocols.Tls13) => SslProtocols.Tls13,
     _ => throw new ArgumentException("Use --tls-protocol Tls12 or Tls13.")
 };
@@ -48,6 +52,27 @@ if (tlsProtocols != SslProtocols.Tls12 && backend is "IoUringTls" or "IoUringBio
 }
 var counters = new Counters();
 var payload = new string('x', 1023) + "\n";
+if (backend.StartsWith("shared", StringComparison.Ordinal))
+{
+    NetworkEngineOptions engineOptions = backend switch
+    {
+        "sharedEpollTcp" or "sharedEpollTls" => new EpollEngineOptions(),
+        "sharedIoUringTcp" or "sharedIoUringTls" => new IoUringEngineOptions(),
+        "sharedIocp" or "sharedIocpTls" => new IocpEngineOptions(),
+        "sharedRio" or "sharedRioTls" => new RioEngineOptions(),
+        _ => throw new ArgumentException("Unknown shared backend.")
+    };
+    engineOptions.WorkerCount = builder.Configuration.GetValue("workers", 4);
+    var nativeTls = backend is "sharedEpollTls" or "sharedIoUringTls" or "sharedIocpTls" or "sharedRioTls"
+        ? new NetworkNativeTlsOptions { CertificatePath = builder.Configuration["cert"]!, PrivateKeyPath = builder.Configuration["key"]! }
+        : null;
+    var nativeProtocol = backend is "sharedIocpTls" or "sharedRioTls" ? SslProtocols.Tls13 : SslProtocols.Tls12;
+    if (nativeTls is not null && (scheme != "https" || tlsProtocols != nativeProtocol))
+    {
+        throw new ArgumentException($"The native TLS backend requires HTTPS with {nativeProtocol}.");
+    }
+    builder.WebHost.UseNetworkTransport(engineOptions, nativeTls);
+}
 if (backend == "io_uring")
 {
     builder.WebHost.UseIoUring();
@@ -98,7 +123,8 @@ builder.WebHost.ConfigureKestrel(options =>
         {
             if ((backend == "io_uring" && !connection.ConnectionId.StartsWith("io-uring-", StringComparison.Ordinal))
                 || ((backend.StartsWith("IoUring", StringComparison.Ordinal) || backend is "epollTls" or "epollTcp") && !connection.ConnectionId.StartsWith("owned-", StringComparison.Ordinal))
-                || (backend is "iocp" or "rio" && !connection.ConnectionId.StartsWith($"owned-{backend}-", StringComparison.Ordinal)))
+                || (backend is "iocp" or "rio" && !connection.ConnectionId.StartsWith($"owned-{backend}-", StringComparison.Ordinal))
+                || (backend.StartsWith("shared", StringComparison.Ordinal) && !connection.ConnectionId.StartsWith("owned-shared-", StringComparison.Ordinal)))
             {
                 throw new InvalidOperationException("Configured backend does not match the actual connection.");
             }
@@ -115,7 +141,7 @@ builder.WebHost.ConfigureKestrel(options =>
             }
         });
 
-        if (scheme == "https" && backend is not ("IoUringTls" or "IoUringBio" or "epollTls"))
+        if (scheme == "https" && backend is not ("IoUringTls" or "IoUringBio" or "epollTls" or "sharedEpollTls" or "sharedIoUringTls" or "sharedIocpTls" or "sharedRioTls"))
         {
             listen.UseHttps(https =>
             {
@@ -147,9 +173,62 @@ builder.WebHost.ConfigureKestrel(options =>
     });
 });
 var app = builder.Build();
+if (builder.Configuration.GetValue("check-windows-native-tls", false))
+{
+    NetworkEngineOptions options = backend switch
+    {
+        "sharedIocpTls" => new IocpEngineOptions(),
+        "sharedRioTls" => new RioEngineOptions(),
+        _ => throw new ArgumentException("Native Windows TLS check requires sharedIocpTls or sharedRioTls.")
+    };
+    options.WorkerCount = builder.Configuration.GetValue("workers", 4);
+    try
+    {
+        await WindowsNativeTlsCheck.RunAsync(options, new NetworkNativeTlsOptions
+        {
+            CertificatePath = builder.Configuration["cert"]!,
+            PrivateKeyPath = builder.Configuration["key"]!
+        }, certificate!, port);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL Windows native TLS: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
+if (builder.Configuration.GetValue("check-shared-api", false) || builder.Configuration.GetValue("check-shared-tls", false))
+{
+    NetworkEngineOptions options = backend switch
+    {
+        "sharedEpollTcp" => new EpollEngineOptions(),
+        "sharedIoUringTcp" => new IoUringEngineOptions(),
+        "sharedIocp" => new IocpEngineOptions(),
+        "sharedRio" => new RioEngineOptions(),
+        _ => throw new ArgumentException("Shared API ownership checks require a plain shared engine.")
+    };
+    options.WorkerCount = builder.Configuration.GetValue("workers", 4);
+    try
+    {
+        if (builder.Configuration.GetValue("check-shared-tls", false))
+        {
+            await SharedTransportCheck.RunTlsAsync(options, port, certificate ?? throw new ArgumentException("TLS check requires a certificate."), tlsProtocols);
+        }
+        else
+        {
+            await SharedTransportCheck.RunAsync(options, port);
+        }
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL shared API: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-windows", false))
 {
-    if (backend is not ("iocp" or "rio") || scheme != "http")
+    if (backend is not ("iocp" or "rio" or "sharedIocp" or "sharedRio") || scheme != "http")
     {
         throw new ArgumentException("The Windows transport check requires iocp or rio with --scheme http.");
     }
@@ -166,7 +245,7 @@ if (builder.Configuration.GetValue("check-windows", false))
 }
 if (builder.Configuration.GetValue("check-epoll-tcp", false))
 {
-    if (backend != "epollTcp")
+    if (backend is not ("epollTcp" or "sharedEpollTcp"))
     {
         throw new ArgumentException("Raw epoll TCP check requires epollTcp.");
     }
@@ -183,7 +262,7 @@ if (builder.Configuration.GetValue("check-epoll-tcp", false))
 }
 if (builder.Configuration.GetValue("check-uring-lifecycle", false))
 {
-    if (backend is not ("IoUringTcp" or "IoUringTls" or "IoUringBio"))
+    if (backend is not ("IoUringTcp" or "IoUringTls" or "IoUringBio" or "sharedIoUringTcp" or "sharedIoUringTls"))
     {
         throw new ArgumentException("Ring lifecycle check requires a managed io_uring backend.");
     }
@@ -200,13 +279,13 @@ if (builder.Configuration.GetValue("check-uring-lifecycle", false))
 }
 if (builder.Configuration.GetValue("check-epoll-lifecycle", false))
 {
-    if (backend is not ("epollTls" or "epollTcp"))
+    if (backend is not ("epollTls" or "epollTcp" or "sharedEpollTls" or "sharedEpollTcp"))
     {
         throw new ArgumentException("Epoll lifecycle check requires epollTls or epollTcp.");
     }
     try
     {
-        await EpollLifecycleCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port, backend == "epollTls");
+        await EpollLifecycleCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port, backend is "epollTls" or "sharedEpollTls");
     }
     catch (Exception error)
     {
@@ -217,8 +296,8 @@ if (builder.Configuration.GetValue("check-epoll-lifecycle", false))
 }
 if (builder.Configuration.GetValue("check-final-send", false))
 {
-    if (!((scheme == "http" && backend is "IoUringTcp" or "IoUringBio" or "epollTcp")
-        || (scheme == "https" && backend is "IoUringTls" or "IoUringBio" or "epollTls")))
+    if (!((scheme == "http" && backend is "IoUringTcp" or "IoUringBio" or "epollTcp" or "sharedIoUringTcp" or "sharedEpollTcp")
+        || (scheme == "https" && backend is "IoUringTls" or "IoUringBio" or "epollTls" or "sharedIoUringTls" or "sharedEpollTls")))
     {
         throw new ArgumentException("Final-send check requires a native TCP or native post-TLS transport.");
     }
@@ -293,9 +372,12 @@ app.MapGet("/metrics", (HttpContext context) =>
         gen1 = GC.CollectionCount(1),
         gen2 = GC.CollectionCount(2),
         workingSet = process.WorkingSet64,
+        threadPoolThreads = ThreadPool.ThreadCount,
+        threadPoolPending = ThreadPool.PendingWorkItemCount,
+        threadPoolCompleted = ThreadPool.CompletedWorkItemCount,
         runtime = RuntimeInformation.FrameworkDescription,
         tlsProtocolRequested = tlsProtocols.ToString(),
-        tlsResumption = scheme == "http" ? "not applicable" : "disabled in SslStream options / native SSL_CTX"
+        tlsResumption = scheme == "http" ? "not applicable" : "disabled in client/server TLS configuration"
     });
 });
 if (builder.Configuration.GetValue("benchmark", false))

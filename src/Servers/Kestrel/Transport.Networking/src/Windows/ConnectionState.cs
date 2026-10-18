@@ -2,9 +2,12 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Transport;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
@@ -12,23 +15,51 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 internal sealed class ConnectionState : IDisposable
 {
     private readonly WindowsWorker _worker;
+    private readonly SchannelConnection? _tls;
     private IMemoryOwner<byte>? _receiveOwner;
     private MemoryHandle _receivePin;
     private ReadOnlyMemory<byte> _sendMemory;
+    private nint _sendAddress;
     private int _sendOffset, _leased;
     private bool _closing, _signalled, _readEof, _ready, _forgotten, _sendShutdown;
     private long _shutdownDeadline;
     private Exception? _error;
+    private bool _tlsShutdownFinished, _published, _disposingUnpublished;
+    private readonly long _handshakeDeadline = Environment.TickCount64 + 10000;
+    private long _outputQueuedAt;
 
     internal nuint Id { get; }
     internal SocketHandle Socket { get; }
     internal nint RequestQueue { get; set; }
     internal IoOperation Read { get; }
     internal IoOperation Write { get; }
-    internal Connection Application { get; }
+    internal IProviderConnection Application { get; }
     internal IPEndPoint LocalEndPoint { get; }
     internal IPEndPoint RemoteEndPoint { get; }
     internal bool CanForget => _forgotten && _signalled && _leased == 0;
+    internal bool HasTls => _tls is not null;
+    internal bool Closing => _closing;
+    internal int Leased => _leased;
+    internal bool Published { get => _published; set => _published = value; }
+
+    internal void OutputQueued()
+    {
+        if (HasTls && _worker.TlsTiming)
+        {
+            Interlocked.CompareExchange(ref _outputQueuedAt, Stopwatch.GetTimestamp(), 0);
+        }
+    }
+
+    internal void OutputDequeued()
+    {
+        if (HasTls && _worker.TlsTiming && Interlocked.Exchange(ref _outputQueuedAt, 0) is var queued && queued != 0)
+        {
+            var delay = Stopwatch.GetTimestamp() - queued;
+            _worker.Metrics.TlsOutputQueueTicks += delay;
+            _worker.Metrics.TlsOutputQueueRuns++;
+            _worker.Metrics.TlsOutputQueueMaxTicks = Math.Max(_worker.Metrics.TlsOutputQueueMaxTicks, delay);
+        }
+    }
 
     internal ConnectionState(WindowsWorker worker, nuint id, SocketHandle socket)
     {
@@ -39,7 +70,8 @@ internal sealed class ConnectionState : IDisposable
         RemoteEndPoint = Native.GetEndPoint(socket, peer: true);
         Read = new IoOperation(this, IoKind.Receive);
         Write = new IoOperation(this, IoKind.Send);
-        Application = new Connection(worker, this);
+        _tls = worker.TlsCredential is { } credential ? new SchannelConnection(worker, this, credential) : null;
+        Application = worker.Shared ? SharedConnectionContext.ForWindows(worker, this) : new Connection(worker, this);
     }
 
     internal unsafe void StartRead()
@@ -55,16 +87,29 @@ internal sealed class ConnectionState : IDisposable
                 _worker.SubmitRead(this, null, 0, probe: true);
                 return;
             }
-            _receiveOwner = _worker.InputPool.TryRent();
-            if (_receiveOwner is null)
+            Memory<byte> memory;
+            if (_tls is not null)
             {
-                _worker.WaitForPool(this);
-                return;
+                memory = _tls.GetReceiveMemory();
+                if (memory.IsEmpty)
+                {
+                    return;
+                }
             }
-            _receivePin = _receiveOwner.Memory.Pin();
+            else
+            {
+                _receiveOwner = _worker.InputPool.TryRent();
+                if (_receiveOwner is null)
+                {
+                    _worker.WaitForPool(this);
+                    return;
+                }
+                memory = _receiveOwner.Memory;
+            }
+            _receivePin = memory.Pin();
             unsafe
             {
-                _worker.SubmitRead(this, _receivePin.Pointer, _receiveOwner.Memory.Length, probe: false, _receiveOwner.Memory);
+                _worker.SubmitRead(this, _receivePin.Pointer, memory.Length, probe: false, memory);
             }
             _ready = false;
         }
@@ -100,6 +145,32 @@ internal sealed class ConnectionState : IDisposable
             StartRead();
             return;
         }
+        if (_tls is not null)
+        {
+            try
+            {
+                if (count == 0)
+                {
+                    _readEof = true;
+                    _tls.PeerEof();
+                    if (_sendShutdown)
+                    {
+                        Close(null, abortive: false);
+                    }
+                }
+                else
+                {
+                    _worker.Metrics.ReceivedBytes += count;
+                    _tls.Received(count);
+                    StartRead();
+                }
+            }
+            catch (Exception tlsError)
+            {
+                Close(tlsError, abortive: true);
+            }
+            return;
+        }
         if (owner is null || count < 0 || count > owner.Memory.Length)
         {
             throw new InvalidOperationException("Invalid native receive completion.");
@@ -108,22 +179,34 @@ internal sealed class ConnectionState : IDisposable
         {
             owner.Dispose();
             _readEof = true;
-            Application.Input.End(null);
+            Application.EndReceive(null);
             if (_sendShutdown)
             {
                 Close(null, abortive: false);
             }
             return;
         }
-        _leased++;
         _worker.Metrics.ReceivedBytes += count;
+        PublishPlaintext(owner, count);
+        StartRead();
+    }
+
+    internal void PublishPlaintext(IMemoryOwner<byte> owner, int count)
+    {
+        _leased++;
         _worker.Metrics.MaxLeasedPages = Math.Max(_worker.Metrics.MaxLeasedPages, _leased);
         if (_leased == 4)
         {
             _worker.Metrics.ReceiveBackpressure++;
         }
-        Application.Input.Append(owner, count);
-        StartRead();
+        if (Application is SharedConnectionContext shared)
+        {
+            shared.Receive(owner, count, _worker.IsRio ? NetworkMemoryKind.Registered : NetworkMemoryKind.Native);
+        }
+        else
+        {
+            ((Connection)Application).Input.Append(owner, count);
+        }
     }
 
     internal void ReturnPage(IMemoryOwner<byte> owner)
@@ -134,12 +217,32 @@ internal sealed class ConnectionState : IDisposable
         }
         owner.Dispose();
         _leased--;
+        try
+        {
+            _tls?.ResumeInput();
+        }
+        catch (Exception error)
+        {
+            Close(error, abortive: true);
+        }
         StartRead();
         _worker.ResumePoolWaiters();
         TryForget();
     }
 
-    internal void Send(ReadOnlyMemory<byte> memory)
+    internal void Send(ReadOnlyMemory<byte> memory, nint pinnedAddress = 0, bool final = false)
+    {
+        if (_tls is not null)
+        {
+            _tls.Send(memory, final);
+        }
+        else
+        {
+            SendCiphertext(memory, pinnedAddress);
+        }
+    }
+
+    internal void SendCiphertext(ReadOnlyMemory<byte> memory, nint pinnedAddress = 0)
     {
         if (_closing || _sendShutdown)
         {
@@ -150,14 +253,16 @@ internal sealed class ConnectionState : IDisposable
             throw new InvalidOperationException("Only one output segment may be owned by native I/O.");
         }
         _sendMemory = memory;
+        _sendAddress = pinnedAddress;
         _sendOffset = 0;
         try
         {
-            _worker.SubmitSend(this, memory);
+            _worker.SubmitSend(this, memory, _sendAddress);
         }
         catch
         {
             _sendMemory = default;
+            _sendAddress = 0;
             throw;
         }
     }
@@ -171,14 +276,16 @@ internal sealed class ConnectionState : IDisposable
         if (error != 0 || _closing)
         {
             _sendMemory = default;
-            Application.Sent(_error ?? TransportError(new SocketException(error == 0 ? Native.OperationAborted : error)));
+            _sendAddress = 0;
+            CompleteSend(-1, _error ?? TransportError(new SocketException(error == 0 ? Native.OperationAborted : error)));
             TrySignalClosed();
             return;
         }
         if (count <= 0 || count > _sendMemory.Length - _sendOffset)
         {
             _sendMemory = default;
-            Application.Sent(new IOException($"Invalid native send completion: {count}."));
+            _sendAddress = 0;
+            CompleteSend(-1, new IOException($"Invalid native send completion: {count}."));
             return;
         }
         _sendOffset += count;
@@ -188,17 +295,66 @@ internal sealed class ConnectionState : IDisposable
             _worker.Metrics.PartialSends++;
             try
             {
-                _worker.SubmitSend(this, _sendMemory[_sendOffset..]);
+                _worker.SubmitSend(this, _sendMemory[_sendOffset..], _sendAddress == 0 ? 0 : _sendAddress + _sendOffset);
             }
             catch (Exception sendError)
             {
                 _sendMemory = default;
-                Application.Sent(sendError);
+                _sendAddress = 0;
+                CompleteSend(-1, sendError);
             }
             return;
         }
+        var completed = _sendMemory.Length;
         _sendMemory = default;
-        Application.Sent(null);
+        _sendAddress = 0;
+        CompleteSend(completed, null);
+    }
+
+    private void CompleteSend(int count, Exception? error)
+    {
+        if (_tls is not null)
+        {
+            try
+            {
+                _tls.Sent(error);
+                if (error is not null)
+                {
+                    Close(error, abortive: true);
+                }
+            }
+            catch (Exception tlsError)
+            {
+                Close(tlsError, abortive: true);
+            }
+        }
+        else
+        {
+            Application.Sent(count, error);
+        }
+    }
+
+    internal void FinishTlsShutdown()
+    {
+        _tlsShutdownFinished = true;
+        Close(null, abortive: false);
+    }
+
+    internal void HandshakeCompleted()
+    {
+        try
+        {
+            _tls!.HandshakeCompleted();
+            StartRead();
+        }
+        catch (Exception error)
+        {
+            Close(error, abortive: true);
+        }
+        finally
+        {
+            TrySignalClosed();
+        }
     }
 
     internal void Close(Exception? error, bool abortive)
@@ -206,6 +362,24 @@ internal sealed class ConnectionState : IDisposable
         if (_closing)
         {
             TrySignalClosed();
+            return;
+        }
+        if (_tls is { Authenticated: false } && !abortive && error is null)
+        {
+            error = new ConnectionAbortedException("The TLS connection closed before authentication completed.");
+            abortive = true;
+        }
+        if (_tls is not null && !_tlsShutdownFinished && !abortive && error is null)
+        {
+            try
+            {
+                _shutdownDeadline = Environment.TickCount64 + 5000;
+                _tls.Shutdown();
+            }
+            catch (Exception tlsError)
+            {
+                Close(tlsError, abortive: true);
+            }
             return;
         }
         if (!abortive && error is null && !_sendShutdown)
@@ -230,14 +404,21 @@ internal sealed class ConnectionState : IDisposable
         error = TransportError(error);
         _closing = true;
         _error = error;
+        _tls?.CancelHandshake();
         if (error is not null)
         {
             _worker.Metrics.ConnectionErrors++;
+            _worker.Metrics.FirstConnectionError ??= error.GetBaseException().Message;
             _worker.Logger.LogDebug(error, "Windows connection {ConnectionId} closed after an I/O error.", Id);
         }
         try
         {
-            if (!_worker.IsRio)
+            if (_worker.IsRio && abortive && Write.Outstanding)
+            {
+                // A graceful closesocket can keep a window-blocked RIO send alive.
+                Native.SetAbortiveLinger(Socket);
+            }
+            else if (!_worker.IsRio)
             {
                 Native.Cancel(Socket);
             }
@@ -253,11 +434,20 @@ internal sealed class ConnectionState : IDisposable
             Socket.Dispose();
         }
         TrySignalClosed();
+        if (!_published && !_disposingUnpublished)
+        {
+            _disposingUnpublished = true;
+            _worker.DisposeUnpublished(Application);
+        }
     }
 
     internal void CheckDeadline(long now)
     {
-        if (_sendShutdown && !_closing && now >= _shutdownDeadline)
+        if (!_closing && _tls is { Authenticated: false } && now >= _handshakeDeadline)
+        {
+            Close(new IOException("Native TLS handshake did not finish within ten seconds."), abortive: true);
+        }
+        else if (_shutdownDeadline != 0 && !_closing && now >= _shutdownDeadline)
         {
             _worker.Metrics.GracefulTimeouts++;
             Close(new IOException("Peer did not close within five seconds after the Windows send shutdown."), abortive: true);
@@ -278,10 +468,11 @@ internal sealed class ConnectionState : IDisposable
 
     private void TrySignalClosed()
     {
-        if (_closing && !_signalled && !Read.Outstanding && !Write.Outstanding)
+        if (_closing && !_signalled && !Read.Outstanding && !Write.Outstanding && _tls is not { HandshakePending: true })
         {
             _signalled = true;
-            Application.NativeClosed(_error);
+            _tls?.NativeClosed(_error);
+            Application.Closed(_error);
             TryForget();
         }
     }
@@ -308,6 +499,7 @@ internal sealed class ConnectionState : IDisposable
         }
         Read.Dispose();
         Write.Dispose();
+        _tls?.Dispose();
         Socket.Dispose();
     }
 }

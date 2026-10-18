@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 using Microsoft.Extensions.Logging;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
@@ -13,7 +14,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         Read = 1, Write, CancelRead, CancelWrite, FinalShutdown
     }
     internal ulong Id { get; } = id;
-    internal Connection? Application
+    internal IProviderConnection? Application
     {
         get; private set;
     }
@@ -21,6 +22,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
     private bool _closing, _done, _handshake, _fatal, _closeRequested, _readBackpressured;
     private bool _readActive, _writeActive, _cancelRead, _cancelWrite, _finActive, _finComplete;
     private bool _finalSend, _tlsWriteDone, _shutdownSent, _peerEof, _pending;
+    private bool _prefixObserved;
     private nint _session, _bio, _sendData;
     private int _sendLength, _sendOffset;
     private readonly Queue<(int Page, int Length)> _cipher = new();
@@ -128,6 +130,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         else
         {
             var linked = _finalSend && !engine.Layered && engine.FinalMode >= 2;
+            NativeSendTrace.Write(engine.Logger, _sendData + _sendOffset, _sendLength - _sendOffset);
             engine.Prepare(linked ? Native.Operation.LinkedSend : Native.Operation.Send,
                 _fd, _sendData + _sendOffset, _sendLength - _sendOffset, Token(Operation.Write),
                 linked ? Token(Operation.FinalShutdown) : 0, engine.FinalMode == 3 ? 1 : 0);
@@ -214,7 +217,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                         }
                         else
                         {
-                            Application!.Input.End(null);
+                            Application!.EndReceive(null);
                         }
                     }
                     else if (engine.Tls && result >= 0)
@@ -324,7 +327,11 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                 else if (result == Native.Canceled)
                 {
                     engine.Metrics.CanceledLinks++;
-                    if (!_closing && _sendData != 0 && !_writeActive)
+                    if (!_closing && _closeRequested)
+                    {
+                        RequestClose();
+                    }
+                    else if (!_closing && _sendData != 0 && !_writeActive)
                     {
                         StartWrite();
                     }
@@ -423,7 +430,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
 
                 return false;
             case Native.TlsStatus.Closed:
-                Application?.Input.End(null);
+                Application?.EndReceive(null);
                 RequestClose();
                 return false;
             default:
@@ -464,6 +471,25 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         }
         if (!_handshake)
         {
+            if (!_prefixObserved && engine.HandshakePrefixCallback is { } callback)
+            {
+                try
+                {
+                    if (!TlsHandshakePrefix.TryPeek(_fd, callback))
+                    {
+                        StartRead();
+                        return;
+                    }
+                    _prefixObserved = true;
+                }
+                catch (IOException error)
+                {
+                    engine.Metrics.TlsErrors++;
+                    engine.Logger.LogError(error, "io_uring TLS handshake-prefix observation failed.");
+                    Fail(error);
+                    return;
+                }
+            }
             Native.TlsResult result;
             do
             {
@@ -724,7 +750,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
     internal void Fail(Exception error)
     {
         _fatal = true;
-        Application?.Input.End(error);
+        Application?.EndReceive(error);
         RequestClose();
     }
     private void TryCompleteClose()
@@ -767,7 +793,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                 _sendData = 0;
                 application.Sent(Native.Canceled);
             }
-            application.NativeClosed();
+            application.Closed(null);
         }
         else
         {

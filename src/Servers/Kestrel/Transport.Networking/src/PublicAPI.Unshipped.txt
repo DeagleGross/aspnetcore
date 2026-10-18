@@ -1,14 +1,18 @@
 #nullable enable
 Microsoft.AspNetCore.Hosting.EpollTransportExtensions
+Microsoft.AspNetCore.Hosting.SharedNetworkTransportExtensions
+Microsoft.AspNetCore.Hosting.LayeredTransportExtensions
+Microsoft.AspNetCore.Hosting.OwnedTransportExtensions
+Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions
+Microsoft.AspNetCore.Hosting.WindowsTransportExtensions
+System.Net.Transport.NetworkEngineFactory
 static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTcp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
-Microsoft.AspNetCore.Hosting.LayeredTransportExtensions
 static Microsoft.AspNetCore.Hosting.LayeredTransportExtensions.UseIoUringBio(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, bool tls, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
-Microsoft.AspNetCore.Hosting.OwnedTransportExtensions
 static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTcp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.OwnedTransportExtensions.UseIoUringTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
-Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions
+static Microsoft.AspNetCore.Hosting.SharedNetworkTransportExtensions.UseNetworkTransport(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, System.Net.Transport.NetworkEngineOptions! options, System.Net.Transport.NetworkNativeTlsOptions? nativeTls = null) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions.UseIoUring(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
-Microsoft.AspNetCore.Hosting.WindowsTransportExtensions
 static Microsoft.AspNetCore.Hosting.WindowsTransportExtensions.UseIocp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.WindowsTransportExtensions.UseRio(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+static System.Net.Transport.NetworkEngineFactory.Create(System.Net.Transport.NetworkEngineOptions! options, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null) -> System.Net.Transport.NetworkEngine!

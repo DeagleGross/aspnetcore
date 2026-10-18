@@ -4,6 +4,10 @@ Non-shipping network transport experiments. The Linux history below describes th
 
 ## Windows IOCP and RIO
 
+Transport-owned TLS is now selected with `--backend sharedIocpTls` or `--backend sharedRioTls` (plus `--scheme https --cert ... --key ...`). These native selectors default to TLS 1.3 and **do not use `SslStream`/`UseHttps` on the server**. See the [native Windows TLS report](../../Transport.Networking/src/Windows/NATIVE-TLS.md) for current measurements, in-place plaintext leases and limitations. The original selectors below remain raw-TCP/wrapper controls.
+
+For the newer cross-provider abstraction, see the brief [shared API and results document](../../Transport.Networking/SHARED-API.md). Shared selectors are `sharedEpollTcp`, `sharedEpollTls`, `sharedIoUringTcp`, `sharedIoUringTls`, `sharedIocp` and `sharedRio`; the original selectors remain raw controls. `--check-shared-api true` and `--check-shared-tls true` exercise actual owned pages, cancellation and pre-TLS handoff.
+
 Stock Kestrel on Windows uses `System.Net.Sockets` backed by IOCP, not RIO or HTTP.sys. The new `--backend iocp` and `--backend rio` paths use dedicated owning workers and native operation lifetimes. Both are raw TCP transports; `--scheme https` adds Kestrel's existing `UseHttps`/`SslStream`/SChannel layer. There is no TLS baked into IOCP or RIO and no fd-bound OpenSSL wrapper on Windows.
 
 Beginner-friendly architecture guides: [IOCP](../../Transport.Networking/src/Iocp/README.md) and [RIO](../../Transport.Networking/src/Rio/README.md). They describe the actual worker loop, buffer ownership, idle-memory differences, and unsupported features.

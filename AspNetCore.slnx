@@ -1062,6 +1062,7 @@
   <Folder Name="/src/Servers/Kestrel/perf/">
     <Project Path="src/Servers/Kestrel/perf/Microbenchmarks/Microsoft.AspNetCore.Server.Kestrel.Microbenchmarks.csproj" />
   </Folder>
+  <Folder Name="/src/Servers/Kestrel/prototype/" />
   <Folder Name="/src/Servers/Kestrel/samples/">
     <Project Path="src/Servers/Kestrel/samples/http2cat/http2cat.csproj" />
     <Project Path="src/Servers/Kestrel/samples/Http2SampleApp/Http2SampleApp.csproj" />
@@ -1083,7 +1084,16 @@
     <Project Path="src/Servers/Kestrel/tools/CodeGenerator/CodeGenerator.csproj" />
   </Folder>
   <Folder Name="/src/Servers/Kestrel/Transport.Networking/">
+    <File Path="src/Servers/Kestrel/Transport.Networking/PUBLIC-API.md" />
+    <File Path="src/Servers/Kestrel/Transport.Networking/SHARED-API.md" />
+    <Project Path="src/Servers/Kestrel/Transport.Networking/Primitives/src/NetworkTransport.Primitives.csproj" />
     <Project Path="src/Servers/Kestrel/Transport.Networking/src/Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.csproj" />
+  </Folder>
+  <Folder Name="/src/Servers/Kestrel/Transport.Networking/samples/">
+    <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PeekTlsHttp1/PeekTlsHttp1.csproj" />
+    <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PlainHttp1/PlainHttp1.csproj" />
+    <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PrefixTlsHttp1/PrefixTlsHttp1.csproj" />
+    <Project Path="src/Servers/Kestrel/Transport.Networking/samples/RetainedPages/RetainedPages.csproj" />
   </Folder>
   <Folder Name="/src/Servers/Kestrel/Transport.Quic/">
     <Project Path="src/Servers/Kestrel/Transport.Quic/src/Microsoft.AspNetCore.Server.Kestrel.Transport.Quic.csproj" />

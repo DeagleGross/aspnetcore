@@ -4,6 +4,10 @@ This is a non-shipping Kestrel experiment. It replaces the TCP transport, not Ke
 
 The [local comparison and its limits](../Windows/RESULTS.md) include stock/IOCP/RIO short and keep-alive TCP/TLS results.
 
+The newer [shared API prototype](../../SHARED-API.md) adds `sharedIocp` while retaining `iocp` as the raw control. Its common receive ownership and output progression are in `Primitives` and `Shared`; native IOCP completion ownership stays here.
+
+**Native TLS is now available as `sharedIocpTls` / listener `NativeTls`.** The transport drives SChannel SSPI and publishes plaintext without `SslStream`. Initial context creation uses a bounded ThreadPool executor; final handshake/record processing stays on the owning I/O worker. See [native TLS architecture and measured results](../Windows/NATIVE-TLS.md). The plain `iocp` and `sharedIocp` HTTPS examples below remain the older wrapper comparison.
+
 ## What IOCP means
 
 **IOCP = I/O Completion Port.** Think of it as a mailbox containing receipts for finished I/O.
@@ -68,7 +72,7 @@ A broken completion worker with live native ownership is process-fatal in this p
 
 **No. IOCP moves bytes; it does not encrypt or decrypt them.**
 
-These Windows experiments expose raw TCP first. `UseHttps` can be added at the usual Kestrel middleware position. On Windows, its `SslStream` uses **SChannel**, the Windows TLS implementation. IOCP receives and sends ciphertext; the middleware performs the TLS handshake and record processing.
+The original TCP paths expose raw bytes and can add `UseHttps` at the usual middleware position. Its `SslStream` uses SChannel above IOCP. The new transport-owned TLS mode instead drives `AcceptSecurityContext`, `DecryptMessage` and `EncryptMessage` on our worker, exposing plaintext to Kestrel; do not add `UseHttps` to that path.
 
 This is the same layering shape as our `IoUringTcp + UseHttps`, not the fd-bound Linux OpenSSL transport. It also means pre-TLS processing can run before `UseHttps`, and plaintext processing after it. TLS crypto does not run on our dedicated completion worker in this version.
 
@@ -107,7 +111,7 @@ Set `NETWORKPROTO_CPUS=0,2,4,6` to pin four workers to those logical processors.
 
 Supported: Windows x64; IPv4 TCP binding, including port zero; bounded accepted-connection publication; raw TCP; independent Kestrel TLS; partial output handling; input backpressure; half-close; pending-read cancellation; peer reset; unbind/disposal; explicit native ownership counters.
 
-Not implemented: IPv6, Unix-domain sockets, client/connect transport, HTTP/2 or HTTP/3 validation, file/gather-send APIs, kernel zero-copy send, Windows native TLS on the owning worker, RIO auto-selection, or the proposed public `System.Net.Transport` API. Existing Linux transports are unchanged.
+Not implemented: IPv6, Unix-domain sockets, client/connect transport, HTTP/2 or HTTP/3 validation, file/gather-send APIs, kernel zero-copy send or RIO auto-selection. Native TLS currently has the explicit prototype limits listed in its report. The shared `System.Net.Transport` surface is experimental, not a shipped framework API; raw selectors remain controls.
 
 ## Where to read the code
 

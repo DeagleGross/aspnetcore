@@ -100,11 +100,22 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes) : MemoryPo
 
     internal static RioApi.Buffer RegisteredBuffer(ReadOnlyMemory<byte> memory)
     {
-        if (!MemoryMarshal.TryGetMemoryManager<byte, Slab>(memory, out var slab, out var offset, out var length) || !slab.IsRegistered)
+        if (!TryGetRegisteredBuffer(memory, out var buffer))
         {
             throw new InvalidOperationException("A RIO send must reference a live registered transport slab.");
         }
-        return new RioApi.Buffer { Id = slab.Registration, Offset = checked((uint)offset), Length = checked((uint)length) };
+        return buffer;
+    }
+
+    internal static bool TryGetRegisteredBuffer(ReadOnlyMemory<byte> memory, out RioApi.Buffer buffer)
+    {
+        if (MemoryMarshal.TryGetMemoryManager<byte, Slab>(memory, out var slab, out var offset, out var length) && slab.IsRegistered)
+        {
+            buffer = new RioApi.Buffer { Id = slab.Registration, Offset = checked((uint)offset), Length = checked((uint)length) };
+            return true;
+        }
+        buffer = default;
+        return false;
     }
 
     private sealed record Slot(Slab Slab, int Offset, int Length);

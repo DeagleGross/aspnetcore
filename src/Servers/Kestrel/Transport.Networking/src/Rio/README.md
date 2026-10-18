@@ -6,6 +6,10 @@ It is not a different network protocol. The peer still speaks ordinary TCP. It i
 
 The [local comparison and its limits](../Windows/RESULTS.md) include stock/IOCP/RIO short and keep-alive TCP/TLS results.
 
+The newer [shared API prototype](../../SHARED-API.md) adds `sharedRio` while retaining `rio` as the raw control. Registered pages flow through the common ownership model; unregistered borrowed sends use explicitly counted staging.
+
+**Native TLS is now available as `sharedRioTls` / listener `NativeTls`.** SChannel operates on owned native/registered buffers; the transport exposes plaintext without a server `SslStream`. Initial context creation uses a bounded ThreadPool executor; final handshake, records and RQ/CQ access stay on the owner. See [native TLS architecture and measured results](../Windows/NATIVE-TLS.md).
+
 ## The three things to know
 
 **Registered buffer:** Windows is given a stable memory range once and returns a buffer ID. Each operation names that ID, an offset, and a length. Registration locks the underlying physical pages and avoids repeating some per-operation memory validation/locking work.
@@ -58,6 +62,8 @@ Registration and garbage-collector pinning are different concepts. The native sl
 
 RIO's request queue belongs to its socket. Closing the socket closes the RQ, but outstanding requests still have completions to drain. We retain the memory and request identities until those completions arrive.
 
+Aborting a window-blocked outstanding RIO send sets abortive linger before closing. Ordinary graceful close can otherwise preserve that send while the peer is not reading; real cancellation checks exposed this boundary. Terminal CQ completion still owns the buffer lifetime.
+
 Normal output completion first sends TCP FIN after all output has completed. The worker keeps the socket/RQ alive until peer EOF, with a five-second deadline. Closing the RQ immediately after the send receipt caused rare reset-before-response failures under actual short-connection HTTP load; send completion is a memory-release boundary, not proof of peer receipt.
 
 Buffer registration is removed only after all native operations and application leases drain. Safe handles own registrations, queues, ports, sockets, and native allocations. Shutdown counters expose remaining operations, connections, and leases; nonzero ownership prevents a successful benchmark result.
@@ -75,9 +81,9 @@ TCP bytes through RIO
   -> plaintext HTTP and application
 ```
 
-Omit `UseHttps` for plain TCP. Add it for TLS. RIO then moves ciphertext in registered buffers while SChannel handles TLS above it. This is deliberately the same TLS implementation as the stock Windows baseline, so the comparison isolates the transport.
+The original `rio` / `sharedRio` paths can add `UseHttps` for the wrapper comparison. The native TLS selection instead owns SChannel SSPI and exposes plaintext directly; it must not also add `UseHttps`. Only initial context creation is offloaded; RIO operations remain owner-thread serialized.
 
-It is comparable in architecture to our raw `IoUringTcp + UseHttps`, not to fd-bound OpenSSL on an epoll worker. A future buffer-TLS implementation could drive SChannel's record processing from the owner, but that is not implemented or included in these results.
+The old results below concern raw TCP plus `UseHttps`. Native buffer TLS is now implemented separately and measured in the linked native TLS report; its results must not be mixed with those historical wrapper numbers.
 
 ## Usage
 
@@ -110,7 +116,7 @@ The implementation requires Windows x64 and a Winsock provider exposing RIO. RIO
 
 Supported: IPv4 TCP server binding, including ephemeral ports; worker-affine registered I/O; batched completion reaping; registered output memory; bounded receive leases; partial-completion handling; raw TCP and independent Kestrel TLS; peer half-close/reset; native ownership drain.
 
-Missing: IPv6, UDP, client/connect, gather/file sends, deferred RIO commits, busy polling, kernel TLS, owner-thread TLS, HTTP/2/3 validation, and the proposed public transport API. Host-wide registration does not yet provide per-endpoint transport selection.
+Missing: IPv6, UDP, client/connect, gather/file sends, deferred RIO commits, busy polling, kernel TLS and HTTP/2/3 validation. Native TLS has additional explicit prototype limits in its report. The shared transport API is non-shipping, not an approved BCL addition. Host-wide Kestrel registration does not yet provide per-endpoint transport selection.
 
 ## Code map
 

@@ -28,11 +28,23 @@ for (var i = 0; i < args.Length; i += 2)
 {
     options.Add(args[i].TrimStart('-'), args[i + 1]);
 }
+if (options.TryGetValue("http-probe", out var probe))
+{
+    await HttpProbe.RunAsync(new Uri(probe), options.GetValueOrDefault("method", "GET"),
+        options.GetValueOrDefault("tls-protocol", nameof(SslProtocols.Tls13)));
+    return;
+}
 var uri = new Uri(options.GetValueOrDefault("url", "http://127.0.0.1:5800/"));
 var connections = int.Parse(options.GetValueOrDefault("connections", "256"), CultureInfo.InvariantCulture);
 var seconds = int.Parse(options.GetValueOrDefault("seconds", "15"), CultureInfo.InvariantCulture);
 var warmup = int.Parse(options.GetValueOrDefault("warmup", "5"), CultureInfo.InvariantCulture);
 var shortConnections = options.GetValueOrDefault("mode", "long") == "short";
+var asynchronousConnect = options.GetValueOrDefault("connect-mode", "sync") switch
+{
+    "sync" => false,
+    "async" => true,
+    _ => throw new ArgumentException("Use --connect-mode sync or async.")
+};
 var sourceSetting = options.GetValueOrDefault("source-network", "auto");
 var sourceNetwork = sourceSetting == "auto" ? null : IPAddress.Parse(sourceSetting);
 if (sourceNetwork is not null && (sourceNetwork.AddressFamily != AddressFamily.InterNetwork || !IPAddress.IsLoopback(sourceNetwork)))
@@ -53,7 +65,8 @@ ThreadPool.SetMinThreads(Math.Max(32, Environment.ProcessorCount * 8), Math.Max(
 using var cancellation = new CancellationTokenSource();
 var phase = new Phase();
 var request = Encoding.ASCII.GetBytes($"GET {uri.PathAndQuery} HTTP/1.1\r\nHost: localhost\r\nConnection: {(shortConnections ? "close" : "keep-alive")}\r\n\r\n");
-var peers = Enumerable.Range(0, connections).Select(index => new Peer(index, uri, shortConnections, request, phase, tlsProtocol, sourceNetwork)).ToArray();
+var peers = Enumerable.Range(0, connections).Select(index => new Peer(index, uri, shortConnections, request, phase, tlsProtocol,
+    sourceNetwork, asynchronousConnect, seconds)).ToArray();
 var workers = peers.Select(peer => Task.Run(() => peer.RunAsync(cancellation.Token))).ToArray();
 await Task.Delay(TimeSpan.FromSeconds(warmup));
 var readyDeadline = Stopwatch.GetTimestamp() + 10 * Stopwatch.Frequency;
@@ -75,21 +88,41 @@ Volatile.Write(ref phase.Measuring, true);
 Console.WriteLine("MEASURE_START");
 await Task.Delay(TimeSpan.FromSeconds(seconds));
 Volatile.Write(ref phase.Measuring, false);
+Volatile.Write(ref phase.Stopping, true);
 var end = Stopwatch.GetTimestamp();
 phase.End = end;
 var cpuEnd = process.TotalProcessorTime;
-cancellation.Cancel();
-await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(15));
+try
+{
+    await Task.WhenAll(workers).WaitAsync(TimeSpan.FromSeconds(15));
+}
+finally
+{
+    cancellation.Cancel();
+}
 var elapsed = Stopwatch.GetElapsedTime(start, end).TotalSeconds;
 var successful = peers.Sum(peer => peer.Requests);
 var histogram = new long[Histogram.Size];
+var windowRequests = new long[seconds + 1];
 foreach (var peer in peers)
 {
     for (var i = 0; i < histogram.Length; i++)
     {
         histogram[i] += peer.Latencies[i];
     }
+    for (var i = 0; i < windowRequests.Length; i++)
+    {
+        windowRequests[i] += peer.WindowRequests[i];
+    }
 }
+var windows = Enumerable.Range(0, Math.Min(windowRequests.Length, (int)Math.Ceiling(elapsed)))
+    .Select(index => new
+    {
+        startSeconds = index,
+        seconds = index == windowRequests.Length - 1 ? elapsed - index : Math.Min(1, elapsed - index),
+        requests = windowRequests[index],
+        rps = windowRequests[index] / (index == windowRequests.Length - 1 ? elapsed - index : Math.Min(1, elapsed - index))
+    }).ToArray();
 Console.WriteLine("LOAD_RESULT " + JsonSerializer.Serialize(new
 {
     url = uri.ToString(),
@@ -97,12 +130,17 @@ Console.WriteLine("LOAD_RESULT " + JsonSerializer.Serialize(new
     connections,
     seconds = elapsed,
     requests = successful,
+    totalResponses = peers.Sum(peer => peer.Responses),
+    connectedSockets = peers.Sum(peer => peer.ConnectedSockets),
     rps = successful / elapsed,
     errors = peers.Sum(peer => peer.Errors),
     warmupErrors = peers.Sum(peer => peer.WarmupErrors),
     startupResourceErrors = peers.Sum(peer => peer.StartupResourceErrors),
+    teardownErrors = peers.Sum(peer => peer.TeardownErrors),
     readyLanes = peers.Count(peer => peer.Ready),
     firstError = peers.Select(peer => peer.FirstError).FirstOrDefault(error => error is not null),
+    firstErrorStage = peers.Select(peer => peer.FirstErrorStage).FirstOrDefault(stage => stage is not null),
+    firstErrorSource = peers.Select(peer => peer.FirstErrorSource).FirstOrDefault(source => source is not null),
     clientCpuMilliseconds = (cpuEnd - cpuStart).TotalMilliseconds,
     clientCpuCores = (cpuEnd - cpuStart).TotalSeconds / elapsed,
     p50Microseconds = Histogram.Percentile(histogram, successful, 0.50),
@@ -111,9 +149,21 @@ Console.WriteLine("LOAD_RESULT " + JsonSerializer.Serialize(new
     tlsProtocol = tlsProtocol.ToString(),
     runtime = RuntimeInformation.FrameworkDescription,
     cpuAffinity = $"0x{process.ProcessorAffinity.ToInt64():x}",
-    sourceAddresses = sourceNetwork is null ? 1 : 64,
+    sourceAddresses = sourceNetwork is null ? 1 : Math.Min(connections, 64),
     sourceNetwork = sourceSetting,
     connectMode = sourceNetwork is null ? "implicit bind" : "SO_PORT_SCALABILITY bind",
+    connectApi = asynchronousConnect ? "async" : "sync",
+    phasesMicroseconds = shortConnections ? new
+    {
+        samples = successful,
+        connect = peers.Sum(peer => peer.ConnectTicks) * 1_000_000.0 / Stopwatch.Frequency / Math.Max(successful, 1),
+        handshake = peers.Sum(peer => peer.HandshakeTicks) * 1_000_000.0 / Stopwatch.Frequency / Math.Max(successful, 1),
+        response = peers.Sum(peer => peer.ResponseTicks) * 1_000_000.0 / Stopwatch.Frequency / Math.Max(successful, 1),
+        tlsEof = peers.Sum(peer => peer.TlsEofTicks) * 1_000_000.0 / Stopwatch.Frequency / Math.Max(successful, 1),
+        tcpEof = peers.Sum(peer => peer.TcpEofTicks) * 1_000_000.0 / Stopwatch.Frequency / Math.Max(successful, 1)
+    } : null,
+    phaseSamples = peers.SelectMany(peer => peer.PhaseSamples ?? []).ToArray(),
+    windows,
     pipeline = 1,
     bodyBytes = 1024,
     waitForEofOnShort = true
@@ -121,33 +171,41 @@ Console.WriteLine("LOAD_RESULT " + JsonSerializer.Serialize(new
 
 internal sealed class Phase
 {
-    internal bool Measuring;
+    internal bool Measuring, Stopping;
     internal long Start, End;
 }
 
 internal sealed class Peer
 {
+    private static readonly bool TracePhases = Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_TIMING") == "1";
     private readonly Uri _uri;
     private readonly bool _shortConnections;
     private readonly byte[] _request;
     private readonly Phase _phase;
     private readonly SslProtocols _tlsProtocol;
+    private readonly bool _asynchronousConnect;
     private readonly byte[] _buffer = new byte[32768];
     private static readonly byte[] ExpectedBody = Encoding.ASCII.GetBytes(new string('x', 1023) + "\n");
     private const SocketOptionName PortScalability = (SocketOptionName)0x3006;
     private readonly IPEndPoint? _source;
-    internal long Requests, Errors, WarmupErrors, StartupResourceErrors;
-    internal string? FirstError, Cipher;
+    internal long Requests, Responses, ConnectedSockets, Errors, WarmupErrors, StartupResourceErrors, TeardownErrors;
+    internal long ConnectTicks, HandshakeTicks, ResponseTicks, TlsEofTicks, TcpEofTicks;
+    internal string? FirstError, FirstErrorStage, FirstErrorSource, Cipher;
     internal bool Ready;
     internal long[] Latencies { get; } = new long[Histogram.Size];
+    internal long[] WindowRequests { get; }
+    internal List<object>? PhaseSamples;
 
-    internal Peer(int index, Uri uri, bool shortConnections, byte[] request, Phase phase, SslProtocols tlsProtocol, IPAddress? sourceNetwork)
+    internal Peer(int index, Uri uri, bool shortConnections, byte[] request, Phase phase, SslProtocols tlsProtocol,
+        IPAddress? sourceNetwork, bool asynchronousConnect, int seconds)
     {
         _uri = uri;
         _shortConnections = shortConnections;
         _request = request;
         _phase = phase;
         _tlsProtocol = tlsProtocol;
+        _asynchronousConnect = asynchronousConnect;
+        WindowRequests = new long[seconds + 1];
         if (sourceNetwork is not null)
         {
             var address = sourceNetwork.GetAddressBytes();
@@ -158,23 +216,39 @@ internal sealed class Peer
 
     internal async Task RunAsync(CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        while (!cancellationToken.IsCancellationRequested && !Volatile.Read(ref _phase.Stopping))
         {
+            var stage = "socket";
+            IPEndPoint? attemptedSource = null;
             try
             {
                 var connectionStarted = Stopwatch.GetTimestamp();
                 using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
                 using var connectCancellation = cancellationToken.UnsafeRegister(static value => ((Socket)value!).Dispose(), socket);
+                stage = "bind";
                 if (_source is not null)
                 {
                     socket.SetSocketOption(SocketOptionLevel.Socket, PortScalability, true);
+                    attemptedSource = _source;
                     socket.Bind(_source);
                 }
-                socket.Connect(new IPEndPoint(IPAddress.Parse(_uri.Host), _uri.Port));
+                stage = "connect";
+                var endpoint = new IPEndPoint(IPAddress.Parse(_uri.Host), _uri.Port);
+                if (_asynchronousConnect)
+                {
+                    await socket.ConnectAsync(endpoint, cancellationToken);
+                }
+                else
+                {
+                    socket.Connect(endpoint);
+                }
+                ConnectedSockets++;
+                var connectedAt = Stopwatch.GetTimestamp();
                 using var network = new NetworkStream(socket, ownsSocket: false);
                 using var tls = _uri.Scheme == "https" ? new SslStream(network, leaveInnerStreamOpen: true, static (_, _, _, _) => true) : null;
                 if (tls is not null)
                 {
+                    stage = "tls";
                     await tls.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
                     {
                         TargetHost = "localhost",
@@ -184,28 +258,66 @@ internal sealed class Peer
                     Cipher = tls.NegotiatedCipherSuite.ToString();
                 }
                 Stream stream = tls is null ? network : tls;
+                var authenticatedAt = Stopwatch.GetTimestamp();
                 do
                 {
+                    stage = "response";
                     var started = _shortConnections ? connectionStarted : Stopwatch.GetTimestamp();
                     await stream.WriteAsync(_request, cancellationToken);
                     await ReadResponseAsync(stream, cancellationToken);
+                    var bodyAt = Stopwatch.GetTimestamp();
                     if (_shortConnections && await stream.ReadAsync(_buffer.AsMemory(0, 1), cancellationToken) != 0)
                     {
                         throw new InvalidDataException("Unexpected data after a Connection: close response.");
                     }
+                    var tlsEofAt = Stopwatch.GetTimestamp();
                     if (_shortConnections && tls is not null && await network.ReadAsync(_buffer.AsMemory(0, 1), cancellationToken) != 0)
                     {
                         throw new InvalidDataException("Unexpected ciphertext after TLS EOF.");
                     }
                     Volatile.Write(ref Ready, true);
+                    Responses++;
                     if (Volatile.Read(ref _phase.Measuring))
                     {
+                        var completed = Stopwatch.GetTimestamp();
                         Requests++;
-                        var microseconds = Stopwatch.GetElapsedTime(started).TotalMicroseconds;
+                        if (_shortConnections)
+                        {
+                            ConnectTicks += connectedAt - connectionStarted;
+                            HandshakeTicks += authenticatedAt - connectedAt;
+                            ResponseTicks += bodyAt - authenticatedAt;
+                            TlsEofTicks += tlsEofAt - bodyAt;
+                            TcpEofTicks += completed - tlsEofAt;
+                            if (TracePhases && (PhaseSamples?.Count ?? 0) < 16)
+                            {
+                                (PhaseSamples ??= []).Add(new
+                                {
+                                    sourcePort = ((IPEndPoint)socket.LocalEndPoint!).Port,
+                                    started = connectionStarted, connected = connectedAt, authenticated = authenticatedAt,
+                                    body = bodyAt, tlsEof = tlsEofAt, tcpEof = completed
+                                });
+                            }
+                        }
+                        var microseconds = Stopwatch.GetElapsedTime(started, completed).TotalMicroseconds;
                         Latencies[Histogram.Bucket(microseconds)]++;
+                        var window = Math.Min(WindowRequests.Length - 1, (int)((completed - _phase.Start) / Stopwatch.Frequency));
+                        WindowRequests[window]++;
                     }
                 }
-                while (!_shortConnections && !cancellationToken.IsCancellationRequested);
+                while (!_shortConnections && !cancellationToken.IsCancellationRequested && !Volatile.Read(ref _phase.Stopping));
+                if (!_shortConnections && !cancellationToken.IsCancellationRequested)
+                {
+                    stage = "teardown";
+                    if (tls is not null)
+                    {
+                        await tls.ShutdownAsync();
+                    }
+                    socket.Shutdown(SocketShutdown.Send);
+                    if (await stream.ReadAsync(_buffer.AsMemory(0, 1), cancellationToken) != 0)
+                    {
+                        throw new InvalidDataException("Unexpected data after the final complete response.");
+                    }
+                }
             }
             catch (Exception error) when (error is IOException or SocketException or AuthenticationException or OperationCanceledException or ObjectDisposedException)
             {
@@ -217,6 +329,10 @@ internal sealed class Peer
                 {
                     Errors++;
                 }
+                else if (Volatile.Read(ref _phase.Stopping))
+                {
+                    TeardownErrors++;
+                }
                 else
                 {
                     WarmupErrors++;
@@ -226,6 +342,8 @@ internal sealed class Peer
                     }
                 }
                 FirstError ??= error.ToString();
+                FirstErrorStage ??= stage;
+                FirstErrorSource ??= attemptedSource?.ToString();
                 await Task.Delay(10);
             }
         }

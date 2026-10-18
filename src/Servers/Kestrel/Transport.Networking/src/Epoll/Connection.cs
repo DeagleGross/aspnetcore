@@ -10,11 +10,21 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class Connection : DefaultConnectionContext
+internal sealed class Connection : DefaultConnectionContext, IProviderConnection
 {
+    ConnectionContext IProviderConnection.Context => this;
+    void IProviderConnection.Sent(int count, Exception? error)
+    {
+        _sendError ??= error;
+        Sent(count);
+    }
+    void IProviderConnection.Closed(Exception? error) => Closed(error);
+    void IProviderConnection.EndReceive(Exception? error) => Input.End(error);
+    void IProviderConnection.PumpOutput() => PumpOutput();
     private readonly EpollWorker _worker;
     private readonly ConnectionState _state;
     // The inline reader callback only enqueues worker work. Application flush
@@ -211,7 +221,7 @@ internal sealed class Connection : DefaultConnectionContext
         _pin.Dispose();
         if (count != _sendLength)
         {
-            _sendError = new IOException($"Epoll send failed: {count}.");
+            _sendError ??= new IOException($"Epoll send failed: {count}.");
         }
         if (!_pumping)
         {

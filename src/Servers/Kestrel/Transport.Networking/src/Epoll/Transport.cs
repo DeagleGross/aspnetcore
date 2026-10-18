@@ -10,7 +10,8 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class TransportFactory(string certificate, string key, int workers, ILoggerFactory logging, bool tls = true) : IConnectionListenerFactory
+internal sealed class TransportFactory(string certificate, string key, int workers, ILoggerFactory logging, bool tls = true, bool shared = false, int[]? processors = null,
+    Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null) : IConnectionListenerFactory
 {
     public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
@@ -20,9 +21,9 @@ internal sealed class TransportFactory(string certificate, string key, int worke
         {
             throw new NotSupportedException("Epoll requires IPv4 loopback and a fixed nonzero port.");
         }
-        var cpus = Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") is { } setting
+        var cpus = processors ?? (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") is { } setting
             ? setting.Split(',').Select(value => int.Parse(value, CultureInfo.InvariantCulture)).ToArray()
-            : Enumerable.Repeat(-1, workers).ToArray();
+            : Enumerable.Repeat(-1, workers).ToArray());
         if (workers <= 0 || cpus.Length != workers || cpus.Any(cpu => cpu < -1)
             || (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") is not null && cpus.Any(cpu => cpu < 0)))
         {
@@ -32,7 +33,7 @@ internal sealed class TransportFactory(string certificate, string key, int worke
         {
             throw new NotSupportedException("The epoll prototypes do not support kTLS; unset NETWORKPROTO_KTLS.");
         }
-        var listener = new Listener(ip, cpus, tls, certificate, key, logging.CreateLogger("NetworkProto.Epoll"));
+        var listener = new Listener(ip, cpus, tls, certificate, key, logging.CreateLogger("NetworkProto.Epoll"), shared, handshakePrefixCallback);
         await listener.StartAsync().ConfigureAwait(false);
         return listener;
     }
@@ -44,10 +45,11 @@ internal sealed class Listener : IConnectionListener
     private readonly EpollWorker[] _workers;
     private int _unbound;
 
-    internal Listener(IPEndPoint endpoint, int[] cpus, bool tls, string certificate, string key, ILogger logger)
+    internal Listener(IPEndPoint endpoint, int[] cpus, bool tls, string certificate, string key, ILogger logger, bool shared = false,
+        Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         EndPoint = endpoint;
-        _workers = cpus.Select(cpu => new EpollWorker(endpoint, cpu, tls, certificate, key, _accepted.Writer, logger)).ToArray();
+        _workers = cpus.Select(cpu => new EpollWorker(endpoint, cpu, tls, certificate, key, _accepted.Writer, logger, shared, handshakePrefixCallback)).ToArray();
     }
 
     public EndPoint EndPoint { get; }

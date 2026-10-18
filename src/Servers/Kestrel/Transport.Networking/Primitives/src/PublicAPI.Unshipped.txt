@@ -1,0 +1,107 @@
+#nullable enable
+abstract System.Net.Transport.NetworkConnection.AbortCore(System.Exception! error) -> void
+abstract System.Net.Transport.NetworkConnection.CloseCore() -> void
+abstract System.Net.Transport.NetworkConnection.ForgetCoreAsync() -> System.Threading.Tasks.ValueTask
+abstract System.Net.Transport.NetworkConnection.ScheduleOutputCore() -> void
+abstract System.Net.Transport.NetworkConnection.SubmitSendCore(System.ReadOnlyMemory<byte> data, nint pinnedAddress, bool final) -> void
+abstract System.Net.Transport.NetworkEngine.DisposeAsync() -> System.Threading.Tasks.ValueTask
+abstract System.Net.Transport.NetworkEngine.Kind.get -> System.Net.Transport.NetworkEngineKind
+abstract System.Net.Transport.NetworkEngine.ListenAsync(System.Net.EndPoint! endpoint, System.Net.Transport.NetworkListenOptions? options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Transport.NetworkListener!>
+abstract System.Net.Transport.NetworkListener.AcceptAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Transport.NetworkConnection?>
+abstract System.Net.Transport.NetworkListener.DisposeAsync() -> System.Threading.Tasks.ValueTask
+abstract System.Net.Transport.NetworkListener.LocalEndPoint.get -> System.Net.EndPoint!
+abstract System.Net.Transport.NetworkListener.UnbindAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+static System.Net.Transport.NetworkBuffer.TakeOwnership(System.Buffers.IMemoryOwner<byte>! owner, System.Net.Transport.NetworkMemoryKind kind) -> System.Net.Transport.NetworkBuffer!
+static System.Net.Transport.NetworkTlsExtensions.AuthenticateAsServerAsync(this System.Net.Transport.NetworkConnection! connection, System.Net.Security.SslServerAuthenticationOptions! options, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Security.SslStream!>
+System.Net.Transport.EpollEngineOptions
+System.Net.Transport.EpollEngineOptions.EpollEngineOptions() -> void
+System.Net.Transport.IocpEngineOptions
+System.Net.Transport.IocpEngineOptions.IocpEngineOptions() -> void
+System.Net.Transport.IoUringEngineOptions
+System.Net.Transport.IoUringEngineOptions.IoUringEngineOptions() -> void
+System.Net.Transport.NetworkBuffer
+System.Net.Transport.NetworkBuffer.Dispose() -> void
+System.Net.Transport.NetworkBuffer.Kind.get -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkBuffer.Memory.get -> System.Memory<byte>
+System.Net.Transport.NetworkBuffer.Slice.get -> System.Net.Transport.NetworkBufferSlice
+System.Net.Transport.NetworkBufferSlice
+System.Net.Transport.NetworkBufferSlice.Kind.get -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkBufferSlice.Length.get -> int
+System.Net.Transport.NetworkBufferSlice.Memory.get -> System.ReadOnlyMemory<byte>
+System.Net.Transport.NetworkBufferSlice.NetworkBufferSlice() -> void
+System.Net.Transport.NetworkBufferSlice.Retain() -> System.Net.Transport.NetworkBuffer!
+System.Net.Transport.NetworkBufferSlice.Slice(int start, int length) -> System.Net.Transport.NetworkBufferSlice
+System.Net.Transport.NetworkConnection
+System.Net.Transport.NetworkConnection.Abort(System.Exception? reason = null) -> void
+System.Net.Transport.NetworkConnection.AdvanceReceiveTo(System.SequencePosition consumed) -> void
+System.Net.Transport.NetworkConnection.AdvanceReceiveTo(System.SequencePosition consumed, System.SequencePosition examined) -> void
+System.Net.Transport.NetworkConnection.AllocateBuffer(int minimumSize = 0) -> System.Net.Transport.NetworkBuffer!
+System.Net.Transport.NetworkConnection.AsDuplexPipe() -> System.IO.Pipelines.IDuplexPipe!
+System.Net.Transport.NetworkConnection.AsStream() -> System.IO.Stream!
+System.Net.Transport.NetworkConnection.CompleteCloseCore(System.Exception? error = null) -> void
+System.Net.Transport.NetworkConnection.CompleteSendCore(int count, System.Exception? error = null) -> void
+System.Net.Transport.NetworkConnection.ConnectionClosed.get -> System.Threading.CancellationToken
+System.Net.Transport.NetworkConnection.DisposeAsync() -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkConnection.EndReceiveCore(System.Exception? error = null) -> void
+System.Net.Transport.NetworkConnection.EnqueueSend(System.Net.Transport.NetworkBufferSlice data) -> void
+System.Net.Transport.NetworkConnection.EnqueueSend(System.Net.Transport.NetworkPayload! data) -> void
+System.Net.Transport.NetworkConnection.Id.get -> string!
+System.Net.Transport.NetworkConnection.IsTls.get -> bool
+System.Net.Transport.NetworkConnection.LocalEndPoint.get -> System.Net.EndPoint?
+System.Net.Transport.NetworkConnection.MaxQueuedSendBytes.get -> long
+System.Net.Transport.NetworkConnection.MaxQueuedSendBytes.set -> void
+System.Net.Transport.NetworkConnection.NetworkConnection(string! id, System.Net.EndPoint? localEndPoint, System.Net.EndPoint? remoteEndPoint, System.Buffers.MemoryPool<byte>? outputPool = null, System.Net.Transport.NetworkMemoryKind outputKind = System.Net.Transport.NetworkMemoryKind.Managed, bool isTls = false) -> void
+System.Net.Transport.NetworkConnection.Output.get -> System.IO.Pipelines.PipeWriter!
+System.Net.Transport.NetworkConnection.PublishReceiveCore(System.Buffers.IMemoryOwner<byte>! owner, int count, System.Net.Transport.NetworkMemoryKind kind) -> void
+System.Net.Transport.NetworkConnection.PumpOutputCore() -> void
+System.Net.Transport.NetworkConnection.ReceiveAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Transport.NetworkReceiveResult>
+System.Net.Transport.NetworkConnection.RemoteEndPoint.get -> System.Net.EndPoint?
+System.Net.Transport.NetworkConnection.SendAsync(System.Buffers.ReadOnlySequence<byte> data) -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkConnection.SendAsync(System.Buffers.ReadOnlySequence<byte> data, System.Threading.CancellationToken cancellationToken) -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkConnection.SendAsync(System.ReadOnlyMemory<byte> data) -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkConnection.SendAsync(System.ReadOnlyMemory<byte> data, System.Threading.CancellationToken cancellationToken) -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkEngine
+System.Net.Transport.NetworkEngine.NetworkEngine() -> void
+System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkEngineKind.Epoll = 0 -> System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkEngineKind.Iocp = 2 -> System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkEngineKind.IoUring = 1 -> System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkEngineKind.Rio = 3 -> System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkEngineOptions
+System.Net.Transport.NetworkEngineOptions.NetworkEngineOptions() -> void
+System.Net.Transport.NetworkEngineOptions.WorkerCount.get -> int
+System.Net.Transport.NetworkEngineOptions.WorkerCount.set -> void
+System.Net.Transport.NetworkEngineOptions.WorkerProcessors.get -> System.Collections.Generic.IReadOnlyList<int>?
+System.Net.Transport.NetworkEngineOptions.WorkerProcessors.set -> void
+System.Net.Transport.NetworkListener
+System.Net.Transport.NetworkListener.NetworkListener() -> void
+System.Net.Transport.NetworkListenOptions
+System.Net.Transport.NetworkListenOptions.NativeTls.get -> System.Net.Transport.NetworkNativeTlsOptions?
+System.Net.Transport.NetworkListenOptions.NativeTls.set -> void
+System.Net.Transport.NetworkListenOptions.NetworkListenOptions() -> void
+System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkMemoryKind.Managed = 0 -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkMemoryKind.Native = 2 -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkMemoryKind.Pinned = 1 -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkMemoryKind.Registered = 3 -> System.Net.Transport.NetworkMemoryKind
+System.Net.Transport.NetworkNativeTlsOptions
+System.Net.Transport.NetworkNativeTlsOptions.CertificatePath.get -> string!
+System.Net.Transport.NetworkNativeTlsOptions.CertificatePath.init -> void
+System.Net.Transport.NetworkNativeTlsOptions.HandshakePrefixCallback.get -> System.Action<System.ReadOnlySpan<byte>>?
+System.Net.Transport.NetworkNativeTlsOptions.HandshakePrefixCallback.init -> void
+System.Net.Transport.NetworkNativeTlsOptions.NetworkNativeTlsOptions() -> void
+System.Net.Transport.NetworkNativeTlsOptions.PrivateKeyPath.get -> string!
+System.Net.Transport.NetworkNativeTlsOptions.PrivateKeyPath.init -> void
+System.Net.Transport.NetworkPayload
+System.Net.Transport.NetworkPayload.Dispose() -> void
+System.Net.Transport.NetworkPayload.Retain() -> System.Net.Transport.NetworkPayload!
+System.Net.Transport.NetworkPayload.Sequence.get -> System.Buffers.ReadOnlySequence<byte>
+System.Net.Transport.NetworkReceiveResult
+System.Net.Transport.NetworkReceiveResult.Buffer.get -> System.Buffers.ReadOnlySequence<byte>
+System.Net.Transport.NetworkReceiveResult.IsCanceled.get -> bool
+System.Net.Transport.NetworkReceiveResult.IsCompleted.get -> bool
+System.Net.Transport.NetworkReceiveResult.NetworkReceiveResult() -> void
+System.Net.Transport.NetworkReceiveResult.Retain(long start, long length) -> System.Net.Transport.NetworkPayload!
+System.Net.Transport.NetworkTlsExtensions
+System.Net.Transport.RioEngineOptions
+System.Net.Transport.RioEngineOptions.RioEngineOptions() -> void

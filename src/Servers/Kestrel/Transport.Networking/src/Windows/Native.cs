@@ -49,13 +49,19 @@ internal static unsafe partial class Native
         internal ulong Padding;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Linger
+    {
+        internal ushort Enabled, Seconds;
+    }
+
     internal static void ValidatePlatform()
     {
         if (!OperatingSystem.IsWindows() || RuntimeInformation.ProcessArchitecture != Architecture.X64)
         {
             throw new PlatformNotSupportedException("The Windows transport prototypes currently require Windows x64.");
         }
-        if (sizeof(Overlapped) != 32 || sizeof(Completion) != 32 || sizeof(SocketBuffer) != 16 || sizeof(SocketAddress) != 16)
+        if (sizeof(Overlapped) != 32 || sizeof(Completion) != 32 || sizeof(SocketBuffer) != 16 || sizeof(SocketAddress) != 16 || sizeof(Linger) != 4)
         {
             throw new InvalidOperationException("Windows SDK interop layout mismatch.");
         }
@@ -192,6 +198,12 @@ internal static unsafe partial class Native
     internal static void ShutdownSend(SocketHandle socket)
     {
         CheckSocket(shutdown(socket, 1), "shutdown(SD_SEND)");
+    }
+
+    internal static void SetAbortiveLinger(SocketHandle socket)
+    {
+        var linger = new Linger { Enabled = 1, Seconds = 0 };
+        CheckSocket(setsockopt(socket, SocketLevel, 0x0080, &linger, sizeof(Linger)), "SO_LINGER abort");
     }
 
     internal static void Cancel(SocketHandle socket)

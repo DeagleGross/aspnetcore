@@ -22,7 +22,10 @@ mkdir -p "$output"
 dll="${SAMPLE_DLL:-$root/artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll}"
 cert="$sample/.certs-owned/cert.pem"
 key="$sample/.certs-owned/key.pem"
-wrk="$HOME/code/wrk2/wrk"
+wrk="${WRK_BINARY:-$HOME/code/wrk2/wrk}"
+if [[ ${RATE_MODE:-scheduled} == closedloop ]]; then
+    wrk="${WRK_BINARY:-/usr/bin/wrk}"
+fi
 pid=''
 cleanup() {
     local status=0
@@ -67,6 +70,13 @@ for scheme in "${schemes[@]}"; do
                 headers=(-H 'Connection: close')
                 if [[ $scheme == https ]]; then rate=50000; fi
             fi
+            rate_args=("-R$rate")
+            warmup_rate_args=("-R${WARMUP_RATE:-$rate}")
+            if [[ ${RATE_MODE:-scheduled} == closedloop ]]; then
+                rate=0
+                rate_args=()
+                warmup_rate_args=()
+            fi
             tls=()
             if [[ $scheme == https ]]; then tls=(--cacert "$cert" --tlsv1.2 --tls-max 1.2); fi
             LD_LIBRARY_PATH="${SERVER_OPENSSL_LIB:+$SERVER_OPENSSL_LIB:}$LD_LIBRARY_PATH" \
@@ -103,12 +113,25 @@ for scheme in "${schemes[@]}"; do
             fi
             curl "${tls[@]}" -fsS --max-time 3 "$scheme://127.0.0.1:$port/" -o "$output/$label-body"
             [[ $(wc -c < "$output/$label-body") == 1024 ]]
+            if [[ -n ${WARMUP_DURATION:-} ]]; then
+                timeout --signal=TERM --kill-after=3s 35s taskset -c 8,10,12,14,16,18,20,22,24,26,28,30 \
+                    "$wrk" -t12 -c1200 "-d$WARMUP_DURATION" "${warmup_rate_args[@]}" "--timeout=${WRK_TIMEOUT:-2s}" \
+                    "${headers[@]}" "$scheme://127.0.0.1:$port/" > "$output/$label-warmup.txt" 2>&1
+                if grep -Eq 'Socket errors:|Non-2xx' "$output/$label-warmup.txt"; then
+                    cat "$output/$label-warmup.txt"
+                    exit 1
+                fi
+            fi
             echo "=== $backend $scheme $mode trial=$trial offered=$rate duration=$duration ==="
             # Same four server cores, twelve other physical client cores in every run.
             timeout --signal=TERM --kill-after=3s 35s taskset -c 8,10,12,14,16,18,20,22,24,26,28,30 \
-                "$wrk" -t12 -c1200 "-d$duration" "-R$rate" --latency --timeout 2s \
+                "$wrk" -t12 -c1200 "-d$duration" "${rate_args[@]}" --latency "--timeout=${WRK_TIMEOUT:-2s}" \
                 "${headers[@]}" "$scheme://127.0.0.1:$port/" > "$output/$label-wrk.txt" 2>&1
             grep -E 'Requests/sec:|Socket errors:|Non-2xx|^ 50[.]000%|^ 99[.]000%' "$output/$label-wrk.txt"
+            if grep -Eq 'Socket errors:|Non-2xx' "$output/$label-wrk.txt"; then
+                echo "LOAD_ERRORS $label" >&2
+                exit 1
+            fi
             rps=$(awk '/Requests\/sec:/ {print $2}' "$output/$label-wrk.txt")
             [[ -n $rps ]]
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$backend" "$scheme" "$mode" "$trial" "$rate" "$rps" >> "$output/summary.tsv"

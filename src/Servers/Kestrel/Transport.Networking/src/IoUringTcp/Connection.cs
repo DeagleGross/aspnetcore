@@ -8,11 +8,31 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
-internal sealed class Connection : DefaultConnectionContext
+internal sealed class Connection : DefaultConnectionContext, IProviderConnection
 {
+    ConnectionContext IProviderConnection.Context => this;
+    void IProviderConnection.Sent(int count, Exception? error)
+    {
+        if (error is null)
+        {
+            Sent(count);
+        }
+        else
+        {
+            _send?.TrySetException(error);
+        }
+    }
+    void IProviderConnection.Closed(Exception? error)
+    {
+        Input.End(error);
+        NativeClosed();
+    }
+    void IProviderConnection.PumpOutput() => throw new InvalidOperationException("Raw ring output uses its original send loop.");
+    void IProviderConnection.EndReceive(Exception? error) => Input.End(error);
     private readonly Engine _engine;
     private readonly ulong _id;
     private readonly Pipe _output = new(new PipeOptions(useSynchronizationContext: false));
