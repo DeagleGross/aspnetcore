@@ -11,10 +11,13 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : ConnectionState(id)
 {
     private const int WriteBudget = 256 * 1024;
-    private int _fd = fd, _sendLength, _sendOffset;
+    private int _fd = fd, _sendLength, _sendOffset, _iovStart, _iovEnd;
     private nint _sendData;
+    private Native.Iov[]? _iov;
     private uint _interest;
     private bool _registered, _readPaused, _readEnded, _finalSend;
+
+    private bool Sending => _sendData != 0 || _iovEnd != 0;
 
     internal override void Drive(uint ready)
     {
@@ -23,7 +26,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             return;
         }
         Application ??= engine.Publish(this);
-        if (_sendData != 0 && (ready & Native.Writable) != 0)
+        if (Sending && (ready & Native.Writable) != 0)
         {
             Write();
         }
@@ -41,7 +44,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             Application!.Sent(-125);
             return;
         }
-        if (_sendData != 0 || data == 0 || length <= 0)
+        if (Sending || data == 0 || length <= 0)
         {
             throw new InvalidOperationException("Invalid concurrent epoll TCP send.");
         }
@@ -49,6 +52,39 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
         _sendLength = length;
         _sendOffset = 0;
         _finalSend = final;
+        BeginWrite(final);
+    }
+
+    internal override void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final)
+    {
+        if (Closed)
+        {
+            Application!.Sent(-125);
+            return;
+        }
+        if (Sending || addresses.Length < 2 || addresses.Length > GatherSettings.Segments)
+        {
+            throw new InvalidOperationException("Invalid concurrent epoll TCP gather send.");
+        }
+        var iov = _iov ??= new Native.Iov[GatherSettings.Segments];
+        var total = 0;
+        for (var i = 0; i < addresses.Length; i++)
+        {
+            iov[i] = new Native.Iov { Base = addresses[i], Length = (nuint)lengths[i] };
+            total += lengths[i];
+        }
+        _iovStart = 0;
+        _iovEnd = addresses.Length;
+        _sendLength = total;
+        _sendOffset = 0;
+        _finalSend = final;
+        engine.Metrics.GatherSends++;
+        engine.Metrics.GatherSegments += addresses.Length;
+        BeginWrite(final);
+    }
+
+    private void BeginWrite(bool final)
+    {
         if (final && engine.CorkFinal)
         {
             Native.Check(Native.SetSocketOption(_fd, Native.SocketOption.Cork, 1), "TCP_CORK");
@@ -60,6 +96,11 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
 
     private void Write()
     {
+        if (_iovEnd != 0)
+        {
+            WriteVectored();
+            return;
+        }
         var budget = WriteBudget;
         while (_sendData != 0 && budget > 0)
         {
@@ -93,6 +134,59 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
                     Finish(null);
                 }
             }
+        }
+    }
+
+    private unsafe void WriteVectored()
+    {
+        var iov = _iov!;
+        while (_iovStart < _iovEnd)
+        {
+            var wanted = _sendLength - _sendOffset;
+            int count;
+            engine.Metrics.SendCalls++;
+            fixed (Native.Iov* entries = &iov[_iovStart])
+            {
+                count = Native.SendVectored(_fd, entries, _iovEnd - _iovStart);
+            }
+            if (count == Native.Again)
+            {
+                engine.Metrics.SendWouldBlock++;
+                return;
+            }
+            if (count <= 0)
+            {
+                SocketError(count == 0 ? Native.BrokenPipe : count, "sendmsg");
+                return;
+            }
+            if (count < wanted)
+            {
+                engine.Metrics.PartialSends++;
+            }
+            NativeSendTrace.Write(engine.Logger, iov[_iovStart].Base, count);
+            engine.Metrics.SendBytes += count;
+            _sendOffset += count;
+            for (var advance = (nuint)count; advance > 0;)
+            {
+                ref var entry = ref iov[_iovStart];
+                if (advance >= entry.Length)
+                {
+                    advance -= entry.Length;
+                    _iovStart++;
+                }
+                else
+                {
+                    entry.Base += (nint)advance;
+                    entry.Length -= advance;
+                    advance = 0;
+                }
+            }
+        }
+        _iovStart = _iovEnd = 0;
+        Application!.Sent(_sendLength);
+        if (_finalSend)
+        {
+            Finish(null);
         }
     }
 
@@ -151,7 +245,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
         {
             return;
         }
-        var mask = (_readPaused || _readEnded ? 0 : Native.Readable) | (_sendData != 0 ? Native.Writable : 0);
+        var mask = (_readPaused || _readEnded ? 0 : Native.Readable) | (Sending ? Native.Writable : 0);
         if (mask == 0)
         {
             if (_registered)
@@ -217,7 +311,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
 
     internal override void RequestClose()
     {
-        Finish(_sendData == 0 ? null : new ConnectionAbortedException("Epoll TCP closed with pending output."));
+        Finish(Sending ? new ConnectionAbortedException("Epoll TCP closed with pending output.") : null);
     }
 
     internal override void Finish(Exception? error)
@@ -253,6 +347,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             }
             engine.CloseDescriptor(ref _fd);
             _sendData = 0;
+            _iovStart = _iovEnd = 0;
             engine.Metrics.Closed++;
             Application!.Closed(error);
         }

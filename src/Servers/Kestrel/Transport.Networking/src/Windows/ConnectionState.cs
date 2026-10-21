@@ -20,6 +20,8 @@ internal sealed class ConnectionState : IDisposable
     private MemoryHandle _receivePin;
     private ReadOnlyMemory<byte> _sendMemory;
     private nint _sendAddress;
+    private Native.SocketBuffer[]? _gatherBuffers;
+    private int _gatherCount, _gatherTotal, _gatherRemaining;
     private int _sendOffset, _leased;
     private bool _closing, _signalled, _readEof, _ready, _forgotten, _sendShutdown;
     private long _shutdownDeadline;
@@ -267,8 +269,46 @@ internal sealed class ConnectionState : IDisposable
         }
     }
 
+    internal unsafe void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths)
+    {
+        if (_closing || _sendShutdown)
+        {
+            throw new IOException("The Windows connection is closing.");
+        }
+        if (Write.Outstanding || !_sendMemory.IsEmpty || _gatherCount != 0)
+        {
+            throw new InvalidOperationException("Only one output segment may be owned by native I/O.");
+        }
+        // The WSABUF array lives on the pinned heap until the final completion; partial sends advance it in place.
+        var buffers = _gatherBuffers ??= GC.AllocateArray<Native.SocketBuffer>(GatherSettings.Segments, pinned: true);
+        var total = 0;
+        for (var i = 0; i < addresses.Length; i++)
+        {
+            buffers[i] = new Native.SocketBuffer { Data = (byte*)addresses[i], Length = (uint)lengths[i] };
+            total += lengths[i];
+        }
+        _gatherCount = addresses.Length;
+        _gatherTotal = _gatherRemaining = total;
+        try
+        {
+            _worker.SubmitGatherSend(this, buffers, _gatherCount);
+        }
+        catch
+        {
+            _gatherCount = 0;
+            throw;
+        }
+        _worker.Metrics.GatherSends++;
+        _worker.Metrics.GatherSegments += addresses.Length;
+    }
+
     internal void Sent(int count, int error)
     {
+        if (_gatherCount != 0)
+        {
+            SentGather(count, error);
+            return;
+        }
         if (_sendMemory.IsEmpty)
         {
             throw new InvalidOperationException("Send completion has no owned output.");
@@ -308,6 +348,64 @@ internal sealed class ConnectionState : IDisposable
         var completed = _sendMemory.Length;
         _sendMemory = default;
         _sendAddress = 0;
+        CompleteSend(completed, null);
+    }
+
+    private unsafe void SentGather(int count, int error)
+    {
+        if (error != 0 || _closing)
+        {
+            _gatherCount = 0;
+            CompleteSend(-1, _error ?? TransportError(new SocketException(error == 0 ? Native.OperationAborted : error)));
+            TrySignalClosed();
+            return;
+        }
+        if (count <= 0 || count > _gatherRemaining)
+        {
+            _gatherCount = 0;
+            CompleteSend(-1, new IOException($"Invalid native send completion: {count}."));
+            return;
+        }
+        _gatherRemaining -= count;
+        _worker.Metrics.SentBytes += count;
+        if (_gatherRemaining > 0)
+        {
+            _worker.Metrics.PartialSends++;
+            var buffers = _gatherBuffers!;
+            var skip = 0;
+            for (var left = count; left > 0;)
+            {
+                ref var buffer = ref buffers[skip];
+                if (left >= buffer.Length)
+                {
+                    left -= (int)buffer.Length;
+                    skip++;
+                }
+                else
+                {
+                    buffer.Data += left;
+                    buffer.Length -= (uint)left;
+                    left = 0;
+                }
+            }
+            if (skip > 0)
+            {
+                Array.Copy(buffers, skip, buffers, 0, _gatherCount - skip);
+                _gatherCount -= skip;
+            }
+            try
+            {
+                _worker.SubmitGatherSend(this, buffers, _gatherCount);
+            }
+            catch (Exception sendError)
+            {
+                _gatherCount = 0;
+                CompleteSend(-1, sendError);
+            }
+            return;
+        }
+        var completed = _gatherTotal;
+        _gatherCount = 0;
         CompleteSend(completed, null);
     }
 

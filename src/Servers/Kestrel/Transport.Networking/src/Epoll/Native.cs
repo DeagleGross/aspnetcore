@@ -24,6 +24,13 @@ internal static unsafe partial class Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct Iov
+    {
+        internal nint Base;
+        internal nuint Length;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct TlsResult
     {
         internal TlsStatus Status;
@@ -49,6 +56,8 @@ internal static unsafe partial class Native
     internal static partial int Receive(int fd, nint buffer, int length);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_send")]
     internal static partial int Send(int fd, nint buffer, int length);
+    [LibraryImport("networkprotoepoll", EntryPoint = "ep_sendv")]
+    internal static partial int SendVectored(int fd, Iov* iov, int count);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_eventfd")]
     internal static partial int CreateWake();
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_wake")]

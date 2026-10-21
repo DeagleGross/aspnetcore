@@ -15,6 +15,7 @@ internal abstract class ConnectionState(ulong id)
 
     internal abstract void Drive(uint ready);
     internal abstract void Send(nint data, int length, bool final);
+    internal virtual void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final) => throw new NotSupportedException();
     internal abstract void ReturnPage(int page);
     internal abstract void RequestClose();
     internal abstract void ResumeForPool();

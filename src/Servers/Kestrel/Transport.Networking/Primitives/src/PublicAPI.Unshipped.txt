@@ -4,6 +4,8 @@ abstract System.Net.Transport.NetworkConnection.CloseCore() -> void
 abstract System.Net.Transport.NetworkConnection.ForgetCoreAsync() -> System.Threading.Tasks.ValueTask
 abstract System.Net.Transport.NetworkConnection.ScheduleOutputCore() -> void
 abstract System.Net.Transport.NetworkConnection.SubmitSendCore(System.ReadOnlyMemory<byte> data, nint pinnedAddress, bool final) -> void
+virtual System.Net.Transport.NetworkConnection.MaxGatherSegments.get -> int
+virtual System.Net.Transport.NetworkConnection.SubmitGatherSendCore(System.ReadOnlySpan<nint> addresses, System.ReadOnlySpan<int> lengths, bool final) -> void
 abstract System.Net.Transport.NetworkEngine.DisposeAsync() -> System.Threading.Tasks.ValueTask
 abstract System.Net.Transport.NetworkEngine.Kind.get -> System.Net.Transport.NetworkEngineKind
 abstract System.Net.Transport.NetworkEngine.ListenAsync(System.Net.EndPoint! endpoint, System.Net.Transport.NetworkListenOptions? options = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Transport.NetworkListener!>

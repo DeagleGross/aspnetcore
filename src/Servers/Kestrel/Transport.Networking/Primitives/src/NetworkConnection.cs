@@ -10,6 +10,8 @@ namespace System.Net.Transport;
 /// <summary>A shared owned-memory connection with provider-owned native execution.</summary>
 public abstract class NetworkConnection : IAsyncDisposable
 {
+    private const int MaxGatherLimit = 64;
+    private const int MaxGatherBytes = 256 * 1024;
     private readonly NetworkInputReader _input = new();
     private readonly Pipe _output;
     private readonly MemoryPool<byte> _outputPool;
@@ -28,6 +30,8 @@ public abstract class NetworkConnection : IAsyncDisposable
     private ReadOnlySequence<byte> _remaining;
     private SendRequest? _request;
     private MemoryHandle _pin;
+    private MemoryHandle[]? _pins;
+    private int _gatherCount;
     private int _sendLength, _sendMode, _receivePages, _disposingStarted, _outputScheduled;
     private long _queuedBytes;
     private bool _reading, _hasRead, _sending, _stopped, _transportClosed, _pumping;
@@ -262,6 +266,19 @@ public abstract class NetworkConnection : IAsyncDisposable
     /// </summary>
     protected abstract void SubmitSendCore(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final);
 
+    /// <summary>
+    /// Gets the most borrowed segments the provider can submit as one native gather send. The default of 1 never calls
+    /// <see cref="SubmitGatherSendCore"/>. Gather is an optimization; the core may still call <see cref="SubmitSendCore"/> for a single segment.
+    /// </summary>
+    protected virtual int MaxGatherSegments => 1;
+
+    /// <summary>
+    /// Submits two or more borrowed segments as one ordered native send using the core's live pins. The spans are valid only during
+    /// this call, so copy what native submission needs. Call CompleteSendCore with the total byte count only after all native
+    /// ownership of every address ends.
+    /// </summary>
+    protected virtual void SubmitGatherSendCore(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final) => throw new NotSupportedException();
+
     /// <summary>Requests a graceful provider close after output completion.</summary>
     protected abstract void CloseCore();
 
@@ -296,7 +313,7 @@ public abstract class NetworkConnection : IAsyncDisposable
             throw new InvalidOperationException("Unexpected shared send completion.");
         }
         _sending = false;
-        _pin.Dispose();
+        ReleasePins();
         _error ??= error;
         if (count != _sendLength)
         {
@@ -415,22 +432,30 @@ public abstract class NetworkConnection : IAsyncDisposable
                         }
                     }
                 }
-                var position = _remaining.Start;
-                while (_remaining.TryGet(ref position, out var segment))
+                var maxSegments = Math.Min(MaxGatherSegments, MaxGatherLimit);
+                if (maxSegments > 1 && !_remaining.IsSingleSegment)
                 {
-                    if (segment.IsEmpty)
+                    SubmitGather(maxSegments);
+                }
+                else
+                {
+                    var position = _remaining.Start;
+                    while (_remaining.TryGet(ref position, out var segment))
                     {
-                        continue;
+                        if (segment.IsEmpty)
+                        {
+                            continue;
+                        }
+                        _remaining = _remaining.Slice(segment.Length);
+                        _pin = segment.Pin();
+                        _sendLength = segment.Length;
+                        _sending = true;
+                        unsafe
+                        {
+                            SubmitSendCore(segment, (nint)_pin.Pointer, _hasRead && _read.IsCompleted && !_read.IsCanceled && _remaining.IsEmpty);
+                        }
+                        break;
                     }
-                    _remaining = _remaining.Slice(segment.Length);
-                    _pin = segment.Pin();
-                    _sendLength = segment.Length;
-                    _sending = true;
-                    unsafe
-                    {
-                        SubmitSendCore(segment, (nint)_pin.Pointer, _hasRead && _read.IsCompleted && !_read.IsCanceled && _remaining.IsEmpty);
-                    }
-                    break;
                 }
                 if (_sending)
                 {
@@ -441,17 +466,86 @@ public abstract class NetworkConnection : IAsyncDisposable
         }
         catch (Exception error)
         {
-            if (_sending)
-            {
-                _sending = false;
-                _pin.Dispose();
-            }
+            _sending = false;
+            ReleasePins();
             _input.End(error);
             FinishOutput(error);
         }
         finally
         {
             _pumping = false;
+        }
+    }
+
+    private unsafe void SubmitGather(int maxSegments)
+    {
+        Span<nint> addresses = stackalloc nint[maxSegments];
+        Span<int> lengths = stackalloc int[maxSegments];
+        if (_pins is null || _pins.Length < maxSegments)
+        {
+            _pins = new MemoryHandle[maxSegments];
+        }
+        var pins = _pins;
+        var count = 0;
+        long total = 0;
+        ReadOnlyMemory<byte> first = default;
+        var position = _remaining.Start;
+        while (count < maxSegments && _remaining.TryGet(ref position, out var segment))
+        {
+            if (segment.IsEmpty)
+            {
+                continue;
+            }
+            if (count > 0 && total + segment.Length > MaxGatherBytes)
+            {
+                break;
+            }
+            if (count == 0)
+            {
+                first = segment;
+            }
+            pins[count] = segment.Pin();
+            addresses[count] = (nint)pins[count].Pointer;
+            lengths[count] = segment.Length;
+            total += segment.Length;
+            count++;
+            _gatherCount = count;
+        }
+        if (count == 0)
+        {
+            return;
+        }
+        _remaining = _remaining.Slice(total);
+        var final = _hasRead && _read.IsCompleted && !_read.IsCanceled && _remaining.IsEmpty;
+        _sending = true;
+        if (count == 1)
+        {
+            _pin = pins[0];
+            pins[0] = default;
+            _gatherCount = 0;
+            _sendLength = lengths[0];
+            SubmitSendCore(first, addresses[0], final);
+        }
+        else
+        {
+            _sendLength = (int)total;
+            SubmitGatherSendCore(addresses[..count], lengths[..count], final);
+        }
+    }
+
+    private void ReleasePins()
+    {
+        _pin.Dispose();
+        _pin = default;
+        if (_gatherCount != 0)
+        {
+            var pins = _pins!;
+            for (var i = 0; i < _gatherCount; i++)
+            {
+                pins[i].Dispose();
+                pins[i] = default;
+            }
+            _gatherCount = 0;
         }
     }
 

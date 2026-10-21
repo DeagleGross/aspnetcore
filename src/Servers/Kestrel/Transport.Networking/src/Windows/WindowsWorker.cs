@@ -218,6 +218,7 @@ internal sealed class WindowsWorker
                 synchronousCompletions = Metrics.SynchronousCompletions,
                 receivedBytes = Metrics.ReceivedBytes, sentBytes = Metrics.SentBytes,
                 sendAdapterCopyBytes = Metrics.SendAdapterCopyBytes,
+                gatherSends = Metrics.GatherSends, gatherSegments = Metrics.GatherSegments,
                 partialSends = Metrics.PartialSends, backpressure = Metrics.ReceiveBackpressure,
                 maxLeasedPages = Metrics.MaxLeasedPages, rioNotifications = Metrics.RioNotifications,
                 connectionErrors = Metrics.ConnectionErrors, pendingIo = _pendingIo,
@@ -578,6 +579,31 @@ internal sealed class WindowsWorker
         Metrics.Sends++;
     }
 
+    internal unsafe void SubmitGatherSend(ConnectionState state, Native.SocketBuffer[] buffers, int count)
+    {
+        var operation = state.Write;
+        operation.Reset();
+        uint bytes = 0;
+        int result;
+        fixed (Native.SocketBuffer* pointer = buffers)
+        {
+            result = Native.WSASend(state.Socket, pointer, (uint)count, &bytes, 0, operation.Pointer, 0);
+        }
+        if (result == -1
+            && Native.WSAGetLastError() != Native.IoPending)
+        {
+            throw Native.SocketError("WSASend");
+        }
+        operation.Outstanding = true;
+        _pendingIo++;
+        if (result == 0)
+        {
+            Metrics.SynchronousCompletions++;
+            _immediate.Enqueue(((nint)operation.Pointer, checked((int)bytes)));
+        }
+        Metrics.Sends++;
+    }
+
     private unsafe void DrainRio(RioApi.Result* results)
     {
         for (var batch = 0; batch < 8; batch++)
@@ -672,6 +698,7 @@ internal sealed class WindowsWorker
     {
         internal long Accepted, Closed, Rejected, Polls, Wakes, Completions, Probes, Receives, Sends;
         internal long ReceivedBytes, SentBytes, PartialSends, ReceiveBackpressure, RioNotifications, ConnectionErrors, SendAdapterCopyBytes;
+        internal long GatherSends, GatherSegments;
         internal long SynchronousCompletions;
         internal long GracefulTimeouts;
         internal long TlsHandshakes, TlsEncryptCalls, TlsDecryptCalls, TlsPlaintextBytes;

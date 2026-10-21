@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 // Normalize Linux's packed epoll_event and OpenSSL's thread-local error result at the ABI.
@@ -75,6 +77,15 @@ int ep_send(int fd, const void *buffer, int length)
 {
     ssize_t result;
     do { result = send(fd, buffer, length, MSG_NOSIGNAL); } while (result < 0 && errno == EINTR);
+    return result < 0 ? -errno : (int)result;
+}
+
+// The iovec array is read synchronously by the kernel; only the referenced data must stay valid.
+int ep_sendv(int fd, const struct iovec *iov, int count)
+{
+    struct msghdr message = { .msg_iov = (struct iovec *)iov, .msg_iovlen = count };
+    ssize_t result;
+    do { result = sendmsg(fd, &message, MSG_NOSIGNAL); } while (result < 0 && errno == EINTR);
     return result < 0 ? -errno : (int)result;
 }
 

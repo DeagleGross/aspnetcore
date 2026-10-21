@@ -36,6 +36,7 @@ internal sealed class Engine
     private readonly Stack<int> _freePages = new(Enumerable.Range(0, PageCount));
     private readonly bool[] _leasedPages = new bool[PageCount];
     private readonly bool[] _cipherLeases = new bool[PageCount];
+    private readonly Stack<byte[]> _gatherBlocks = new();
     private long _wakes, _iterations, _commandsProcessed, _pagesRead, _bytesRead, _sendCommands, _finalCommands;
     private long _rejected, _rejectedDisposed;
     internal readonly bool Tls, Layered, RequireKtls, GuardPageReads;
@@ -243,6 +244,14 @@ internal sealed class Engine
         }
     }
 
+    // Gather blocks are rented and returned on the engine thread only, so the pool needs no lock.
+    internal byte[] RentGatherBlock()
+    {
+        return _gatherBlocks.TryPop(out var block) ? block : GC.AllocateUninitializedArray<byte>(Native.GatherBlockHeader + GatherSettings.Segments * Marshal.SizeOf<Native.Iov>(), pinned: true);
+    }
+
+    internal void ReturnGatherBlock(byte[] block) => _gatherBlocks.Push(block);
+
     internal void Prepare(Native.Operation operation, int fd, nint data, int length, ulong id, ulong target = 0, int flags = 0)
     {
         Native.Check(Native.Prepare(_ring, operation, fd, data, length, id, target, flags), "prepare");
@@ -256,6 +265,7 @@ internal sealed class Engine
                 break;
             case Native.Operation.Send:
             case Native.Operation.LinkedSend:
+            case Native.Operation.SendVectored:
                 Metrics.SendSqes++;
                 break;
             case Native.Operation.ReadPoll:
@@ -587,6 +597,8 @@ internal sealed class Engine
             {
                 shutdowns = Metrics.FinalShutdowns,
                 partialSends = Metrics.PartialSends,
+                gatherSends = Metrics.GatherSends,
+                gatherSegments = Metrics.GatherSegments,
                 links = Metrics.Links,
                 cancelledLinks = Metrics.CanceledLinks,
                 shutdownErrors = Metrics.ShutdownErrors,
@@ -604,7 +616,7 @@ internal sealed class Engine
         internal long AcceptSqes, ReceiveSqes, SendSqes, PollSqes, Cqes, ReturnedPages, SslReads, ReadSuccess, WantRead;
         internal long Handshakes, KtlsRx, KtlsTx, KtlsRejected, PageDrives, PageSkips, TlsWriteRetries;
         internal long FinalShutdowns, PartialSends, Links, CanceledLinks, ShutdownErrors, ShutdownAfterClose, NotConnected;
-        internal long TlsFinalShutdowns, CloseNotify, TlsShutdownFailures, Corks;
+        internal long TlsFinalShutdowns, CloseNotify, TlsShutdownFailures, Corks, GatherSends, GatherSegments;
         internal long CipherReceived, CipherReturned, PartialCipherSends, PeerAborts, TlsErrors;
         internal ulong InputCopied, OutputCopied;
     }

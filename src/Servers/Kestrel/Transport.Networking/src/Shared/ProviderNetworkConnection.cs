@@ -99,6 +99,8 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
     }
 
     protected override void SubmitSendCore(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final) => _driver.Send(data, pinnedAddress, final);
+    protected override int MaxGatherSegments => _driver.MaxGatherSegments;
+    protected override void SubmitGatherSendCore(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final) => _driver.SendGather(addresses, lengths, final);
     protected override void CloseCore() => _driver.Close();
     protected override void AbortCore(Exception error) => _driver.Abort(error);
     protected override ValueTask ForgetCoreAsync()
@@ -112,9 +114,11 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
         internal virtual MemoryPool<byte>? OutputPool => null;
         internal virtual NetworkMemoryKind OutputKind => NetworkMemoryKind.Managed;
         internal virtual bool CanCompleteInline => false;
+        internal virtual int MaxGatherSegments => 1;
         internal virtual void Sent() { }
         internal abstract void Schedule();
         internal abstract void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final);
+        internal virtual void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final) => throw new NotSupportedException();
         internal abstract void Close();
         internal abstract void Abort(Exception error);
         internal abstract void Forget();
@@ -124,10 +128,16 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     private sealed class EpollDriver(EpollWorker worker, EpollState state) : Driver
     {
+        private readonly int _gather = state is Epoll.TcpConnection && GatherSettings.Enabled ? GatherSettings.Segments : 1;
+        internal override int MaxGatherSegments => _gather;
         internal override void Schedule() => worker.Enqueue(new(EpollWorker.CommandKind.OutputReady, state));
         internal override void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final)
         {
             worker.Send(state, pinnedAddress, data.Length, final && worker.FinalSendEnabled);
+        }
+        internal override void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final)
+        {
+            worker.SendGather(state, addresses, lengths, final && worker.FinalSendEnabled);
         }
         internal override void Close() => state.RequestClose();
         internal override void Abort(Exception error) => worker.Enqueue(new(EpollWorker.CommandKind.Close, state));
@@ -137,10 +147,16 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     private sealed class RingDriver(RingEngine engine, RingState state) : Driver
     {
+        private readonly int _gather = !engine.Tls && !engine.Layered && GatherSettings.Enabled ? GatherSettings.Segments : 1;
+        internal override int MaxGatherSegments => _gather;
         internal override void Schedule() => engine.Enqueue(new RingNative.Command { Kind = 7, Connection = state.Id });
         internal override void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final)
         {
             state.Send(pinnedAddress, data.Length, final && engine.FinalSendEnabled);
+        }
+        internal override void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final)
+        {
+            state.SendGather(addresses, lengths, final && engine.FinalSendEnabled);
         }
         internal override void Close() => engine.Enqueue(new RingNative.Command { Kind = 3, Connection = state.Id });
         internal override void Abort(Exception error) => engine.Enqueue(new RingNative.Command { Kind = 3, Connection = state.Id });
@@ -155,6 +171,8 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
         internal override NetworkMemoryKind OutputKind => worker.IsRio ? NetworkMemoryKind.Registered : NetworkMemoryKind.Native;
         internal override bool CanCompleteInline => worker.IsCurrentThread;
         internal override void Schedule() => worker.Enqueue(new(WindowsWorker.CommandKind.OutputReady, state));
+        internal override int MaxGatherSegments => !worker.IsRio && !state.HasTls && GatherSettings.Enabled ? GatherSettings.Segments : 1;
+        internal override void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final) => state.SendGather(addresses, lengths);
         internal override void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final)
         {
             if (worker.IsRio && !state.HasTls && !WindowsPool.TryGetRegisteredBuffer(data, out _))

@@ -14,6 +14,7 @@ port=${PORT:-23500}
 seconds=${SECONDS_TO_MEASURE:-10}
 warmup=${WARMUP:-5}
 connections=${CONNECTIONS:-256}
+body=${BODY_BYTES:-1024}
 if [[ $mode == short ]]; then connections=${SHORT_CONNECTIONS:-64}; fi
 output="$sample/results/shared-$backend-$scheme-$mode${RUN_LABEL:+-$RUN_LABEL}-$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$output"
@@ -38,9 +39,11 @@ trap cleanup EXIT
 tls=()
 if [[ $scheme == https ]]; then tls=(--cacert "$cert" --tlsv1.2 --tls-max 1.2); fi
 url="$scheme://127.0.0.1:$port"
+direct=()
+if [[ -n ${DIRECT_SEGMENTS:-} ]]; then direct=(--direct-sequence true --segments "$DIRECT_SEGMENTS"); fi
 DOTNET_PROCESSOR_COUNT=4 taskset -c 0,2,4,6 dotnet "$sample_dll" \
     --backend "$backend" --scheme "$scheme" --port "$port" --workers 4 \
-    --cert "$cert" --key "$key" --minimal true --benchmark true \
+    --cert "$cert" --key "$key" --minimal true --benchmark true --body-bytes "$body" "${direct[@]}" \
     --Logging:LogLevel:Default Warning > "$output/server.log" 2>&1 &
 server=$!
 ready=0
@@ -53,7 +56,7 @@ done
 DOTNET_PROCESSOR_COUNT=12 taskset -c 8,10,12,14,16,18,20,22,24,26,28,30 \
     timeout --signal=TERM --kill-after=5s "$((warmup+seconds+40))s" dotnet "$load_dll" \
     --url "$url/" --mode "$mode" --connections "$connections" --seconds "$seconds" \
-    --warmup "$warmup" --tls-protocol Tls12 --source-network auto > "$output/load.log" 2>&1 &
+    --warmup "$warmup" --tls-protocol Tls12 --source-network auto --body-bytes "$body" > "$output/load.log" 2>&1 &
 client=$!
 for i in $(seq 1 500); do
     if grep -q '^MEASURE_START' "$output/load.log"; then break; fi
@@ -62,13 +65,19 @@ for i in $(seq 1 500); do
 done
 grep -q '^MEASURE_START' "$output/load.log"
 curl "${tls[@]}" -fsS --max-time 5 "$url/metrics" > "$output/before.json"
+cpu_ticks() { awk '{print $14+$15}' "/proc/$server/stat"; }
+cpu_t0=$(date +%s.%N)
+cpu_c0=$(cpu_ticks)
 wait "$client"
+cpu_c1=$(cpu_ticks)
+cpu_t1=$(date +%s.%N)
 client=''
+server_cpu=$(python3 -c "import os,sys; print((($cpu_c1-$cpu_c0)/os.sysconf('SC_CLK_TCK'))/($cpu_t1-$cpu_t0))")
 curl "${tls[@]}" -fsS --max-time 5 "$url/metrics" > "$output/after.json"
 curl "${tls[@]}" -fsS --max-time 5 --request POST "$url/shutdown" > /dev/null
 wait "$server"
 server=''
-python3 - "$output" "$backend" "$scheme" "$mode" "$sample_dll" <<'PY'
+python3 - "$output" "$backend" "$scheme" "$mode" "$sample_dll" "$server_cpu" <<'PY'
 from pathlib import Path
 import hashlib, json, sys
 path=Path(sys.argv[1])
@@ -83,11 +92,11 @@ if sys.argv[2]!='sockets':
     assert len(native)==4
     assert all(m['liveConnections']==0 and m['leasedPages']==0 and m.get('leasedCipherPages',0)==0 for m in native)
     assert sum(m['pages'] for m in native)>0 and sum(m['receiveAdapterCopyBytes'] for m in native)==0
-record=dict(backend=sys.argv[2],scheme=sys.argv[3],mode=sys.argv[4],result=result,transport=native,
+record=dict(backend=sys.argv[2],scheme=sys.argv[3],mode=sys.argv[4],result=result,transport=native,serverCpuCores=float(sys.argv[6]),
     sampleSha256=hashlib.sha256(Path(sys.argv[5]).read_bytes()).hexdigest(),
     serverBefore=json.loads(path.joinpath('before.json').read_text()),
     serverAfter=json.loads(path.joinpath('after.json').read_text()))
 path.joinpath('run.json').write_text(json.dumps(record,indent=2)+'\n')
-print(f"{sys.argv[2]} {sys.argv[3]} {sys.argv[4]} RPS={result['rps']:.0f} errors=0 ready={result['readyLanes']} clientCPU={result['clientCpuCores']:.2f}")
+print(f"{sys.argv[2]} {sys.argv[3]} {sys.argv[4]} RPS={result['rps']:.0f} errors=0 ready={result['readyLanes']} clientCPU={result['clientCpuCores']:.2f} serverCPU={float(sys.argv[6]):.2f}")
 print(f'RESULTS {path}')
 PY

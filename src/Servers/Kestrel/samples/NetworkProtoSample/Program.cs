@@ -51,7 +51,12 @@ if (tlsProtocols != SslProtocols.Tls12 && backend is "IoUringTls" or "IoUringBio
     throw new ArgumentException("The native Linux TLS prototypes are fixed to TLS 1.2.");
 }
 var counters = new Counters();
-var payload = new string('x', 1023) + "\n";
+var bodyBytes = builder.Configuration.GetValue("body-bytes", 1024);
+if (bodyBytes < 1)
+{
+    throw new ArgumentException("Use --body-bytes with a positive value.");
+}
+var payload = new string('x', bodyBytes - 1) + "\n";
 if (backend.StartsWith("shared", StringComparison.Ordinal))
 {
     NetworkEngineOptions engineOptions = backend switch
@@ -312,6 +317,42 @@ if (builder.Configuration.GetValue("check-final-send", false))
     }
     return;
 }
+if (builder.Configuration.GetValue("direct-sequence", false))
+{
+    NetworkEngineOptions directOptions = backend switch
+    {
+        "sharedEpollTcp" => new EpollEngineOptions(),
+        "sharedIoUringTcp" => new IoUringEngineOptions(),
+        "sharedIocp" => new IocpEngineOptions(),
+        "sharedRio" => new RioEngineOptions(),
+        _ => throw new ArgumentException("The direct-sequence server requires a plain shared engine with --scheme http.")
+    };
+    directOptions.WorkerCount = builder.Configuration.GetValue("workers", 4);
+    var segments = builder.Configuration.GetValue("segments", 8);
+    if (scheme != "http" || segments < 1 || bodyBytes < segments)
+    {
+        throw new ArgumentException("Use --scheme http, --segments >= 1 and --body-bytes >= --segments.");
+    }
+    await DirectSequenceServer.RunAsync(directOptions, port, segments, bodyBytes);
+    return;
+}
+if (builder.Configuration.GetValue("check-gather-send", false))
+{
+    if (scheme != "http" || backend is not ("sharedIoUringTcp" or "sharedEpollTcp" or "sharedIocp" or "sharedRio"))
+    {
+        throw new ArgumentException("Gather-send check requires a shared plain-TCP backend with --scheme http.");
+    }
+    try
+    {
+        await GatherSendCheck.RunAsync(app.Services.GetRequiredService<IConnectionListenerFactory>(), port);
+    }
+    catch (Exception error)
+    {
+        Console.Error.WriteLine($"FAIL gather-send: {error}");
+        Environment.ExitCode = 1;
+    }
+    return;
+}
 if (builder.Configuration.GetValue("check-rejected-accept", false))
 {
     if (scheme != "https" || backend is not ("IoUringTls" or "IoUringBio" or "epollTls"))
@@ -351,7 +392,7 @@ app.MapGet("/", async context =>
         context.Response.Headers["X-Tls"] = tls is null ? "none" : $"{tls.Protocol}:{tls.NegotiatedCipherSuite}";
     }
     context.Response.ContentType = "text/plain";
-    context.Response.ContentLength = 1024;
+    context.Response.ContentLength = bodyBytes;
     await context.Response.WriteAsync(payload);
 });
 app.MapGet("/metrics", (HttpContext context) =>

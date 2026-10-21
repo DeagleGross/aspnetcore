@@ -344,6 +344,16 @@ internal sealed class EpollWorker
         state.Send(data, length, final);
     }
 
+    internal void SendGather(ConnectionState state, ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final)
+    {
+        _sendCommands++;
+        if (final)
+        {
+            _finalSendCommands++;
+        }
+        state.SendGather(addresses, lengths, final);
+    }
+
     internal IProviderConnection Publish(ConnectionState state)
     {
         IProviderConnection connection = Shared ? ProviderNetworkConnection.ForEpoll(this, state, _endpoint) : new Connection(this, state, _endpoint);
@@ -475,5 +485,6 @@ internal sealed class EpollWorker
         public long Closed, PeerAborts, TlsErrors, HandshakeTimeouts, ShutdownTimeouts, ReadPauses, PageResumes;
         public long Corks, FinalShutdowns, CloseNotify, ShutdownFailures, NotConnected;
         public long RecvCalls, SendCalls, RecvBytes, SendBytes, ReceiveWouldBlock, SendWouldBlock, PartialSends, ReadEofs, SocketErrors;
+        public long GatherSends, GatherSegments;
     }
 }

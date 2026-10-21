@@ -1,5 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
@@ -24,7 +26,8 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
     private bool _finalSend, _tlsWriteDone, _shutdownSent, _peerEof, _pending;
     private bool _prefixObserved;
     private nint _session, _bio, _sendData;
-    private int _sendLength, _sendOffset;
+    private int _sendLength, _sendOffset, _gatherCount;
+    private byte[]? _gatherBlock;
     private readonly Queue<(int Page, int Length)> _cipher = new();
     private int _bioInputPage = -1, _bioInputLength, _cipherBytes;
     private BioNative.Status _bioStatus;
@@ -88,6 +91,73 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         }
     }
 
+    internal unsafe void SendGather(ReadOnlySpan<nint> addresses, ReadOnlySpan<int> lengths, bool final)
+    {
+        if (_closing || _closeRequested)
+        {
+            Application!.Sent(Native.Canceled);
+            return;
+        }
+        if (engine.Tls || _sendData != 0 || addresses.Length < 2 || addresses.Length > GatherSettings.Segments)
+        {
+            throw new InvalidOperationException("Invalid concurrent gather send.");
+        }
+
+        var block = engine.RentGatherBlock();
+        var iov = GatherEntries(block);
+        var total = 0;
+        for (var i = 0; i < addresses.Length; i++)
+        {
+            iov[i] = new Native.Iov { Base = addresses[i], Length = (nuint)lengths[i] };
+            total += lengths[i];
+        }
+        _gatherBlock = block;
+        _gatherCount = addresses.Length;
+        _sendData = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(block));
+        _sendLength = total;
+        _sendOffset = 0;
+        _finalSend = final;
+        engine.Metrics.GatherSends++;
+        engine.Metrics.GatherSegments += addresses.Length;
+        StartWrite();
+    }
+
+    private static Span<Native.Iov> GatherEntries(byte[] block) => MemoryMarshal.Cast<byte, Native.Iov>(block.AsSpan(Native.GatherBlockHeader));
+
+    // Advance in place and compact to the front so a resubmitted block always starts at entry 0.
+    private void AdvanceGather(int sent)
+    {
+        var iov = GatherEntries(_gatherBlock!);
+        var index = 0;
+        for (var advance = (nuint)sent; advance > 0;)
+        {
+            ref var entry = ref iov[index];
+            if (advance >= entry.Length)
+            {
+                advance -= entry.Length;
+                index++;
+            }
+            else
+            {
+                entry.Base += (nint)advance;
+                entry.Length -= advance;
+                advance = 0;
+            }
+        }
+        _gatherCount -= index;
+        iov.Slice(index, _gatherCount).CopyTo(iov);
+    }
+
+    private void ReleaseGather()
+    {
+        if (_gatherBlock is { } block)
+        {
+            _gatherBlock = null;
+            _gatherCount = 0;
+            engine.ReturnGatherBlock(block);
+        }
+    }
+
     private void StartRead()
     {
         if (engine.Tls && _leased >= 4)
@@ -130,10 +200,18 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         else
         {
             var linked = _finalSend && !engine.Layered && engine.FinalMode >= 2;
-            NativeSendTrace.Write(engine.Logger, _sendData + _sendOffset, _sendLength - _sendOffset);
-            engine.Prepare(linked ? Native.Operation.LinkedSend : Native.Operation.Send,
-                _fd, _sendData + _sendOffset, _sendLength - _sendOffset, Token(Operation.Write),
-                linked ? Token(Operation.FinalShutdown) : 0, engine.FinalMode == 3 ? 1 : 0);
+            if (_gatherBlock is not null)
+            {
+                engine.Prepare(Native.Operation.SendVectored, _fd, _sendData, _gatherCount, Token(Operation.Write),
+                    linked ? Token(Operation.FinalShutdown) : 0, (linked && engine.FinalMode == 3 ? 1 : 0) | (linked ? 2 : 0));
+            }
+            else
+            {
+                NativeSendTrace.Write(engine.Logger, _sendData + _sendOffset, _sendLength - _sendOffset);
+                engine.Prepare(linked ? Native.Operation.LinkedSend : Native.Operation.Send,
+                    _fd, _sendData + _sendOffset, _sendLength - _sendOffset, Token(Operation.Write),
+                    linked ? Token(Operation.FinalShutdown) : 0, engine.FinalMode == 3 ? 1 : 0);
+            }
             if (linked)
             {
                 _finActive = true;
@@ -285,6 +363,10 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                         if (_sendOffset < _sendLength)
                         {
                             engine.Metrics.PartialSends++;
+                            if (_gatherBlock is not null)
+                            {
+                                AdvanceGather(result);
+                            }
                             if (!_finActive)
                             {
                                 StartWrite();
@@ -293,6 +375,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                         else
                         {
                             _sendData = 0;
+                            ReleaseGather();
                             Application!.Sent(_sendLength);
                             if (_finalSend && (!_finActive || _finComplete))
                             {
@@ -308,6 +391,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                     else
                     {
                         _sendData = 0;
+                        ReleaseGather();
                         Application!.Sent(result < 0 ? result : -32);
                     }
                 }
@@ -808,6 +892,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             if (_sendData != 0)
             {
                 _sendData = 0;
+                ReleaseGather();
                 application.Sent(Native.Canceled);
             }
             application.Closed(null);

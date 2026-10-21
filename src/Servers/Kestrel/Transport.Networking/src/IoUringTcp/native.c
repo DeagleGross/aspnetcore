@@ -11,13 +11,21 @@
 #include <sched.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/eventfd.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 // Opaque liburing ABI only. Connections, operation identities and buffers belong to C#.
 struct ring { struct io_uring ring; struct io_uring_buf_ring *buffers; };
 struct completion { uint64_t id; int result; unsigned flags; };
 struct tls_result { int status, length, pending, error; uint64_t reason; };
+
+// A gather block is a pinned C# buffer: this header followed by an iovec array at GATHER_IOV_OFFSET.
+// The kernel may read both until the completion, so C# owns the block until then.
+enum { GATHER_IOV_OFFSET = 64 };
+_Static_assert(sizeof(struct msghdr) <= GATHER_IOV_OFFSET, "msghdr must fit the gather block header");
 
 void *ur_create(int defer, int buffers, int *error)
 {
@@ -35,7 +43,8 @@ void *ur_create(int defer, int buffers, int *error)
 
 int ur_prepare(struct ring *r, int kind, int fd, void *data, int length, uint64_t id, uint64_t target, int flags)
 {
-    int needed = kind == 7 ? 2 : 1;
+    int linkedGather = kind == 8 && (flags & 2);
+    int needed = kind == 7 || linkedGather ? 2 : 1;
     if (io_uring_sq_space_left(&r->ring) < (unsigned)needed) {
         int result = io_uring_submit(&r->ring);
         if (result < 0) return result;
@@ -57,10 +66,19 @@ int ur_prepare(struct ring *r, int kind, int fd, void *data, int length, uint64_
         io_uring_prep_send(sqe, fd, data, length, MSG_NOSIGNAL | MSG_WAITALL | (flags ? MSG_MORE : 0));
         sqe->flags |= IOSQE_IO_LINK;
         break;
+    case 8: {
+        struct msghdr *message = data;
+        memset(message, 0, sizeof(*message));
+        message->msg_iov = (struct iovec *)((char *)data + GATHER_IOV_OFFSET);
+        message->msg_iovlen = (size_t)length;
+        io_uring_prep_sendmsg(sqe, fd, message, MSG_NOSIGNAL | (linkedGather ? MSG_WAITALL : 0) | (flags & 1 ? MSG_MORE : 0));
+        if (linkedGather) sqe->flags |= IOSQE_IO_LINK;
+        break;
+    }
     default: return -EINVAL;
     }
     io_uring_sqe_set_data64(sqe, id);
-    if (kind == 7) {
+    if (kind == 7 || linkedGather) {
         sqe = io_uring_get_sqe(&r->ring);
         io_uring_prep_shutdown(sqe, fd, SHUT_WR);
         io_uring_sqe_set_data64(sqe, target);

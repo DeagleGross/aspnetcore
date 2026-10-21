@@ -112,7 +112,7 @@ Kestrel uses `builder.WebHost.UseNetworkTransport(options)` and the same `AsDupl
 | IOCP | `AcceptEx`, `OVERLAPPED`, local synchronous receipts, completion ports; optional SChannel SSPI | Native leases/output, in-place decrypted receive slices, worker-owned encryption and bounded inline send progress. |
 | RIO | Buffer registration, RQ/CQ, notification rearming; optional SChannel SSPI | Registered ciphertext storage and decrypted leases; native TLS encrypts into reusable registered record buffers. |
 
-The common flow is **native receive -> shared refcounted reader -> application -> shared send progression -> native terminal completion -> memory release**. Drivers implement scheduling, submission, close/abort and page returns. `SubmitSendCore` borrows the core's existing pin; providers aggregate partial progress and report completion only when native ownership ends. Readiness, multishot CQEs and RIO notifications stay provider-specific rather than being forced into one universal event loop.
+The common flow is **native receive -> shared refcounted reader -> application -> shared send progression -> native terminal completion -> memory release**. Drivers implement scheduling, submission, close/abort and page returns. `SubmitSendCore` borrows the core's existing pin; providers aggregate partial progress and report completion only when native ownership ends. A provider that can submit several buffers in one native call overrides `MaxGatherSegments` and `SubmitGatherSendCore`; the core then pins up to 64 segments (256 KiB) of a multi-segment output and keeps the pins until the terminal completion (see [vectored sends](#vectored-sends-gather-submission-2026-10-21)). Readiness, multishot CQEs and RIO notifications stay provider-specific rather than being forced into one universal event loop.
 
 Reference-type ownership avoids copyable release handles; one pin avoids double pinning; output notifications coalesce and unused state is lazy. Real checks exposed cancelled-linked-FIN close ordering and window-blocked RIO abort bugs; both were fixed without early memory release. **Batches belong in the common `SendRequest` queue**: sequences are already ordered requests; packing, files and deferred submissions remain future work.
 
@@ -177,6 +177,43 @@ The inversion was meant to be performance-neutral, so it was checked against a p
 
 No cell moved beyond run-to-run noise in either direction. Epoll TLS short was lower in all three paired rounds (-4.0%, -0.1%, -3.2%); with three samples that cannot be separated from noise, but it is the one cell worth rechecking if short-connection cost matters, because the per-connection `ConnectionContext` allocation now happens on Kestrel's accept loop instead of the worker. Windows was not re-benchmarked; its functional checks all passed.
 
+### Vectored sends: gather submission (2026-10-21)
+
+When the output is a multi-segment `ReadOnlySequence<byte>` the send core now hands up to 64 segments (at most 256 KiB, always at least one) to the provider in one call instead of one `SubmitSendCore` per segment. Kestrel's output pipe uses pool blocks (about 4 KiB on Linux, about 16 KiB on Windows in these runs), so any response above one block is multi-segment. Epoll uses `sendmsg`, io_uring `IORING_OP_SENDMSG` and IOCP `WSASend` with a `WSABUF` array. Native TLS (OpenSSL `SSL_write_ex` and SChannel take one buffer) and RIO (`RIOSend` takes one `RIO_BUF`) stay single-segment. `NETWORKPROTO_VECTORED=0` disables it for A/B on the same binary.
+
+**API surface:** this needs two additive `protected virtual` members on `NetworkConnection` (`MaxGatherSegments`, `SubmitGatherSendCore`), listed in `Primitives\src\PublicAPI.Unshipped.txt`. No public member of the application contract changed. Providers must copy the addresses and lengths synchronously; the core owns the pins until `CompleteSendCore`. Whether to keep this provider-SPI addition is an open decision.
+
+**What other stacks do** (from their sources and documentation, not run here): Netty epoll gathers with `writevAddresses` and adapts the per-attempt byte budget (double when the whole attempt is written, halve when under half is); Netty io_uring submits `writev` and deliberately does not use `SEND_ZC` for it, and io_uring send/recv bundles are not used on the write path; libuv `uv__writev` is capped at `IOV_MAX`; Tokio exposes `poll_write_vectored` plus an `is_write_vectored` capability flag; Go's `net.Buffers` becomes `writev`; nginx `ngx_writev` resumes after `EAGAIN`; stock Kestrel Sockets gathers multi-segment output through `SocketAsyncEventArgs.BufferList`. Vectoring saves syscalls, completion round trips and small packets under `NODELAY`; it does not save the kernel copy.
+
+Long keep-alive connections (256), four server cores, 5s warmup/10s measurement, three rounds with alternating arm order, medians. Linux WSL: twelve client cores. Windows: eight client cores. Reported, not independently reproduced; single environment per platform.
+
+| Body | Linux epoll off / on | Linux io_uring off / on | Windows IOCP off / on | Stock Sockets (Linux / Windows) |
+|---|---|---|---|---|
+| 1 KiB | 260,910 / 273,651 | 277,078 / 271,898 | 117,039 / 113,468 | about 249k / about 115k |
+| 16 KiB | 85,690 / 164,098 (+91%) | 73,615 / 156,293 (+112%) | 66,594 / 96,413 (+45%) | about 173-181k / 94-97k |
+| 64 KiB | 25,045 / 71,402 (+185%) | 21,196 / 61,077 (+188%) | 27,295 / 61,732 (+126%) | about 75-79k / 55-60k |
+| 256 KiB | 6,471 / 20,499 (+217%) | 5,798 / 16,261 (+180%) | 9,266 / 22,895 (+147%) | about 22k / 21-23k |
+
+- **1 KiB is unchanged by design:** the response is one segment, the single-segment path is untouched and `gatherSends` is 0; the differences are noise (ranges overlap).
+- **Gather closes the gap to stock, it does not beat it.** Stock Sockets already gathers. On Windows IOCP gather-on is at parity with stock within run-to-run spread (the two same-binary stock arms differ by up to about 8%). On Linux epoll is about 90% and io_uring about 74-89% of stock at 16 KiB and above. That remaining gap was not investigated; per-segment pinning, iov construction and the completion path are untested hypotheses.
+- Segments per gather: 5, 17 and 64 (the cap) at 16, 64 and 256 KiB on Linux; 2, 5 and 16 on Windows. Linux `send` calls per 64 KiB response dropped from about 16 to about 1.
+- Windows overlapped stream sends completed in full in every run (`partialSends` stayed 0, even with `NETWORKPROTO_WINDOWS_SNDBUF=4096`), so the IOCP partial-send compaction in `SentGather` has never executed.
+- One early Windows gather-on 64 KiB run measured 2,296 RPS at 0.62 server cores. It did not recur in the 12 gather-on IOCP matrix runs, two further smoke rounds, or eight fresh-process repeats (58-68k RPS each). The cause is unknown.
+
+**Many caller-owned segments in one `SendAsync`.** This is the workload where batching matters most and is not Kestrel: `samples\NetworkProtoSample\DirectSequenceServer.cs` (`--direct-sequence true --segments N`) answers each request with one `SendAsync` of a header plus N caller-owned body segments, with no pipe copy. Same method, Linux, bodies verified by the client, zero errors, `gatherSends` confirmed for the 16 KiB case.
+
+| Response | Epoll off / on | io_uring off / on |
+|---|---|---|
+| 1 KiB, header + 1 segment | 205,960 / 303,591 (+47%) | 199,005 / 344,922 (+73%) |
+| 1 KiB, header + 8 segments | 66,651 / 285,363 (+328%) | 68,314 / 292,777 (+329%) |
+| 16 KiB, header + 16 segments | 36,716 / 217,593 (+493%) | 32,412 / 217,730 (+572%) |
+
+**A bug the first matrix found.** io_uring gather set `MSG_MORE` on every send in final-send mode. The scalar send ignored it, but `IORING_OP_SENDMSG` honoured it, so each non-final keep-alive gather response was corked by the kernel for up to about 200 ms (16 KiB measured 1,228 RPS at 0.06 server cores). Only the linked final send, which is followed by a FIN, may use it. The existing checks stream or end with a final send and missed this; `--check-gather-send` now includes a keep-alive ping-pong scenario (300 non-final multi-segment responses, five-second budget) that fails on the bug and passes on the fix.
+
+`--check-gather-send true` (shared plain-TCP backends, `--scheme http`) verifies exact bytes, a withheld reader, concurrent flushes, reset during backpressured output and the keep-alive round trips. It passed on epoll, io_uring, IOCP and RIO (RIO via the single-segment fallback), with gather on and off.
+
+Not implemented: a TLS copy-gather into 16 KiB records, RIO `RIO_MSG_DEFER`/`RIO_MSG_COMMIT_ONLY` batching (needs an address-to-registered-buffer lookup), io_uring send bundles, `SEND_ZC`, and verification of the `MSG_WAITALL` partial-send retry the linked io_uring gather relies on.
+
 ### Later Windows stabilization: keep-alive only
 
 Initial two-round **same-binary controls**, 8s warmup/10s measurement and 256 connections, gave these averages. They are separate from the archived-raw snapshot above; stock was not included in this control.
@@ -220,4 +257,4 @@ The exact signature baseline is `Primitives\src\PublicAPI.Unshipped.txt`. [PUBLI
 
 Selectors: `sharedEpollTcp`, `sharedEpollTls`, `sharedIoUringTcp`, `sharedIoUringTls`, `sharedIocp`, `sharedRio`, `sharedIocpTls`, `sharedRioTls`. `--check-windows-native-tls true` checks transport-owned Windows TLS, retention, fragmented records, half-close, blocked output/reset and shutdown. Existing `--check-shared-tls true` remains a wrapper-based prefix/ClientHello handoff check. Pressure checks use `NETWORKPROTO_WINDOWS_SNDBUF=4096` or the Linux equivalents.
 
-Activate the repository SDK before building. Runners: Linux `scripts\shared-bench.sh`; Windows `scripts\windows-bench.ps1`. All source is on branch `dmkorolev/network-proto`. Excluded: client/connect, IPv6, HTTP/2/3 validation, production recovery, a public worker scheduler, generic fd-TLS upgrade, kernel zero-copy and advanced batches. The unresolved Windows measurements do not justify treating this as a finalized framework API.
+Activate the repository SDK before building. Runners: Linux `scripts\shared-bench.sh` (`BODY_BYTES`, `NETWORKPROTO_VECTORED`, `DIRECT_SEGMENTS` for the `--direct-sequence` server; it also samples server CPU); Windows `scripts\windows-bench.ps1` (`-BodyBytes`; `NETWORKPROTO_VECTORED` is inherited from the calling environment). All source is on branch `dmkorolev/network-proto`. Excluded: client/connect, IPv6, HTTP/2/3 validation, production recovery, a public worker scheduler, generic fd-TLS upgrade, kernel zero-copy (`SEND_ZC`), send bundles, and gather for TLS and RIO. The unresolved Windows measurements do not justify treating this as a finalized framework API.

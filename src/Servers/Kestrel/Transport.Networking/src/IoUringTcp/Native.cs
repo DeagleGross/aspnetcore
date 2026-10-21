@@ -17,7 +17,15 @@ internal static unsafe partial class Native
     }
     internal enum Operation
     {
-        Accept, ReadPoll, Receive, WritePoll, Send, Cancel, WakeRead, LinkedSend
+        Accept, ReadPoll, Receive, WritePoll, Send, Cancel, WakeRead, LinkedSend, SendVectored
+    }
+    internal const int GatherBlockHeader = 64;
+    // Matches struct iovec; the kernel reads these entries from the pinned gather block.
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Iov
+    {
+        public nint Base;
+        public nuint Length;
     }
     internal enum TlsOperation
     {
