@@ -56,6 +56,12 @@ System.Net.Transport.NetworkConnection.PublishReceiveCore(System.Buffers.IMemory
 System.Net.Transport.NetworkConnection.PumpOutputCore() -> void
 System.Net.Transport.NetworkConnection.ReceiveAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<System.Net.Transport.NetworkReceiveResult>
 System.Net.Transport.NetworkConnection.RemoteEndPoint.get -> System.Net.EndPoint?
+System.Net.Transport.NetworkConnection.SetTlsInfoCore(System.Net.Transport.NetworkTlsInfo! info) -> void
+System.Net.Transport.NetworkConnection.TlsInfo.get -> System.Net.Transport.NetworkTlsInfo?
+System.Net.Transport.NetworkTlsInfo
+System.Net.Transport.NetworkTlsInfo.CipherSuite.get -> System.Net.Security.TlsCipherSuite?
+System.Net.Transport.NetworkTlsInfo.NetworkTlsInfo(System.Security.Authentication.SslProtocols protocol, System.Net.Security.TlsCipherSuite? cipherSuite) -> void
+System.Net.Transport.NetworkTlsInfo.Protocol.get -> System.Security.Authentication.SslProtocols
 System.Net.Transport.NetworkConnection.SendAsync(System.Buffers.ReadOnlySequence<byte> data) -> System.Threading.Tasks.ValueTask
 System.Net.Transport.NetworkConnection.SendAsync(System.Buffers.ReadOnlySequence<byte> data, System.Threading.CancellationToken cancellationToken) -> System.Threading.Tasks.ValueTask
 System.Net.Transport.NetworkConnection.SendAsync(System.ReadOnlyMemory<byte> data) -> System.Threading.Tasks.ValueTask

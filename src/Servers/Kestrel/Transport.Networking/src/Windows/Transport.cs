@@ -8,7 +8,6 @@ using System.Net.Sockets;
 using System.Net.Transport;
 using System.Text.Json;
 using System.Threading.Channels;
-using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Rio;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
@@ -16,9 +15,9 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
 internal sealed class TransportFactory(bool rio, int workerCount, ILoggerFactory logging, bool shared = false, int[]? processors = null,
-    NetworkNativeTlsOptions? nativeTls = null) : IConnectionListenerFactory
+    NetworkNativeTlsOptions? nativeTls = null) : IProviderListenerFactory
 {
-    public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
+    public async ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         Native.ValidatePlatform();
@@ -48,10 +47,10 @@ internal sealed class TransportFactory(bool rio, int workerCount, ILoggerFactory
     }
 }
 
-internal sealed class WindowsListener : IConnectionListener
+internal sealed class WindowsListener : IProviderListener
 {
     private readonly WinsockSession _winsock;
-    private readonly Channel<ConnectionContext> _accepted = Channel.CreateBounded<ConnectionContext>(
+    private readonly Channel<IProviderConnection> _accepted = Channel.CreateBounded<IProviderConnection>(
         new BoundedChannelOptions(1024) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly WindowsWorker[] _workers;
     private readonly Lock _disposeGate = new();
@@ -102,7 +101,7 @@ internal sealed class WindowsListener : IConnectionListener
         _workers[index].Enqueue(new WindowsWorker.Command(WindowsWorker.CommandKind.Accepted, Socket: socket));
     }
 
-    internal bool Publish(IProviderConnection connection) => _accepted.Writer.TryWrite(connection.Context);
+    internal bool Publish(IProviderConnection connection) => _accepted.Writer.TryWrite(connection);
 
     internal void Failed(Exception error)
     {
@@ -113,7 +112,7 @@ internal sealed class WindowsListener : IConnectionListener
         }
     }
 
-    public async ValueTask<ConnectionContext?> AcceptAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<IProviderConnection?> AcceptAsync(CancellationToken cancellationToken = default)
     {
         while (await _accepted.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {

@@ -3,6 +3,7 @@
 
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -22,8 +23,8 @@ public static class EpollTransportExtensions
         return builder.ConfigureServices(services =>
         {
             services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory>(provider => new TransportFactory(
-                string.Empty, string.Empty, workerCount, provider.GetRequiredService<ILoggerFactory>(), tls: false));
+            services.AddSingleton<IConnectionListenerFactory>(provider => new RawKestrelListenerFactory(new TransportFactory(
+                string.Empty, string.Empty, workerCount, provider.GetRequiredService<ILoggerFactory>(), tls: false)));
         });
     }
 
@@ -39,8 +40,8 @@ public static class EpollTransportExtensions
         return builder.ConfigureServices(services =>
         {
             services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory>(provider => new TransportFactory(
-                certificatePath, keyPath, workerCount, provider.GetRequiredService<ILoggerFactory>()));
+            services.AddSingleton<IConnectionListenerFactory>(provider => new RawKestrelListenerFactory(new TransportFactory(
+                certificatePath, keyPath, workerCount, provider.GetRequiredService<ILoggerFactory>())));
         });
     }
 }

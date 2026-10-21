@@ -3,13 +3,7 @@
 
 using System.Buffers;
 using System.Net;
-using System.Net.Security;
 using System.Net.Transport;
-using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
-using Microsoft.AspNetCore.Connections;
-using Microsoft.AspNetCore.Connections.Features;
-using Microsoft.AspNetCore.Http.Features;
 using EpollWorker = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.EpollWorker;
 using EpollState = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.ConnectionState;
 using RingEngine = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.Engine;
@@ -21,126 +15,96 @@ using WindowsPool = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Win
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
-internal sealed class SharedConnectionContext : DefaultConnectionContext, IProviderConnection
+/// <summary>
+/// The provider-side <see cref="NetworkConnection"/>. Workers publish this type directly, so the shared path has no
+/// Kestrel connection type; Kestrel wraps it in <see cref="KestrelConnectionContext"/> only when it accepts the connection.
+/// </summary>
+internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderConnection
 {
     private readonly Driver _driver;
-    internal ProviderNetworkConnection Network { get; }
-    public ConnectionContext Context => this;
+    private bool _completingSend;
 
-    private SharedConnectionContext(string id, IPEndPoint endpoint, bool tls, Driver driver, IPEndPoint? remote = null) : base(id)
+    private ProviderNetworkConnection(string id, IPEndPoint endpoint, bool tls, Driver driver, IPEndPoint? remote = null)
+        : base(id, endpoint, remote ?? new IPEndPoint(IPAddress.Loopback, 0), driver.OutputPool, driver.OutputKind, tls)
     {
         _driver = driver;
-        LocalEndPoint = endpoint;
-        RemoteEndPoint = remote ?? new IPEndPoint(IPAddress.Loopback, 0);
-        Network = new ProviderNetworkConnection(this, driver, id, LocalEndPoint, RemoteEndPoint, tls);
-        ConnectionClosed = Network.ConnectionClosed;
         if (tls && driver is not WindowsDriver)
         {
-            var feature = new FixedTlsFeature();
-            Features.Set<ITlsConnectionFeature>(feature);
-            Features.Set<ITlsHandshakeFeature>(feature);
+            // Linux providers terminate a fixed TLS configuration; Windows reports the real Schannel session through TlsEstablished.
+            SetTlsInfoCore(new NetworkTlsInfo(System.Security.Authentication.SslProtocols.Tls12, System.Net.Security.TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256));
         }
     }
 
-    internal static SharedConnectionContext ForEpoll(EpollWorker worker, EpollState state, IPEndPoint endpoint)
+    internal static ProviderNetworkConnection ForEpoll(EpollWorker worker, EpollState state, IPEndPoint endpoint)
     {
-        return new SharedConnectionContext($"owned-shared-epoll-{state.Id:x}", endpoint, worker.Tls, new EpollDriver(worker, state));
+        return new ProviderNetworkConnection($"owned-shared-epoll-{state.Id:x}", endpoint, worker.Tls, new EpollDriver(worker, state));
     }
 
-    internal static SharedConnectionContext ForRing(RingEngine engine, RingState state, IPEndPoint endpoint)
+    internal static ProviderNetworkConnection ForRing(RingEngine engine, RingState state, IPEndPoint endpoint)
     {
-        return new SharedConnectionContext($"owned-shared-uring-{state.Id:x}", endpoint, engine.Tls, new RingDriver(engine, state));
+        return new ProviderNetworkConnection($"owned-shared-uring-{state.Id:x}", endpoint, engine.Tls, new RingDriver(engine, state));
     }
 
-    internal static SharedConnectionContext ForWindows(WindowsWorker worker, WindowsState state)
+    internal static ProviderNetworkConnection ForWindows(WindowsWorker worker, WindowsState state)
     {
-        return new SharedConnectionContext($"owned-shared-{worker.Backend}-{worker.Index}-{state.Id:x}",
+        return new ProviderNetworkConnection($"owned-shared-{worker.Backend}-{worker.Index}-{state.Id:x}",
             state.LocalEndPoint, state.HasTls, new WindowsDriver(worker, state), state.RemoteEndPoint);
-    }
-
-    internal ConnectionContext AttachKestrel()
-    {
-        Transport = Network.AsDuplexPipe();
-        return this;
     }
 
     internal void Receive(Memory<byte> memory, int length, int page)
     {
-        Network.Receive(new ReturnedMemory(memory, _driver, page), length, NetworkMemoryKind.Pinned);
+        PublishReceiveCore(new ReturnedMemory(memory, _driver, page), length, NetworkMemoryKind.Pinned);
     }
 
     internal unsafe void Receive(nint pointer, int length, int page)
     {
-        Network.Receive(new ReturnedNativeMemory(pointer, length, _driver, page), length, NetworkMemoryKind.Pinned);
+        PublishReceiveCore(new ReturnedNativeMemory(pointer, length, _driver, page), length, NetworkMemoryKind.Pinned);
     }
 
     internal void Receive(IMemoryOwner<byte> owner, int length, NetworkMemoryKind kind)
     {
-        Network.Receive(new ReturnedOwnedMemory(owner, _driver), length, kind);
+        PublishReceiveCore(new ReturnedOwnedMemory(owner, _driver), length, kind);
     }
 
     public void Sent(int count, Exception? error = null)
     {
         _driver.Sent();
-        Network.Sent(count, error);
+        _completingSend = true;
+        try
+        {
+            CompleteSendCore(count, error);
+        }
+        finally
+        {
+            _completingSend = false;
+        }
     }
-    public void Closed(Exception? error) => Network.Closed(error);
-    public void EndReceive(Exception? error) => Network.EndReceive(error);
-    public void PumpOutput() => Network.Pump();
-    public override void Abort(ConnectionAbortedException abortReason) => Network.Abort(abortReason);
-    public override ValueTask DisposeAsync() => Network.DisposeAsync();
-    private ValueTask DisposeContextAsync() => base.DisposeAsync();
 
-    internal sealed class ProviderNetworkConnection : NetworkConnection
+    public void Closed(Exception? error) => CompleteCloseCore(error);
+    public void EndReceive(Exception? error) => EndReceiveCore(error);
+    public void PumpOutput() => PumpOutputCore();
+    public void TlsEstablished(NetworkTlsInfo info) => SetTlsInfoCore(info);
+
+    protected override void ScheduleOutputCore()
     {
-        private readonly SharedConnectionContext _context;
-        private readonly Driver _driver;
-        private bool _completingSend;
+        if (_driver.CanCompleteInline && _completingSend)
+        {
+            _completingSend = false;
+            PumpOutputCore();
+        }
+        else
+        {
+            _driver.Schedule();
+        }
+    }
 
-        internal ProviderNetworkConnection(SharedConnectionContext context, Driver driver, string id, EndPoint? local, EndPoint? remote, bool tls)
-            : base(id, local, remote, driver.OutputPool, driver.OutputKind, tls)
-        {
-            _context = context;
-            _driver = driver;
-        }
-
-        internal ConnectionContext AttachKestrel() => _context.AttachKestrel();
-        internal void Receive(IMemoryOwner<byte> owner, int count, NetworkMemoryKind kind) => PublishReceiveCore(owner, count, kind);
-        internal void Sent(int count, Exception? error)
-        {
-            _completingSend = true;
-            try
-            {
-                CompleteSendCore(count, error);
-            }
-            finally
-            {
-                _completingSend = false;
-            }
-        }
-        internal void Closed(Exception? error) => CompleteCloseCore(error);
-        internal void EndReceive(Exception? error) => EndReceiveCore(error);
-        internal void Pump() => PumpOutputCore();
-        protected override void ScheduleOutputCore()
-        {
-            if (_driver.CanCompleteInline && _completingSend)
-            {
-                _completingSend = false;
-                PumpOutputCore();
-            }
-            else
-            {
-                _driver.Schedule();
-            }
-        }
-        protected override void SubmitSendCore(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final) => _driver.Send(data, pinnedAddress, final);
-        protected override void CloseCore() => _driver.Close();
-        protected override void AbortCore(Exception error) => _driver.Abort(error);
-        protected override ValueTask ForgetCoreAsync()
-        {
-            _driver.Forget();
-            return _context.DisposeContextAsync();
-        }
+    protected override void SubmitSendCore(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final) => _driver.Send(data, pinnedAddress, final);
+    protected override void CloseCore() => _driver.Close();
+    protected override void AbortCore(Exception error) => _driver.Abort(error);
+    protected override ValueTask ForgetCoreAsync()
+    {
+        _driver.Forget();
+        return default;
     }
 
     internal abstract class Driver
@@ -271,22 +235,5 @@ internal sealed class SharedConnectionContext : DefaultConnectionContext, IProvi
                 driver.Return(page);
             }
         }
-    }
-
-    private sealed class FixedTlsFeature : ITlsConnectionFeature, ITlsHandshakeFeature
-    {
-        public X509Certificate2? ClientCertificate { get; set; }
-        public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken) => Task.FromResult(ClientCertificate);
-        public SslProtocols Protocol => SslProtocols.Tls12;
-        public TlsCipherSuite? NegotiatedCipherSuite => TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256;
-#pragma warning disable SYSLIB0058
-        public CipherAlgorithmType CipherAlgorithm => CipherAlgorithmType.Aes128;
-        public int CipherStrength => 128;
-        public HashAlgorithmType HashAlgorithm => HashAlgorithmType.Sha256;
-        public int HashStrength => 256;
-        public ExchangeAlgorithmType KeyExchangeAlgorithm => ExchangeAlgorithmType.DiffieHellman;
-        public int KeyExchangeStrength => 0;
-#pragma warning restore SYSLIB0058
-        public string HostName => string.Empty;
     }
 }

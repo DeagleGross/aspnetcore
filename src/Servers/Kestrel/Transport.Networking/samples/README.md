@@ -1,6 +1,6 @@
 # Console demos
 
-These are small, one-connection demos of the experimental public transport API, not benchmarks or general HTTP servers. Every app runs a real loopback client and server in one process, prints each important step, verifies its fixed bytes and exits. The server uses `NetworkEngine` / `NetworkConnection` directly, **without Kestrel**. The client uses `TcpClient` because the prototype does not expose a public connect API.
+These are small, one-connection demos of the experimental public transport API, not benchmarks or general HTTP servers. Every app runs a real loopback client and server in one process, prints each important step, verifies its fixed bytes and exits. The server uses `NetworkEngine` / `NetworkConnection` directly, **without Kestrel** (since the 2026-10-21 layering inversion, providers publish a Kestrel-free connection and no `ConnectionContext` is allocated for these apps). The client uses `TcpClient` because the prototype does not expose a public connect API. `NativeTlsHttp1` also prints `connection.TlsInfo`, the provider-reported protocol and cipher.
 
 | App | Open / breakpoint | What happens |
 |---|---|---|

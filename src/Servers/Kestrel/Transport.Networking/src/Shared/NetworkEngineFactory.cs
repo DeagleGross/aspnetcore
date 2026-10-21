@@ -3,7 +3,6 @@
 
 using System.Globalization;
 using System.Linq;
-using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -83,7 +82,7 @@ public static class NetworkEngineFactory
                     ArgumentException.ThrowIfNullOrWhiteSpace(tls.CertificatePath);
                     ArgumentException.ThrowIfNullOrWhiteSpace(tls.PrivateKeyPath);
                 }
-                IConnectionListenerFactory factory = kind switch
+                IProviderListenerFactory factory = kind switch
                 {
                     NetworkEngineKind.Epoll => new EpollFactory(tls?.CertificatePath ?? string.Empty, tls?.PrivateKeyPath ?? string.Empty,
                         workers, logging, tls is not null, shared: true, processors, tls?.HandshakePrefixCallback),
@@ -130,7 +129,7 @@ public static class NetworkEngineFactory
         }
     }
 
-    private sealed class ProviderListener(IConnectionListener listener) : NetworkListener
+    private sealed class ProviderListener(IProviderListener listener) : NetworkListener
     {
         private readonly Lock _gate = new();
         private Task? _disposing;
@@ -138,15 +137,12 @@ public static class NetworkEngineFactory
         public override async ValueTask<NetworkConnection?> AcceptAsync(CancellationToken cancellationToken = default)
         {
             var connection = await listener.AcceptAsync(cancellationToken).ConfigureAwait(false);
-            if (connection is null)
+            return connection switch
             {
-                return null;
-            }
-            if (connection is not SharedConnectionContext shared)
-            {
-                throw new InvalidOperationException("The provider published a raw connection through the shared engine.");
-            }
-            return shared.Network;
+                null => null,
+                NetworkConnection network => network,
+                _ => throw new InvalidOperationException("The provider published a raw connection through the shared engine.")
+            };
         }
         public override ValueTask UnbindAsync(CancellationToken cancellationToken = default) => listener.UnbindAsync(cancellationToken);
         public override ValueTask DisposeAsync()

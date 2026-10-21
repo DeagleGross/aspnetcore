@@ -32,6 +32,7 @@ public abstract class NetworkConnection : IAsyncDisposable
     private long _queuedBytes;
     private bool _reading, _hasRead, _sending, _stopped, _transportClosed, _pumping;
     private Exception? _error;
+    private NetworkTlsInfo? _tlsInfo;
 
     /// <summary>Initializes provider-independent receive ownership and output progression.</summary>
     protected NetworkConnection(string id, EndPoint? localEndPoint, EndPoint? remoteEndPoint, MemoryPool<byte>? outputPool = null,
@@ -59,6 +60,9 @@ public abstract class NetworkConnection : IAsyncDisposable
 
     /// <summary>Gets whether this connection presents authenticated TLS plaintext.</summary>
     public bool IsTls { get; }
+
+    /// <summary>Gets the TLS session the provider established before publishing this connection, or null for plain TCP.</summary>
+    public NetworkTlsInfo? TlsInfo => Volatile.Read(ref _tlsInfo);
 
     /// <summary>Gets the native-close notification token.</summary>
     public CancellationToken ConnectionClosed => _closed.Token;
@@ -272,6 +276,13 @@ public abstract class NetworkConnection : IAsyncDisposable
     {
         Interlocked.Increment(ref _receivePages);
         _input.Append(new NetworkBuffer.Storage(owner, kind, this), count);
+    }
+
+    /// <summary>Records the established TLS session. Call before the provider publishes the connection to consumers.</summary>
+    protected void SetTlsInfoCore(NetworkTlsInfo info)
+    {
+        ArgumentNullException.ThrowIfNull(info);
+        Volatile.Write(ref _tlsInfo, info);
     }
 
     /// <summary>Reports normal receive EOF or a provider receive failure.</summary>

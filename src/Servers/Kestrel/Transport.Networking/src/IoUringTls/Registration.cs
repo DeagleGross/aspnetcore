@@ -3,6 +3,7 @@
 
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -24,6 +25,6 @@ public static class OwnedTransportExtensions
         => builder.ConfigureServices(services =>
         {
             services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory>(provider => new TransportFactory(tls, cert, key, provider.GetRequiredService<ILoggerFactory>()));
+            services.AddSingleton<IConnectionListenerFactory>(provider => new RawKestrelListenerFactory(new TransportFactory(tls, cert, key, provider.GetRequiredService<ILoggerFactory>())));
         });
 }

@@ -4,15 +4,15 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Threading.Channels;
-using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
 internal sealed class TransportFactory(bool tls, string cert, string key, ILoggerFactory logging, bool layered = false, bool shared = false, int[]? processors = null,
-    Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null) : IConnectionListenerFactory
+    Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null) : IProviderListenerFactory
 {
-    public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
+    public async ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip || !IPAddress.IsLoopback(ip.Address))
@@ -25,9 +25,9 @@ internal sealed class TransportFactory(bool tls, string cert, string key, ILogge
     }
 }
 
-internal sealed class Listener : IConnectionListener
+internal sealed class Listener : IProviderListener
 {
-    private readonly Channel<ConnectionContext> _accepted = Channel.CreateUnbounded<ConnectionContext>(new UnboundedChannelOptions { SingleReader = true });
+    private readonly Channel<IProviderConnection> _accepted = Channel.CreateUnbounded<IProviderConnection>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Engine[] _engines;
     private int _unbound;
 
@@ -60,7 +60,7 @@ internal sealed class Listener : IConnectionListener
             throw;
         }
     }
-    public async ValueTask<ConnectionContext?> AcceptAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<IProviderConnection?> AcceptAsync(CancellationToken cancellationToken = default)
     {
         while (await _accepted.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
         {

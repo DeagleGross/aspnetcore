@@ -16,7 +16,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
 internal sealed class Connection : DefaultConnectionContext, IProviderConnection
 {
-    ConnectionContext IProviderConnection.Context => this;
+    void IProviderConnection.Abort(Exception reason) => Abort(reason as ConnectionAbortedException ?? new ConnectionAbortedException(reason.Message, reason));
     void IProviderConnection.Sent(int count, Exception? error)
     {
         _sendError ??= error;

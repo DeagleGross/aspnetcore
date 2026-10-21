@@ -4,11 +4,9 @@
 using System.Buffers;
 using System.Diagnostics;
 using System.Net.Security;
+using System.Net.Transport;
 using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
-using Microsoft.AspNetCore.Connections.Features;
-using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
@@ -300,9 +298,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         if (_handshakeDone && !_published && _wireOwner is null && _tokens.Count == 0)
         {
             _published = true;
-            var feature = new TlsFeature(_info, _suite);
-            state.Application.Context.Features.Set<ITlsConnectionFeature>(feature);
-            state.Application.Context.Features.Set<ITlsHandshakeFeature>(feature);
+            state.Application.TlsEstablished(new NetworkTlsInfo(SslProtocols.Tls13, (TlsCipherSuite)_suite));
             worker.Metrics.TlsHandshakes++;
             worker.Publish(state);
         }
@@ -623,22 +619,5 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
                 storage.Release();
             }
         }
-    }
-
-    private sealed class TlsFeature(Schannel.ConnectionInfo info, uint suite) : ITlsConnectionFeature, ITlsHandshakeFeature
-    {
-        public X509Certificate2? ClientCertificate { get; set; }
-        public Task<X509Certificate2?> GetClientCertificateAsync(CancellationToken cancellationToken) => Task.FromResult(ClientCertificate);
-        public SslProtocols Protocol => SslProtocols.Tls13;
-        public TlsCipherSuite? NegotiatedCipherSuite => (TlsCipherSuite)suite;
-#pragma warning disable SYSLIB0058
-        public CipherAlgorithmType CipherAlgorithm => (CipherAlgorithmType)info.Cipher;
-        public int CipherStrength => (int)info.CipherStrength;
-        public HashAlgorithmType HashAlgorithm => (HashAlgorithmType)info.Hash;
-        public int HashStrength => (int)info.HashStrength;
-        public ExchangeAlgorithmType KeyExchangeAlgorithm => (ExchangeAlgorithmType)info.Exchange;
-        public int KeyExchangeStrength => (int)info.ExchangeStrength;
-#pragma warning restore SYSLIB0058
-        public string HostName => string.Empty;
     }
 }

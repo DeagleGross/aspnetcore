@@ -71,7 +71,7 @@ internal sealed class ConnectionState : IDisposable
         Read = new IoOperation(this, IoKind.Receive);
         Write = new IoOperation(this, IoKind.Send);
         _tls = worker.TlsCredential is { } credential ? new SchannelConnection(worker, this, credential) : null;
-        Application = worker.Shared ? SharedConnectionContext.ForWindows(worker, this) : new Connection(worker, this);
+        Application = worker.Shared ? ProviderNetworkConnection.ForWindows(worker, this) : new Connection(worker, this);
     }
 
     internal unsafe void StartRead()
@@ -199,7 +199,7 @@ internal sealed class ConnectionState : IDisposable
         {
             _worker.Metrics.ReceiveBackpressure++;
         }
-        if (Application is SharedConnectionContext shared)
+        if (Application is ProviderNetworkConnection shared)
         {
             shared.Receive(owner, count, _worker.IsRio ? NetworkMemoryKind.Registered : NetworkMemoryKind.Native);
         }

@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -38,8 +39,8 @@ public static class WindowsTransportExtensions
         return builder.ConfigureServices(services =>
         {
             services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory>(provider => new TransportFactory(rio, workerCount,
-                provider.GetRequiredService<ILoggerFactory>()));
+            services.AddSingleton<IConnectionListenerFactory>(provider => new RawKestrelListenerFactory(new TransportFactory(rio, workerCount,
+                provider.GetRequiredService<ILoggerFactory>())));
         });
     }
 }

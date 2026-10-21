@@ -23,7 +23,7 @@ internal sealed class Engine
     private readonly Dictionary<ulong, RingConnection> _connections = new();
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly ChannelWriter<ConnectionContext> _accepted;
+    private readonly ChannelWriter<IProviderConnection> _accepted;
     private readonly IPEndPoint _endpoint;
     private readonly int _cpu;
     private readonly Lock _wakeGate = new();
@@ -57,7 +57,7 @@ internal sealed class Engine
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<ConnectionContext> accepted, bool layered, bool shared = false,
+    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<IProviderConnection> accepted, bool layered, bool shared = false,
         Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
@@ -404,8 +404,8 @@ internal sealed class Engine
 
     internal IProviderConnection Publish(RingConnection state)
     {
-        IProviderConnection connection = Shared ? SharedConnectionContext.ForRing(this, state, _endpoint) : new Connection(this, state.Id, _endpoint, Tls);
-        if (!_accepted.TryWrite(connection.Context))
+        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForRing(this, state, _endpoint) : new Connection(this, state.Id, _endpoint, Tls);
+        if (!_accepted.TryWrite(connection))
         {
             _rejected++;
             Interlocked.Increment(ref _pendingRejections);
@@ -481,7 +481,7 @@ internal sealed class Engine
     {
         _pagesRead++;
         _bytesRead += length;
-        if (connection is SharedConnectionContext shared)
+        if (connection is ProviderNetworkConnection shared)
         {
             shared.Receive(Buffer(page), length, page);
         }

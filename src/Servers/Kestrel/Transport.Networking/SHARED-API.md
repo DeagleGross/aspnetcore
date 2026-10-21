@@ -4,7 +4,19 @@
 
 ## Chosen API
 
-`Primitives\src` holds framework-neutral contracts, owned buffers and the shared connection algorithm. `src\Shared` holds the engine factory, native-provider drivers and Kestrel adaptation. Select `EpollEngineOptions` / `IoUringEngineOptions` on Linux or `IocpEngineOptions` / `RioEngineOptions` on Windows.
+`Primitives\src` holds framework-neutral contracts, owned buffers and the shared connection algorithm. `src\Shared` holds the engine factory, native-provider drivers and the Kestrel adapters. Select `EpollEngineOptions` / `IoUringEngineOptions` on Linux or `IocpEngineOptions` / `RioEngineOptions` on Windows.
+
+**Layering (inverted 2026-10-21).** Providers publish a Kestrel-free `ProviderNetworkConnection : NetworkConnection` through the internal `IProviderListener` / `IProviderConnection` SPI. Only Kestrel's accept loop (`Registration.cs`) wraps it in a `KestrelConnectionContext`, so console samples and other consumers never allocate or see a Kestrel type. Before this change the neutral connection lived inside a Kestrel `DefaultConnectionContext` subclass and was unwrapped by casting.
+
+```text
+before: provider worker -> SharedConnectionContext : DefaultConnectionContext { .Network }
+                           -> neutral listener casts it back to get .Network
+after:  provider worker -> ProviderNetworkConnection : NetworkConnection  (no Kestrel types)
+                           -> neutral listener            -> your code (NetworkConnection)
+                           -> Kestrel accept loop wraps -> KestrelConnectionContext -> Kestrel
+```
+
+This is a layering and testability change, **not a performance change**. Kestrel still allocates one `ConnectionContext` per connection; the allocation moved from the worker to the accept loop. Non-Kestrel consumers save that allocation. The functional gain is `NetworkConnection.TlsInfo`: TLS facts now come from the provider through the neutral API (Windows reports the real SChannel suite; Linux reports TLS 1.2 ECDHE-RSA-AES128-GCM-SHA256, the only protocol/cipher its OpenSSL server context allows) and Kestrel's `ITlsConnectionFeature` / `ITlsHandshakeFeature` read it. The workers still throw `ConnectionAbortedException` for aborts (an exception type from `Microsoft.AspNetCore.Connections` accepted by `Abort(Exception)`), kept to preserve exact exception semantics; a future assembly split would have to replace it. On Windows the obsolete cipher/hash/key-exchange feature properties are now derived best-effort from the suite name rather than from SChannel `ConnectionInfo`; nothing in the repo reads them.
 
 ```csharp
 await using var engine = NetworkEngineFactory.Create(
@@ -148,6 +160,23 @@ TCP-only io_uring in the same batch: short 64,109 vs stock 50,176 (+27.8%), long
 
 [Exact metrics and profile boundaries](src/Shared/shared-results-20261007.json); raw/rejected logs remain in ignored artifact folders.
 
+### Layering inversion: no-regression check (2026-10-21)
+
+The inversion was meant to be performance-neutral, so it was checked against a pre-change build of the same sample (same WSL host, four server cores, twelve client cores, 1 KiB responses, 64 short/256 long connections, 4s warmup/8s measurement, io_uring in ring-owned mode). Three counterbalanced rounds, medians, reported and not independently reproduced:
+
+| Backend | Traffic | Before | After | Delta | Range before / after |
+|---|---|---:|---:|---:|---|
+| epoll TCP | short | 62,531 | 62,020 | -0.8% | 60,000-63,853 / 60,629-63,432 |
+| epoll TCP | long | 280,525 | 281,327 | +0.3% | 277,191-295,071 / 268,333-285,336 |
+| epoll TLS | short | 7,706 | 7,571 | -1.8% | 7,700-7,825 / 7,395-7,695 |
+| epoll TLS | long | 238,953 | 238,718 | -0.1% | 230,800-250,124 / 236,349-240,757 |
+| io_uring TCP | short | 67,137 | 66,235 | -1.3% | 66,743-69,560 / 65,580-71,563 |
+| io_uring TCP | long | 288,700 | 296,776 | +2.8% | 282,181-296,685 / 295,982-300,397 |
+| io_uring TLS | short | 8,015 | 8,320 | +3.8% | 7,817-8,222 / 8,138-8,459 |
+| io_uring TLS | long | 241,784 | 250,835 | +3.7% | 221,856-257,304 / 234,328-253,227 |
+
+No cell moved beyond run-to-run noise in either direction. Epoll TLS short was lower in all three paired rounds (-4.0%, -0.1%, -3.2%); with three samples that cannot be separated from noise, but it is the one cell worth rechecking if short-connection cost matters, because the per-connection `ConnectionContext` allocation now happens on Kestrel's accept loop instead of the worker. Windows was not re-benchmarked; its functional checks all passed.
+
 ### Later Windows stabilization: keep-alive only
 
 Initial two-round **same-binary controls**, 8s warmup/10s measurement and 256 connections, gave these averages. They are separate from the archived-raw snapshot above; stock was not included in this control.
@@ -183,11 +212,12 @@ The initial `AcceptSecurityContext` call moves to a bounded per-listener ThreadP
 | `Primitives\src\NetworkEngine.cs`, `NetworkBuffer.cs` | Engine/listener/options and buffer/slice/payload contracts. |
 | `Primitives\src\NetworkConnection.cs`, `NetworkInputReader.cs` | Common send progression, ownership, receive cursors and stream handoff. |
 | `Primitives\src\NetworkTlsExtensions.cs` | Caller-installed TLS, preserving unread ciphertext. |
-| `src\Shared\NetworkEngineFactory.cs`, `SharedConnectionContext.cs`, `Registration.cs` | Provider construction, native drivers and Kestrel adaptation. |
+| `src\Shared\NetworkEngineFactory.cs`, `IProviderConnection.cs`, `ProviderNetworkConnection.cs` | Provider construction, the Kestrel-free provider SPI and native drivers. |
+| `src\Shared\KestrelAdapters.cs`, `Registration.cs` | The only shared-path code that touches Kestrel connection types: `KestrelConnectionContext`, TLS features and the raw-provider listener adapter. |
 | `src\Epoll`, `src\IoUringTcp`, `src\Windows`, `src\Rio` | Native engines and operation lifetimes; `Windows\Schannel.cs` / `SchannelConnection.cs` own native Windows TLS. |
 
 The exact signature baseline is `Primitives\src\PublicAPI.Unshipped.txt`. [PUBLIC-API.md](PUBLIC-API.md) captures public-only declarations without implementation. The standalone [console demos](samples/README.md) cover plain TCP, native HTTPS, native raw TLS-prefix observation and framed retained-page sends on all four providers. They also preserve a separate stream-based application-prefix upgrade example. `..\samples\NetworkProtoSample\SharedTransportCheck.cs` contains the broader real-socket ownership/cancellation checks.
 
 Selectors: `sharedEpollTcp`, `sharedEpollTls`, `sharedIoUringTcp`, `sharedIoUringTls`, `sharedIocp`, `sharedRio`, `sharedIocpTls`, `sharedRioTls`. `--check-windows-native-tls true` checks transport-owned Windows TLS, retention, fragmented records, half-close, blocked output/reset and shutdown. Existing `--check-shared-tls true` remains a wrapper-based prefix/ClientHello handoff check. Pressure checks use `NETWORKPROTO_WINDOWS_SNDBUF=4096` or the Linux equivalents.
 
-Activate the repository SDK before building. Runners: Linux `scripts\shared-bench.sh`; Windows `scripts\windows-bench.ps1`. All source remains on `dmkorolev/network-proto`, uncommitted. Excluded: client/connect, IPv6, HTTP/2/3 validation, production recovery, a public worker scheduler, generic fd-TLS upgrade, kernel zero-copy and advanced batches. The unresolved Windows measurements do not justify treating this as a finalized framework API.
+Activate the repository SDK before building. Runners: Linux `scripts\shared-bench.sh`; Windows `scripts\windows-bench.ps1`. All source is on branch `dmkorolev/network-proto`. Excluded: client/connect, IPv6, HTTP/2/3 validation, production recovery, a public worker scheduler, generic fd-TLS upgrade, kernel zero-copy and advanced batches. The unresolved Windows measurements do not justify treating this as a finalized framework API.

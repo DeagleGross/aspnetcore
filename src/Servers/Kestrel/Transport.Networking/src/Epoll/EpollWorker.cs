@@ -26,7 +26,7 @@ internal sealed class EpollWorker
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Lock _wakeGate = new();
-    private readonly ChannelWriter<ConnectionContext> _accepted;
+    private readonly ChannelWriter<IProviderConnection> _accepted;
     private readonly IPEndPoint _endpoint;
     private readonly int _cpu;
     private readonly byte[] _pages = GC.AllocateUninitializedArray<byte>(PageCount * PageSize, pinned: true);
@@ -52,7 +52,7 @@ internal sealed class EpollWorker
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<ConnectionContext> accepted, ILogger logger, bool shared = false,
+    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<IProviderConnection> accepted, ILogger logger, bool shared = false,
         Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
@@ -346,8 +346,8 @@ internal sealed class EpollWorker
 
     internal IProviderConnection Publish(ConnectionState state)
     {
-        IProviderConnection connection = Shared ? SharedConnectionContext.ForEpoll(this, state, _endpoint) : new Connection(this, state, _endpoint);
-        if (!_accepted.TryWrite(connection.Context))
+        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForEpoll(this, state, _endpoint) : new Connection(this, state, _endpoint);
+        if (!_accepted.TryWrite(connection))
         {
             _rejectedAccepts++;
             Interlocked.Increment(ref _pendingRejections);
@@ -425,7 +425,7 @@ internal sealed class EpollWorker
     {
         _pagesRead++;
         _bytes += length;
-        if (application is SharedConnectionContext shared)
+        if (application is ProviderNetworkConnection shared)
         {
             shared.Receive(Page(page), length, page);
         }

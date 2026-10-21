@@ -42,6 +42,8 @@ static async Task RunServerAsync(NetworkConnection connection, CancellationToken
     {
         throw new InvalidOperationException("The transport published a connection without completing native TLS.");
     }
+    var tlsInfo = connection.TlsInfo ?? throw new InvalidOperationException("The provider did not report TLS facts for a native TLS connection.");
+    Console.WriteLine($"SERVER sees provider-reported TLS: {tlsInfo.Protocol}, {tlsInfo.CipherSuite}");
     while (true)
     {
         var received = await connection.ReceiveAsync(cancellationToken);

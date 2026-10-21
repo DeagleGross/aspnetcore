@@ -46,7 +46,7 @@ public static class SharedNetworkTransportExtensions
         public async ValueTask<ConnectionContext?> AcceptAsync(CancellationToken cancellationToken = default)
         {
             var connection = await listener.AcceptAsync(cancellationToken).ConfigureAwait(false);
-            return connection is null ? null : ((SharedConnectionContext.ProviderNetworkConnection)connection).AttachKestrel();
+            return connection is null ? null : new KestrelConnectionContext(connection);
         }
         public ValueTask UnbindAsync(CancellationToken cancellationToken = default) => listener.UnbindAsync(cancellationToken);
         public ValueTask DisposeAsync() => listener.DisposeAsync();

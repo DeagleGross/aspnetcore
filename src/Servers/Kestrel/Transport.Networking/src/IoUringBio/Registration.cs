@@ -3,6 +3,7 @@
 
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -22,7 +23,7 @@ public static class LayeredTransportExtensions
         => builder.ConfigureServices(services =>
         {
             services.RemoveAll<IConnectionListenerFactory>();
-            services.AddSingleton<IConnectionListenerFactory>(provider =>
-                new TransportFactory(tls, certificatePath, keyPath, provider.GetRequiredService<ILoggerFactory>(), layered: true));
+            services.AddSingleton<IConnectionListenerFactory>(provider => new RawKestrelListenerFactory(
+                new TransportFactory(tls, certificatePath, keyPath, provider.GetRequiredService<ILoggerFactory>(), layered: true)));
         });
 }

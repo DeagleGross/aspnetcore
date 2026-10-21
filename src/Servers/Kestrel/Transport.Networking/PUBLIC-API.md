@@ -86,6 +86,7 @@ namespace System.Net.Transport
         public EndPoint? LocalEndPoint { get; }
         public EndPoint? RemoteEndPoint { get; }
         public bool IsTls { get; }
+        public NetworkTlsInfo? TlsInfo { get; }
         public CancellationToken ConnectionClosed { get; }
         public long MaxQueuedSendBytes { get; set; }
         public PipeWriter Output { get; }
@@ -104,6 +105,13 @@ namespace System.Net.Transport
         public Stream AsStream();
         public void Abort(Exception? reason = null);
         public ValueTask DisposeAsync();
+    }
+
+    public sealed class NetworkTlsInfo
+    {
+        public NetworkTlsInfo(System.Security.Authentication.SslProtocols protocol, TlsCipherSuite? cipherSuite);
+        public System.Security.Authentication.SslProtocols Protocol { get; }
+        public TlsCipherSuite? CipherSuite { get; }
     }
 
     public readonly struct NetworkReceiveResult
