@@ -68,10 +68,6 @@ internal sealed class Engine
         _accepted = accepted;
         Shared = shared;
         HandshakePrefixCallback = handshakePrefixCallback;
-        if (layered && handshakePrefixCallback is not null)
-        {
-            throw new NotSupportedException("Raw handshake-prefix observation currently requires the fd-bound TLS path, not the separate BIO experiment.");
-        }
         RequireKtls = Environment.GetEnvironmentVariable("NETWORKPROTO_KTLS") == "1";
         GuardPageReads = Environment.GetEnvironmentVariable("NETWORKPROTO_GUARD_PAGE_READ") == "1";
         FinalMode = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") switch

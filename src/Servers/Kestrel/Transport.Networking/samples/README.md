@@ -23,7 +23,7 @@ The HTTP bytes, greeting and prefix are in the linked `Shared\HttpPayloads.cs` f
 
 Use `epoll`, `uring`, `iocp` or `rio` as the first argument; `Shared\DemoSettings.cs` maps these to the four public engine-options types. Unsupported OS/provider pairs fail rather than falling back. Linux native TLS is currently OpenSSL/TLS 1.2; Windows is direct SChannel/TLS 1.3.
 
-For fd-bound Linux TLS the observer uses `recv(MSG_PEEK)` before the first OpenSSL handshake call. Windows observes its existing ciphertext storage before the initial SChannel call. The synchronous callback sees a borrowed, possibly fragmented prefix, **not a parsed or necessarily complete ClientHello**. Do not retain it or block the owning I/O worker. This is observation, not STARTTLS, certificate selection or an arbitrary native TLS upgrade.
+For fd-bound Linux TLS (epoll, or io_uring with `NETWORKPROTO_URING_TLS=fd`) the observer uses `recv(MSG_PEEK)` before the first OpenSSL handshake call; the default ring-owned io_uring mode observes the first received ciphertext page instead. Windows observes its existing ciphertext storage before the initial SChannel call. The synchronous callback sees a borrowed, possibly fragmented prefix, **not a parsed or necessarily complete ClientHello**. Do not retain it or block the owning I/O worker. This is observation, not STARTTLS, certificate selection or an arbitrary native TLS upgrade.
 
 ## What the Orleans-style page demo proves
 

@@ -449,6 +449,11 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         }
     }
 
+    private unsafe void ObserveCipherPrefix(Action<ReadOnlySpan<byte>> callback, int page, int length)
+    {
+        TlsHandshakePrefix.Observe(callback, new ReadOnlySpan<byte>((void*)engine.Buffer(page, true), length));
+    }
+
     private bool MoreBioInput(Native.TlsResult result) => engine.BioTls && !_writeActive
         && result.Status == Native.TlsStatus.WantRead && _bioInputPage < 0 && _cipher.Count > 0;
 
@@ -475,7 +480,19 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             {
                 try
                 {
-                    if (!TlsHandshakePrefix.TryPeek(_fd, callback))
+                    if (engine.BioTls)
+                    {
+                        if (_cipher.TryPeek(out var first))
+                        {
+                            ObserveCipherPrefix(callback, first.Page, first.Length);
+                        }
+                        else if (!_peerEof)
+                        {
+                            StartRead();
+                            return;
+                        }
+                    }
+                    else if (!TlsHandshakePrefix.TryPeek(_fd, callback))
                     {
                         StartRead();
                         return;

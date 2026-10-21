@@ -43,6 +43,10 @@ Raw TCP uses provided-buffer multishot receive and ordinary send SQEs. Fd TLS us
 
 `NETWORKPROTO_COALESCE`, `NETWORKPROTO_FINAL_SEND`, `NETWORKPROTO_GUARD_PAGE_READ`, `NETWORKPROTO_KTLS`, `NETWORKPROTO_CPUS`, and existing registration/sample names remain available. Port zero is explicitly rejected because independently bound reuse-port listeners cannot report one common dynamically assigned port.
 
+## Shared engine TLS mode (October 21)
+
+Through the shared `NetworkEngine` API, the io_uring engine with `NativeTls` now defaults to the custom-BIO (ring-owned ciphertext) path, so io_uring performs all socket I/O and OpenSSL never touches the fd. `NETWORKPROTO_URING_TLS=fd` selects the previous fd-bound OpenSSL path; `NETWORKPROTO_KTLS=1` also selects it because a custom BIO cannot use kTLS. The handshake-prefix callback observes the first received ciphertext page in BIO mode (previously this combination threw). Matched results are in [SHARED-API.md](../../SHARED-API.md#linux-io_uring-tls-ring-owned-ciphertext-2026-10-21); `scripts/uring-tls-ab.sh` reproduces the stock/fd/ring comparison.
+
 ## Completion, buffer, and descriptor ownership
 
 CQEs use connection IDs and operation-kind tokens rather than native object pointers. Each connection tracks original read/write/shutdown operations separately from cancellation acknowledgments. A cancel completion is not permission to free the original operation; multishot remains live while `IORING_CQE_F_MORE` is present.

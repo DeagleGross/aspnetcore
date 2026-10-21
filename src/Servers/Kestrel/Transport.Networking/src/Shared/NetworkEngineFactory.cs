@@ -60,6 +60,15 @@ public static class NetworkEngineFactory
         private int _disposed;
         public override NetworkEngineKind Kind => kind;
 
+        // Default: the ring receives/sends ciphertext and OpenSSL only sees it through a custom BIO. NETWORKPROTO_URING_TLS=fd selects the fd-bound OpenSSL path,
+        // which is also used when NETWORKPROTO_KTLS=1 because a custom BIO cannot activate kernel TLS.
+        private static bool UseRingOwnedCiphertext() => Environment.GetEnvironmentVariable("NETWORKPROTO_URING_TLS") switch
+        {
+            "fd" => false,
+            "ring" => true,
+            _ => Environment.GetEnvironmentVariable("NETWORKPROTO_KTLS") != "1"
+        };
+
         public override async ValueTask<NetworkListener> ListenAsync(EndPoint endpoint, NetworkListenOptions? options = null, CancellationToken cancellationToken = default)
         {
             ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
@@ -79,7 +88,8 @@ public static class NetworkEngineFactory
                     NetworkEngineKind.Epoll => new EpollFactory(tls?.CertificatePath ?? string.Empty, tls?.PrivateKeyPath ?? string.Empty,
                         workers, logging, tls is not null, shared: true, processors, tls?.HandshakePrefixCallback),
                     NetworkEngineKind.IoUring => new RingFactory(tls is not null, tls?.CertificatePath ?? string.Empty, tls?.PrivateKeyPath ?? string.Empty,
-                        logging, shared: true, processors: processors, handshakePrefixCallback: tls?.HandshakePrefixCallback),
+                        logging, layered: tls is not null && UseRingOwnedCiphertext(),
+                        shared: true, processors: processors, handshakePrefixCallback: tls?.HandshakePrefixCallback),
                     NetworkEngineKind.Iocp or NetworkEngineKind.Rio => new WindowsFactory(kind == NetworkEngineKind.Rio, workers, logging,
                         shared: true, processors, tls),
                     _ => throw new NotSupportedException("Unknown network engine.")

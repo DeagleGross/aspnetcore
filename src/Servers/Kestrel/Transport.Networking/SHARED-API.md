@@ -47,11 +47,11 @@ Pipe output and `SendAsync`/`EnqueueSend` are **alternative modes**, not concurr
 | Consume a raw prefix, then TLS | Consume only the parsed prefix; leave any prefetched TLS bytes; authenticate | A real client sent a raw prefix plus ClientHello. TLS plaintext, replies, `close_notify` and native drain passed on all four providers. |
 | STARTTLS-style server greeting | Write the greeting through `connection.Output`, then hand off to TLS | Composes with pipe mode; the complete greeting/negotiation protocol was not separately exercised. Direct `SendAsync` before TLS would select the incompatible direct-send mode. |
 | Ordinary TLS / Kestrel HTTPS | Install `SslStream` directly, or use Kestrel `UseHttps` above the TCP adapter | Explicit wrapper path: OpenSSL through `SslStream` on Linux, SChannel on Windows. Distinct from transport-owned `NativeTls`. |
-| Transport-owned TLS | Set `NetworkListenOptions.NativeTls` when binding | Linux fd-bound OpenSSL (TLS 1.2) or Windows worker-owned SChannel (TLS 1.3); authenticated plaintext is published. No server `SslStream` or arbitrary pre-TLS upgrade. |
+| Transport-owned TLS | Set `NetworkListenOptions.NativeTls` when binding | Linux epoll: fd-bound OpenSSL; Linux io_uring: ring-owned ciphertext through a custom BIO by default (`NETWORKPROTO_URING_TLS=fd`, or `NETWORKPROTO_KTLS=1`, selects fd-bound OpenSSL); both TLS 1.2. Windows: worker-owned SChannel (TLS 1.3). Authenticated plaintext is published. No server `SslStream` or arbitrary pre-TLS upgrade. |
 
 ### Peeking before native TLS
 
-Set `NetworkNativeTlsOptions.HandshakePrefixCallback = bytes => ...` together with the certificate/key paths. The observer runs once on the owning I/O worker and can inspect only its borrowed span during the callback. Linux uses `MSG_PEEK` before fd-bound OpenSSL; Windows uses ciphertext already received into provider storage before SSPI. The hook is opt-in/null by default, does not consume input, and does not provide async certificate selection or arbitrary raw-prefix upgrades. `samples\PeekTlsHttp1` demonstrates the complete real-client HTTPS exchange.
+Set `NetworkNativeTlsOptions.HandshakePrefixCallback = bytes => ...` together with the certificate/key paths. The observer runs once on the owning I/O worker and can inspect only its borrowed span during the callback. Linux epoll and fd-bound io_uring use `MSG_PEEK` before OpenSSL; ring-owned io_uring observes the first received ciphertext page, still before the first handshake call; Windows uses ciphertext already received into provider storage before SSPI. The hook is opt-in/null by default, does not consume input, and does not provide async certificate selection or arbitrary raw-prefix upgrades. `samples\PeekTlsHttp1` demonstrates the complete real-client HTTPS exchange.
 
 ### Peeking or consuming a prefix before stream TLS
 
@@ -132,6 +132,19 @@ Verified HTTP/1.1, 1 KiB body, pipeline one, four pinned server cores. Saved unm
 | Windows RIO | TLS long | 72,455 | 93,379 | 91,802 | +26.7% | -1.7% |
 
 **The 5% target is not met by all Windows rows.** Larger Windows TCP-short runs hit client bind/connect `WSAENOBUFS`, including on stock, and are excluded. [Historical Windows numbers](src/Windows/RESULTS.md) and Linux history are not percentage baselines here.
+
+### Linux io_uring TLS: ring-owned ciphertext (2026-10-21)
+
+The Linux io_uring TLS rows above were measured with fd-bound OpenSSL, where the ring only provides readiness. The shared engine now defaults to the custom-BIO path: ring multishot receive delivers ciphertext, OpenSSL sees it only through a BIO, and ring `SEND` writes the output. `NETWORKPROTO_URING_TLS=fd` restores fd-bound OpenSSL, as does `NETWORKPROTO_KTLS=1` (a custom BIO cannot activate kernel TLS). The handshake-prefix callback also works in this mode.
+
+Counterbalanced, three rounds, medians; same WSL host, four server cores, twelve client cores, 1 KiB responses, 64 short/256 long connections, 4s warmup/8s measurement. Absolute RPS is not comparable with the tables above (different session/host state); only within-batch ratios are valid.
+
+| Traffic | Stock | io_uring fd-bound | io_uring ring-owned | Ring-owned vs stock | Ring-owned vs fd-bound |
+|---|---:|---:|---:|---:|---:|
+| TLS short | 5,453 | 7,573 | 7,937 | +45.6% | +4.8% (ranges overlap) |
+| TLS long | 185,518 | 215,389 | 242,103 | +30.5% | +12.4% (won all 3 paired rounds) |
+
+TCP-only io_uring in the same batch: short 64,109 vs stock 50,176 (+27.8%), long 286,599 vs 261,378 (+9.6%). Mid-run `/proc/<pid>/io` sampling showed about 3.2 `read`+`write` syscalls per request for fd-bound OpenSSL and about zero for ring-owned. TLS short is dominated by the RSA-2048 handshake, so the ring change is not expected to move it much. Ring-owned mode costs another 32 MiB of pinned ciphertext storage per worker.
 
 [Exact metrics and profile boundaries](src/Shared/shared-results-20261007.json); raw/rejected logs remain in ignored artifact folders.
 
