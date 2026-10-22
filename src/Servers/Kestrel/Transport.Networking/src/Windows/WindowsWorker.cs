@@ -3,6 +3,7 @@
 
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Net.Sockets;
@@ -42,9 +43,11 @@ internal sealed class WindowsWorker
     private nuint _nextId = 16;
     private Exception? _failure;
     private long _stopStarted;
+    private long _waitTicks;
     private int _pendingHandshakes;
 
     internal int Index { get; }
+    internal long WaitTicks => Volatile.Read(ref _waitTicks);
     internal string Backend => IsRio ? "rio" : "iocp";
     internal bool IsRio => _rio is not null;
     internal bool Shared => _listener.Shared;
@@ -115,7 +118,7 @@ internal sealed class WindowsWorker
                 _completionQueue = _rio.CreateCompletionQueue(_port, _rioNotification, 8192);
                 ArmNotification();
             }
-            if (Index == 0)
+            if (Index == 0 && !_listener.PoolAccept)
             {
                 StartAccepts();
             }
@@ -142,7 +145,13 @@ internal sealed class WindowsWorker
                     break;
                 }
                 Metrics.Polls++;
-                var count = Native.Poll(_port, completions, 128, _commands.IsEmpty && _immediate.Count == 0 ? 100u : 0u);
+                var timeout = _commands.IsEmpty && _immediate.Count == 0 ? 100u : 0u;
+                var waitStarted = timeout != 0 ? Stopwatch.GetTimestamp() : 0;
+                var count = Native.Poll(_port, completions, 128, timeout);
+                if (timeout != 0)
+                {
+                    Volatile.Write(ref _waitTicks, _waitTicks + Stopwatch.GetTimestamp() - waitStarted);
+                }
                 for (var i = 0; i < count; i++)
                 {
                     var completion = completions[i];
@@ -214,6 +223,7 @@ internal sealed class WindowsWorker
                 backend = Backend, shared = Shared, nativeTls = TlsCredential is not null, worker = Index, cpu = _cpu,
                 accepted = Metrics.Accepted, closed = Metrics.Closed, rejected = Metrics.Rejected,
                 polls = Metrics.Polls, wakes = Metrics.Wakes, completions = Metrics.Completions,
+                waitMs = (long)(WaitTicks * 1000.0 / Stopwatch.Frequency), firstWorkerShare = _listener.FirstWorkerShare,
                 probes = Metrics.Probes, receives = Metrics.Receives, sends = Metrics.Sends,
                 synchronousCompletions = Metrics.SynchronousCompletions,
                 receivedBytes = Metrics.ReceivedBytes, sentBytes = Metrics.SentBytes,
@@ -350,7 +360,7 @@ internal sealed class WindowsWorker
 
     private void StopAccepts()
     {
-        if (Index != 0 || _listener.Socket.IsClosed)
+        if (Index != 0 || _listener.PoolAccept || _listener.Socket.IsClosed)
         {
             _unbound.TrySetResult();
             return;
