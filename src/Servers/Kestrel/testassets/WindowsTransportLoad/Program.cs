@@ -60,6 +60,9 @@ var tlsProtocol = options.GetValueOrDefault("tls-protocol", nameof(SslProtocols.
 ArgumentOutOfRangeException.ThrowIfNegativeOrZero(connections);
 ArgumentOutOfRangeException.ThrowIfNegativeOrZero(seconds);
 ArgumentOutOfRangeException.ThrowIfNegative(warmup);
+var bodyBytes = int.Parse(options.GetValueOrDefault("body-bytes", "1024"), CultureInfo.InvariantCulture);
+ArgumentOutOfRangeException.ThrowIfNegativeOrZero(bodyBytes);
+Peer.ExpectedBody = Encoding.ASCII.GetBytes(new string('x', bodyBytes - 1) + "\n");
 ThreadPool.SetMinThreads(Math.Max(32, Environment.ProcessorCount * 8), Math.Max(32, Environment.ProcessorCount * 8));
 
 using var cancellation = new CancellationTokenSource();
@@ -165,7 +168,7 @@ Console.WriteLine("LOAD_RESULT " + JsonSerializer.Serialize(new
     phaseSamples = peers.SelectMany(peer => peer.PhaseSamples ?? []).ToArray(),
     windows,
     pipeline = 1,
-    bodyBytes = 1024,
+    bodyBytes,
     waitForEofOnShort = true
 }));
 
@@ -185,7 +188,7 @@ internal sealed class Peer
     private readonly SslProtocols _tlsProtocol;
     private readonly bool _asynchronousConnect;
     private readonly byte[] _buffer = new byte[32768];
-    private static readonly byte[] ExpectedBody = Encoding.ASCII.GetBytes(new string('x', 1023) + "\n");
+    internal static byte[] ExpectedBody = Encoding.ASCII.GetBytes(new string('x', 1023) + "\n");
     private const SocketOptionName PortScalability = (SocketOptionName)0x3006;
     private readonly IPEndPoint? _source;
     internal long Requests, Responses, ConnectedSockets, Errors, WarmupErrors, StartupResourceErrors, TeardownErrors;
@@ -375,7 +378,7 @@ internal sealed class Peer
         var contentLength = FindLength(_buffer.AsSpan(0, headerEnd));
         if (contentLength != ExpectedBody.Length)
         {
-            throw new InvalidDataException($"Expected a 1024-byte response, got Content-Length={contentLength}.");
+            throw new InvalidDataException($"Expected a {ExpectedBody.Length}-byte response, got Content-Length={contentLength}.");
         }
         var bodyRead = length - headerEnd;
         if (bodyRead > contentLength || !_buffer.AsSpan(headerEnd, bodyRead).SequenceEqual(ExpectedBody.AsSpan(0, bodyRead)))
@@ -384,7 +387,7 @@ internal sealed class Peer
         }
         while (bodyRead < contentLength)
         {
-            var read = await stream.ReadAsync(_buffer.AsMemory(0, contentLength - bodyRead), cancellationToken);
+            var read = await stream.ReadAsync(_buffer.AsMemory(0, Math.Min(contentLength - bodyRead, _buffer.Length)), cancellationToken);
             if (read == 0 || !_buffer.AsSpan(0, read).SequenceEqual(ExpectedBody.AsSpan(bodyRead, read)))
             {
                 throw new InvalidDataException("Truncated or corrupted response body.");

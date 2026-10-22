@@ -177,6 +177,76 @@ The inversion was meant to be performance-neutral, so it was checked against a p
 
 No cell moved beyond run-to-run noise in either direction. Epoll TLS short was lower in all three paired rounds (-4.0%, -0.1%, -3.2%); with three samples that cannot be separated from noise, but it is the one cell worth rechecking if short-connection cost matters, because the per-connection `ConnectionContext` allocation now happens on Kestrel's accept loop instead of the worker. Windows was not re-benchmarked; its functional checks all passed.
 
+### Response-size matrix: 1, 16 and 256 KiB bodies (2026-10-21)
+
+**The 1 KiB wins above do not extend to large responses.** This batch measured the current code with per-segment sends (no vectored/gather send) at three body sizes. All four providers use their native TLS, stock is default in-tree Kestrel sockets. Counterbalanced (backend order rotated every round), three rounds, medians, 4s warmup/8s measurement, four pinned server cores, 64 short/256 long connections, zero load errors, native ownership drained. Linux is WSL loopback with 12 client cores, TLS 1.2/OpenSSL 3.5.8, io_uring ring-owned. Windows uses eight client cores and TLS 1.3/SChannel. Reported, not independently reproduced; single host per OS, absolute RPS is not comparable across platforms. Five Windows short-connection cases were rerun after a client `WSAENOBUFS`; none failed after retry.
+
+| Linux | Body | Stock | epoll | vs stock | io_uring | vs stock |
+|---|---|---:|---:|---:|---:|---:|
+| TCP short | 1 KiB | 44,798 | 50,568 | +12.9% | 54,189 | +21.0% |
+| TCP short | 16 KiB | 36,866 | 32,033 | -13.1% | 32,217 | -12.6% |
+| TCP short | 256 KiB | 13,543 | 4,922 | -63.7% | 4,251 | -68.6% |
+| TCP long | 1 KiB | 192,248 | 211,158 | +9.8% | 219,287 | +14.1% |
+| TCP long | 16 KiB | 132,790 | 73,381 | -44.7% | 59,575 | -55.1% |
+| TCP long | 256 KiB | 18,579 | 5,317 | -71.4% | 4,417 | -76.2% |
+| TLS short | 1 KiB | 4,303 | 6,245 | +45.1% | 6,702 | +55.8% |
+| TLS short | 16 KiB | 4,165 | 5,523 | +32.6% | 6,513 | +56.4% |
+| TLS short | 256 KiB | 2,787 | 2,419 | -13.2% | 2,311 | -17.1% |
+| TLS long | 1 KiB | 123,939 | 156,415 | +26.2% | 160,975 | +29.9% |
+| TLS long | 16 KiB | 83,846 | 54,204 | -35.4% | 50,013 | -40.4% |
+| TLS long | 256 KiB | 7,934 | 4,229 | -46.7% | 3,952 | -50.2% |
+
+| Windows | Body | Stock | IOCP | vs stock | RIO | vs stock |
+|---|---|---:|---:|---:|---:|---:|
+| TCP short | 1 KiB | 10,733 | 10,291 | -4.1% | 11,658 | +8.6% |
+| TCP short | 16 KiB | 10,396 | 9,533 | -8.3% | 11,316 | +8.8% |
+| TCP short | 256 KiB | 8,088 | 4,184 | -48.3% | 4,851 | -40.0% |
+| TCP long | 1 KiB | 91,791 | 96,402 | +5.0% | 100,442 | +9.4% |
+| TCP long | 16 KiB | 101,763 | 71,396 | -29.8% | 74,147 | -27.1% |
+| TCP long | 256 KiB | 14,798 | 8,023 | -45.8% | 7,480 | -49.5% |
+| TLS short | 1 KiB | 2,139 | 2,167 | +1.3% | 2,380 | +11.3% |
+| TLS short | 16 KiB | 2,066 | 2,058 | -0.4% | 2,140 | +3.6% |
+| TLS short | 256 KiB | 1,724 | 1,704 | -1.2% | 1,673 | -2.9% |
+| TLS long | 1 KiB | 81,723 | 89,892 | +10.0% | 96,931 | +18.6% |
+| TLS long | 16 KiB | 58,955 | 46,599 | -21.0% | 51,089 | -13.3% |
+| TLS long | 256 KiB | 6,192 | 5,341 | -13.7% | 5,464 | -11.7% |
+
+Windows stock TCP long at 256 KiB ranged 12,217-24,655 across rounds, so that row is not stable. Short TLS is handshake-dominated, so body size matters little there until 256 KiB.
+
+On Linux the server is CPU-saturated (about 4 cores) in every large-body long cell, so the gap is cost per request: TCP long at 256 KiB spends roughly 0.76 (epoll) and 0.88 (io_uring) server CPU-ms per request versus 0.22 for stock. This is consistent with per-segment sends, since a 256 KiB response is many output-pool segments and stock submits them together, but this matrix did not isolate the cause. A vectored-send prototype measured earlier (WSL loopback, TCP long only) closed most of the gap and is stored, not merged, on branch `dmkorolev/network-proto-vectored-sends`.
+
+### Adaptive provider-owned output pool (2026-10-22)
+
+**Root cause of the large-body losses above, and an internal fix with no public API change.** Kestrel renders a response into the output `Pipe`, and the `Pipe` uses whatever block size its `MemoryPool<byte>` returns (4 KiB shared-pool blocks on Linux, 16 KiB native pages on Windows). `NetworkConnection.PumpOutputCore` issues one native send per segment, so a 64 KiB response cost 17 sends on Linux, while stock Kestrel sends all segments in one multi-buffer syscall. The transport now gives the pipe its own pool, `AdaptiveOutputPool`, over a per-worker `NativeMemoryPool` with power-of-two size classes. The pipe rents another block only after the current one is full, so every block of a burst except the last was filled completely, and the pool sizes the next burst's first block from that lower bound. Shrinking uses an exponential backoff so a failed probe does not repeat soon. A connection starts from the worker's `OutputBlockHint`, which connections raise when they fill a block and lower when they close without filling one; without it one-request connections relearned the size on every request and paid 6 sends per 64 KiB response. Block sizes are per provider: Linux starts at 4 KiB and is capped at 256 KiB, IOCP starts at 64 KiB and is capped at 256 KiB (1 MiB hurt it by about 13% at 256 KiB), and RIO starts at 64 KiB and is capped at 1 MiB because RIO cannot gather and benefits from one large registered block. `NETWORKPROTO_OUT_MAX=0` disables the pool for A/B runs and any other value overrides the cap.
+
+Same method as the matrix above: counterbalanced, 4s warmup/8s measurement, four pinned server cores, single host per OS, two to three rounds per cell, every response body compared byte-for-byte by the load client with zero errors. Means of same-batch rounds, reported, not independently reproduced. Ratios are only comparable within a batch. Stock drifted between batches, and a few Linux cells compare against stock from an adjacent batch of the same method.
+
+| Linux (WSL), pool vs stock | Body | Stock | epoll | vs stock | io_uring | vs stock | sends/response |
+|---|---|---:|---:|---:|---:|---:|---|
+| TCP long | 64 KiB | 84,200 | 99,800 | +18% | 100,000 | +19% | 17 -> 1 |
+| TCP short | 64 KiB | 29,100 | 34,600 | +19% | 35,600 | +22% | 6 -> 1 |
+| TLS long | 64 KiB | 42,200 | 48,400 | +15% | 45,600 | +8% | 17 -> 1 (epoll), 17 -> 5 (ring) |
+| TLS short | 64 KiB | 4,330 | 5,740 | +33% | 5,920 | +37% | 6 / 10 |
+| TCP short | 1 KiB | 40,100 | 53,500 | +33% | 56,400 | +41% | 1 |
+| TCP long | 256 KiB | 25,500 | 28,300 | +11% | 28,400 | +11% | 2 |
+| TCP short | 256 KiB | 17,500 | 20,300 | +16% | 20,500 | +17% | 2 |
+| TLS long | 256 KiB | 9,540 | 14,360 | +51% | 12,640 | +32% | 2 (epoll), 17 (ring) |
+| TLS short | 256 KiB | 3,390 | 4,900 | +45% | 4,960 | +46% | 2 (epoll), 20 (ring) |
+| TLS long | 16 KiB | 107,040 | 119,450 | +12% | 96,960 | -9% | 1 (epoll), 2 (ring) |
+
+Before the shared hint, Linux TCP short at 64 KiB was -12% against stock for both providers (6 sends per response). The TLS short 64 KiB row is from that earlier batch, where the first-block cost is small next to the handshake. The 1 KiB TCP long rows were unchanged by the pool (epoll 239,000 and io_uring 248,000 with the pool disabled against 243,000 and 235,000 with it, within noise).
+
+| Windows, pool vs stock | Body | Stock | IOCP | vs stock | RIO | vs stock |
+|---|---|---:|---:|---:|---:|---:|
+| TCP long | 64 KiB | 54,100 | 59,000 | +9% | 58,100 | +7% |
+| TCP long | 256 KiB | 17,800 | 18,900 | +6% | 22,500 | +26% |
+| TCP short | 64 KiB | 11,650 | 10,340 | -11% | 12,740 | +9% |
+| TCP short | 256 KiB | 8,910 | 7,670 | -14% | 9,890 | +11% |
+| TLS short | 64 KiB | 2,060 | 2,120 | +3% | 2,190 | +7% |
+| TLS short | 256 KiB | 2,090 | 2,130 | +2% | 2,180 | +4% |
+
+Windows TCP long at 1 and 16 KiB (two rounds) was +1%/+9% for IOCP and +9%/+12% for RIO. IOCP TCP short is still behind stock, but it already was before this change (-4% at 1 KiB and -8% at 16 KiB in the matrix above), so the pool is not the cause; at 256 KiB it moved from -48% to -14%. Windows TLS long with the pool was not remeasured. Linux ring-owned TLS still emits one send per 16 KiB TLS record (17 sends at 256 KiB), which is why it trails epoll TLS and loses to stock at 16 KiB; that is the ciphertext send path, not the plaintext pool, and is not changed here. A 16 KiB first-block floor on Windows measured 12-15% slower than a 64 KiB floor with identical per-operation counts, and the cause of that gap was not established.
+
 ### Later Windows stabilization: keep-alive only
 
 Initial two-round **same-binary controls**, 8s warmup/10s measurement and 256 connections, gave these averages. They are separate from the archived-raw snapshot above; stock was not included in this control.

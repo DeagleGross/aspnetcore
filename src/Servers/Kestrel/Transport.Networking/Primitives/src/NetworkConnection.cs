@@ -358,7 +358,7 @@ public abstract class NetworkConnection : IAsyncDisposable
             {
                 if (_error is not null || _transportClosed)
                 {
-                    FinishOutput(_error ?? new IOException("The network connection closed."));
+                    FinishOutput(_error ?? new IOException("The network connection closed."), gracefulTransportClose: _error is null);
                     return;
                 }
                 if (Volatile.Read(ref _sendMode) == 2)
@@ -483,7 +483,7 @@ public abstract class NetworkConnection : IAsyncDisposable
         }
     }
 
-    private void FinishOutput(Exception? error)
+    private void FinishOutput(Exception? error, bool gracefulTransportClose = false)
     {
         lock (_admissionGate)
         {
@@ -507,7 +507,8 @@ public abstract class NetworkConnection : IAsyncDisposable
         {
             FinishRequest(queued, error ?? new IOException("Queued output closed."));
         }
-        _output.Reader.Complete(error);
+        // A graceful transport close is not a writer fault: like stock Sockets, the writer observes FlushResult.IsCompleted instead of an exception.
+        _output.Reader.Complete(gracefulTransportClose ? null : error);
         _outputStopped.TrySetResult();
         if (error is null)
         {

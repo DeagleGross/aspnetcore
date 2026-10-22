@@ -10,6 +10,7 @@ param(
     [int]$Connections = 256,
     [int]$ShortConnections = 64,
     [int]$ShortCooldownSeconds = 60,
+    [int]$BodyBytes = 1024,
     [int]$BasePort = 16000,
     [ValidateSet('Tls12', 'Tls13')]
     [string]$TlsProtocol = 'Tls13',
@@ -163,7 +164,7 @@ try {
                         } else { $sample }
                         $serverArgs = @($caseSample, '--backend', $backend, '--scheme', $scheme, '--port', [string]$port,
                             '--workers', [string]$ServerCpus.Count, '--minimal', 'true', '--benchmark', 'true',
-                            '--Logging:LogLevel:Default', 'Warning')
+                            '--body-bytes', [string]$BodyBytes, '--Logging:LogLevel:Default', 'Warning')
                         if ($scheme -eq 'https') { $serverArgs += @('--cert', $certificate, '--key', $key, '--tls-protocol', $TlsProtocol) }
                         $server = Start-Child $serverArgs $ServerCpus $true
                         $serverOutput = $server.StandardOutput.ReadToEndAsync()
@@ -190,7 +191,8 @@ try {
 
                         $clientArgs = @($load, '--url', "$baseUrl/", '--mode', $mode,
                             '--connections', [string]$caseConnections, '--seconds', [string]$Seconds, '--warmup', [string]$Warmup,
-                            '--tls-protocol', $TlsProtocol, '--source-network', $sourceNetwork, '--connect-mode', $ConnectMode)
+                            '--tls-protocol', $TlsProtocol, '--source-network', $sourceNetwork, '--connect-mode', $ConnectMode,
+                            '--body-bytes', [string]$BodyBytes)
                         $client = Start-Child $clientArgs $ClientCpus $false
                         $clientError = $client.StandardError.ReadToEndAsync()
                         $lines = [System.Collections.Generic.List[string]]::new()

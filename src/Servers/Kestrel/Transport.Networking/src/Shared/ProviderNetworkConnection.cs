@@ -80,7 +80,11 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
         }
     }
 
-    public void Closed(Exception? error) => CompleteCloseCore(error);
+    public void Closed(Exception? error)
+    {
+        _driver.EndOutput();
+        CompleteCloseCore(error);
+    }
     public void EndReceive(Exception? error) => EndReceiveCore(error);
     public void PumpOutput() => PumpOutputCore();
     public void TlsEstablished(NetworkTlsInfo info) => SetTlsInfoCore(info);
@@ -109,9 +113,11 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     internal abstract class Driver
     {
+        protected AdaptiveOutputPool? AdaptivePool;
         internal virtual MemoryPool<byte>? OutputPool => null;
         internal virtual NetworkMemoryKind OutputKind => NetworkMemoryKind.Managed;
         internal virtual bool CanCompleteInline => false;
+        internal void EndOutput() => AdaptivePool?.EndConnection();
         internal virtual void Sent() { }
         internal abstract void Schedule();
         internal abstract void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final);
@@ -124,6 +130,8 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     private sealed class EpollDriver(EpollWorker worker, EpollState state) : Driver
     {
+        internal override MemoryPool<byte>? OutputPool => worker.OutputPool is { } pool ? AdaptivePool ??= AdaptiveOutputPool.Create(pool, 4096, 262144) : null;
+        internal override NetworkMemoryKind OutputKind => worker.OutputPool is null ? NetworkMemoryKind.Managed : NetworkMemoryKind.Native;
         internal override void Schedule() => worker.Enqueue(new(EpollWorker.CommandKind.OutputReady, state));
         internal override void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final)
         {
@@ -137,6 +145,8 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     private sealed class RingDriver(RingEngine engine, RingState state) : Driver
     {
+        internal override MemoryPool<byte>? OutputPool => engine.OutputPool is { } pool ? AdaptivePool ??= AdaptiveOutputPool.Create(pool, 4096, 262144) : null;
+        internal override NetworkMemoryKind OutputKind => engine.OutputPool is null ? NetworkMemoryKind.Managed : NetworkMemoryKind.Native;
         internal override void Schedule() => engine.Enqueue(new RingNative.Command { Kind = 7, Connection = state.Id });
         internal override void Send(ReadOnlyMemory<byte> data, nint pinnedAddress, bool final)
         {
@@ -150,8 +160,10 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
 
     private sealed class WindowsDriver(WindowsWorker worker, WindowsState state) : Driver
     {
+        // Native sends cost a completion each, so a response should start in one block large enough to send once.
+        private const int FirstOutputBlock = 65536, MaxOutputBlock = 262144, MaxRegisteredOutputBlock = 1024 * 1024;
         private IMemoryOwner<byte>? _staging;
-        internal override MemoryPool<byte> OutputPool => worker.OutputPool;
+        internal override MemoryPool<byte> OutputPool => AdaptiveOutputPool.Enabled ? AdaptivePool ??= AdaptiveOutputPool.Create(worker.OutputPool, FirstOutputBlock, worker.IsRio ? MaxRegisteredOutputBlock : MaxOutputBlock) : worker.OutputPool;
         internal override NetworkMemoryKind OutputKind => worker.IsRio ? NetworkMemoryKind.Registered : NetworkMemoryKind.Native;
         internal override bool CanCompleteInline => worker.IsCurrentThread;
         internal override void Schedule() => worker.Enqueue(new(WindowsWorker.CommandKind.OutputReady, state));

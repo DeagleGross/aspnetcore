@@ -5,26 +5,47 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Rio;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
-internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes) : MemoryPool<byte>
+/// <summary>
+/// A bounded pool of native (optionally RIO-registered) blocks in power-of-two size classes from <paramref name="pageSize"/> up.
+/// Blocks are never moved, so pinning a lease is free.
+/// </summary>
+internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSize = NativeMemoryPool.DefaultPageSize) : MemoryPool<byte>
 {
-    internal const int PageSize = 16384, SlabSize = 4 * 1024 * 1024;
+    internal const int DefaultPageSize = 16384, SlabSize = 4 * 1024 * 1024;
     private readonly Lock _gate = new();
-    private readonly ConcurrentStack<Slot> _free = new();
-    private readonly Dictionary<int, ConcurrentStack<Slot>> _large = new();
+    private readonly int _pageShift = System.Numerics.BitOperations.Log2((uint)pageSize);
+    private readonly ConcurrentStack<Slot>[] _classes = CreateClasses(pageSize, maximumBytes);
     private readonly List<Slab> _slabs = new();
     private bool _disposed;
     private int _bytes, _outstanding;
 
     public override int MaxBufferSize => maximumBytes;
+    internal OutputBlockHint OutputHint { get; } = new();
     internal int AllocatedBytes => Volatile.Read(ref _bytes);
     internal int Outstanding => Volatile.Read(ref _outstanding);
 
+    private static ConcurrentStack<Slot>[] CreateClasses(int pageSize, int maximumBytes)
+    {
+        if (!System.Numerics.BitOperations.IsPow2(pageSize))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pageSize), "The page size must be a power of two.");
+        }
+        var count = System.Numerics.BitOperations.Log2(System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(maximumBytes, pageSize))) - System.Numerics.BitOperations.Log2((uint)pageSize) + 1;
+        var classes = new ConcurrentStack<Slot>[count];
+        for (var i = 0; i < classes.Length; i++)
+        {
+            classes[i] = new ConcurrentStack<Slot>();
+        }
+        return classes;
+    }
+
     public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
     {
-        return TryRent(minBufferSize) ?? throw new InvalidOperationException("The Windows transport's bounded native memory pool is exhausted.");
+        return TryRent(minBufferSize) ?? throw new InvalidOperationException("The transport's bounded native memory pool is exhausted.");
     }
 
     internal IMemoryOwner<byte>? TryRent(int minBufferSize = -1)
@@ -32,19 +53,8 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes) : MemoryPo
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentOutOfRangeException.ThrowIfLessThan(minBufferSize, -1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(minBufferSize, maximumBytes);
-        var size = minBufferSize <= PageSize ? PageSize : checked((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)minBufferSize));
-        var stack = _free;
-        if (size > PageSize)
-        {
-            lock (_gate)
-            {
-                if (!_large.TryGetValue(size, out stack))
-                {
-                    stack = new ConcurrentStack<Slot>();
-                    _large.Add(size, stack);
-                }
-            }
-        }
+        var size = minBufferSize <= pageSize ? pageSize : checked((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)minBufferSize));
+        var stack = _classes[System.Numerics.BitOperations.Log2((uint)size) - _pageShift];
         if (!stack.TryPop(out var slot))
         {
             lock (_gate)

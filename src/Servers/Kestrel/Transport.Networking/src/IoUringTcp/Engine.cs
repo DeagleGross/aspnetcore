@@ -11,6 +11,7 @@ using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
@@ -44,6 +45,7 @@ internal sealed class Engine
     internal readonly ILogger Logger;
     internal Action<ReadOnlySpan<byte>>? HandshakePrefixCallback { get; }
     internal readonly Counters Metrics = new();
+    internal NativeMemoryPool? OutputPool { get; }
     internal nint Context
     {
         get; private set;
@@ -68,6 +70,10 @@ internal sealed class Engine
         _accepted = accepted;
         Shared = shared;
         HandshakePrefixCallback = handshakePrefixCallback;
+        if (shared && AdaptiveOutputPool.Enabled)
+        {
+            OutputPool = new NativeMemoryPool(null, 512 * 1024 * 1024, pageSize: 4096);
+        }
         RequireKtls = Environment.GetEnvironmentVariable("NETWORKPROTO_KTLS") == "1";
         GuardPageReads = Environment.GetEnvironmentVariable("NETWORKPROTO_GUARD_PAGE_READ") == "1";
         FinalMode = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") switch
@@ -230,6 +236,10 @@ internal sealed class Engine
 
             GC.KeepAlive(_pageStorage);
             GC.KeepAlive(_cipherStorage);
+            if (OutputPool is { Outstanding: 0 } outputPool)
+            {
+                outputPool.Dispose();
+            }
             NativeMemory.Free((void*)_wakeBuffer);
             Report();
             if (failure is null)

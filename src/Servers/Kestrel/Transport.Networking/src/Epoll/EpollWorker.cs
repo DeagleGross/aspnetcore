@@ -11,6 +11,7 @@ using System.Threading.Channels;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
@@ -45,6 +46,7 @@ internal sealed class EpollWorker
     internal readonly bool CorkFinal = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") == "3";
     internal readonly Counters Metrics = new();
     internal readonly ILogger Logger;
+    internal NativeMemoryPool? OutputPool { get; }
     internal bool Tls { get; }
     internal bool Shared { get; }
     internal Action<ReadOnlySpan<byte>>? HandshakePrefixCallback { get; }
@@ -59,6 +61,10 @@ internal sealed class EpollWorker
         _cpu = cpu;
         Tls = tls;
         Shared = shared;
+        if (shared && AdaptiveOutputPool.Enabled)
+        {
+            OutputPool = new NativeMemoryPool(null, 512 * 1024 * 1024, pageSize: 4096);
+        }
         HandshakePrefixCallback = handshakePrefixCallback;
         _accepted = accepted;
         Logger = logger;
@@ -175,6 +181,10 @@ internal sealed class EpollWorker
             if (_context != 0)
             {
                 Native.FreeContext(_context);
+            }
+            if (OutputPool is { Outstanding: 0 } outputPool)
+            {
+                outputPool.Dispose();
             }
             if (_connections.Count != 0 || _freePages.Count != PageCount)
             {

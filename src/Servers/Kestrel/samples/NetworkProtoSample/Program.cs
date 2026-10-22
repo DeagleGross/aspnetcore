@@ -51,7 +51,12 @@ if (tlsProtocols != SslProtocols.Tls12 && backend is "IoUringTls" or "IoUringBio
     throw new ArgumentException("The native Linux TLS prototypes are fixed to TLS 1.2.");
 }
 var counters = new Counters();
-var payload = new string('x', 1023) + "\n";
+var bodyBytes = builder.Configuration.GetValue("body-bytes", 1024);
+if (bodyBytes < 1)
+{
+    throw new ArgumentException("Use --body-bytes with a positive value.");
+}
+var payload = new string('x', bodyBytes - 1) + "\n";
 if (backend.StartsWith("shared", StringComparison.Ordinal))
 {
     NetworkEngineOptions engineOptions = backend switch
@@ -351,7 +356,7 @@ app.MapGet("/", async context =>
         context.Response.Headers["X-Tls"] = tls is null ? "none" : $"{tls.Protocol}:{tls.NegotiatedCipherSuite}";
     }
     context.Response.ContentType = "text/plain";
-    context.Response.ContentLength = 1024;
+    context.Response.ContentLength = bodyBytes;
     await context.Response.WriteAsync(payload);
 });
 app.MapGet("/metrics", (HttpContext context) =>
