@@ -1080,6 +1080,9 @@
     <Project Path="src/Servers/Kestrel/test/Sockets.BindTests/Sockets.BindTests.csproj" />
     <Project Path="src/Servers/Kestrel/test/Sockets.FunctionalTests/Sockets.FunctionalTests.csproj" />
   </Folder>
+  <Folder Name="/src/Servers/Kestrel/testassets/">
+    <Project Path="src/Servers/Kestrel/testassets/WindowsTransportLoad/WindowsTransportLoad.csproj" />
+  </Folder>
   <Folder Name="/src/Servers/Kestrel/tools/">
     <Project Path="src/Servers/Kestrel/tools/CodeGenerator/CodeGenerator.csproj" />
   </Folder>
@@ -1090,6 +1093,8 @@
     <Project Path="src/Servers/Kestrel/Transport.Networking/src/Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.csproj" />
   </Folder>
   <Folder Name="/src/Servers/Kestrel/Transport.Networking/samples/">
+    <File Path="src/Servers/Kestrel/Transport.Networking/samples/README.md" />
+    <Project Path="src/Servers/Kestrel/Transport.Networking/samples/NativeTlsHttp1/NativeTlsHttp1.csproj" />
     <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PeekTlsHttp1/PeekTlsHttp1.csproj" />
     <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PlainHttp1/PlainHttp1.csproj" />
     <Project Path="src/Servers/Kestrel/Transport.Networking/samples/PrefixTlsHttp1/PrefixTlsHttp1.csproj" />
