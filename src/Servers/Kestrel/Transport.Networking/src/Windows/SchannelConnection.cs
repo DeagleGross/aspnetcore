@@ -13,7 +13,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
 // The owner serializes all state/record work. An initial handshake job has exclusive context/input ownership.
-internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState state, Schannel.Credential credential) : IDisposable
+internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState state, Schannel.Credential credential) : IWindowsTlsConnection
 {
     private readonly Schannel.SecurityHandle _context = new(credential: false);
     private readonly Queue<Packet> _tokens = new();
@@ -34,12 +34,13 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
     private HandshakeScheduler.Work? _handshakeWork;
     private bool _prefixObserved;
 
-    internal bool Authenticated => _handshakeDone;
-    internal bool HandshakePending => _handshakeWork is not null;
+    public bool Authenticated => _handshakeDone;
+    public bool HandshakePending => _handshakeWork is not null;
+    public int BufferedCiphertext => _input is null ? 0 : _end - _start;
 
-    internal Memory<byte> GetReceiveMemory()
+    public Memory<byte> GetReceiveMemory()
     {
-        if (HandshakePending || !_handshakeDone && (_wireOwner is not null || _tokens.Count != 0))
+        if (HandshakePending || _handshakeDone && !_published || !_handshakeDone && (_wireOwner is not null || _tokens.Count != 0))
         {
             return default;
         }
@@ -84,7 +85,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         return _input.Memory.Slice(_end, free);
     }
 
-    internal void Received(int count)
+    public void Received(int count)
     {
         if (_input is null || count <= 0 || count > _input.Memory.Length - _end)
         {
@@ -98,7 +99,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         ProcessInput();
     }
 
-    internal void ResumeInput()
+    public void ResumeInput()
     {
         if (!state.Read.Outstanding)
         {
@@ -228,7 +229,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         return _published;
     }
 
-    internal void HandshakeCompleted()
+    public void HandshakeCompleted()
     {
         var work = _handshakeWork ?? throw new InvalidOperationException("A native handshake result arrived without an ownership hold.");
         _handshakeWork = null;
@@ -260,7 +261,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         }
     }
 
-    internal void CancelHandshake()
+    public void CancelHandshake()
     {
         if (_handshakeWork is { } work)
         {
@@ -298,7 +299,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         if (_handshakeDone && !_published && _wireOwner is null && _tokens.Count == 0)
         {
             _published = true;
-            state.Application.TlsEstablished(new NetworkTlsInfo(SslProtocols.Tls13, (TlsCipherSuite)_suite));
+            state.Application.TlsEstablished(new NetworkTlsInfo(Schannel.Protocol, (TlsCipherSuite)_suite));
             worker.Metrics.TlsHandshakes++;
             worker.Publish(state);
         }
@@ -316,7 +317,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         _tokens.Enqueue(new Packet(owner, length, kind));
     }
 
-    internal void Send(ReadOnlyMemory<byte> plaintext, bool final)
+    public void Send(ReadOnlyMemory<byte> plaintext, bool final)
     {
         if (!_published || _closing || !_plain.IsEmpty || plaintext.IsEmpty)
         {
@@ -474,7 +475,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         }
     }
 
-    internal void Sent(Exception? error)
+    public void Sent(Exception? error)
     {
         var kind = _wireKind;
         if (worker.TlsTiming && kind == PacketKind.Handshake)
@@ -537,13 +538,13 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         }
     }
 
-    internal void Shutdown()
+    public void Shutdown()
     {
         _closing = true;
         DriveOutput();
     }
 
-    internal void PeerEof()
+    public void PeerEof()
     {
         if (!_handshakeDone || _end != _start || (!_peerClosed && !_shutdownSent))
         {
@@ -552,7 +553,7 @@ internal sealed class SchannelConnection(WindowsWorker worker, ConnectionState s
         state.Application.EndReceive(null);
     }
 
-    internal void NativeClosed(Exception? error)
+    public void NativeClosed(Exception? error)
     {
         _input?.Release();
         _input = null;

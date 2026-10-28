@@ -18,6 +18,11 @@ internal static unsafe partial class Schannel
     internal const uint Data = 1, Token = 2, Extra = 5, Trailer = 6, Header = 7;
     private const uint Requirements = 0x00010000 | 0x00000100 | 0x00000010 | 0x00000008 | 0x00000004;
 
+    // TLS 1.3 only by default (SP_PROT_TLS1_3_SERVER). NETWORKPROTO_WINDOWS_TLS=1.2 selects TLS 1.2 only (SP_PROT_TLS1_2_SERVER) for peers without TLS 1.3, such as wrk built with OpenSSL 1.1.0.
+    internal static readonly bool UseTls12 = Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_TLS") == "1.2";
+    internal static uint ServerProtocol => UseTls12 ? 0x00000400u : 0x00001000u;
+    internal static SslProtocols Protocol => UseTls12 ? SslProtocols.Tls12 : SslProtocols.Tls13;
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct Buffer
     {
@@ -101,7 +106,7 @@ internal static unsafe partial class Schannel
             try
             {
                 var certificate = _certificate.Handle;
-                var parameters = new TlsParameters { DisabledProtocols = ~0x00001000u };
+                var parameters = new TlsParameters { DisabledProtocols = ~ServerProtocol };
                 var credentials = new Credentials
                 {
                     Version = 5,
@@ -181,7 +186,7 @@ internal static unsafe partial class Schannel
         Check(QueryContextAttributesW(context, 4, &stream), "SECPKG_ATTR_STREAM_SIZES");
         Check(QueryContextAttributesW(context, 0x5a, &connection), "SECPKG_ATTR_CONNECTION_INFO");
         Check(QueryContextAttributesW(context, 0x64, &cipher), "SECPKG_ATTR_CIPHER_INFO");
-        if (connection.Protocol != 0x1000 || stream.MaximumMessage is 0 or > 16384 || stream.Header > 1024 || stream.Trailer > 1024)
+        if (connection.Protocol != ServerProtocol || stream.MaximumMessage is 0 or > 16384 || stream.Header > 1024 || stream.Trailer > 1024)
         {
             throw new AuthenticationException("SChannel negotiated an unexpected protocol or record layout.");
         }

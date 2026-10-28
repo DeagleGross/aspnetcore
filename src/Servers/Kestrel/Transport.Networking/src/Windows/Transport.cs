@@ -69,6 +69,7 @@ internal sealed class WindowsListener : IProviderListener
     internal bool PoolAccept { get; }
     internal bool Shared { get; }
     internal Schannel.Credential? TlsCredential { get; }
+    internal TlsSessionServer? TlsSession { get; }
     internal HandshakeScheduler? Handshakes { get; }
     public EndPoint EndPoint { get; }
 
@@ -87,8 +88,10 @@ internal sealed class WindowsListener : IProviderListener
         _winsock = new WinsockSession();
         try
         {
-            TlsCredential = nativeTls is null ? null : new Schannel.Credential(nativeTls);
-            Handshakes = TlsCredential is not null && Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_HANDSHAKE_OFFLOAD") != "0"
+            var useSession = nativeTls is not null && TlsSessionServer.IsSelected;
+            TlsSession = useSession ? new TlsSessionServer(nativeTls!) : null;
+            TlsCredential = nativeTls is null || useSession ? null : new Schannel.Credential(nativeTls);
+            Handshakes = (TlsCredential is not null || TlsSession is not null) && Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_HANDSHAKE_OFFLOAD") != "0"
                 ? new HandshakeScheduler(cpus.Length) : null;
             Socket = Native.Listen(endpoint, rio);
             EndPoint = Native.GetEndPoint(Socket, peer: false);
@@ -99,6 +102,7 @@ internal sealed class WindowsListener : IProviderListener
         {
             Socket?.Dispose();
             TlsCredential?.Dispose();
+            TlsSession?.Dispose();
             _winsock.Dispose();
             throw;
         }
@@ -260,6 +264,7 @@ internal sealed class WindowsListener : IProviderListener
                 await Handshakes.DrainAsync().ConfigureAwait(false);
             }
             TlsCredential?.Dispose();
+            TlsSession?.Dispose();
             _winsock.Dispose();
         }
     }

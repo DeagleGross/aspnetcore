@@ -73,6 +73,13 @@ The executor uses `UnsafeQueueUserWorkItem` without application `ExecutionContex
 
 **Application tradeoff:** these jobs share the application's ThreadPool. Blocking application work can delay handshakes and cancellation drain; multiple listeners multiply the per-listener budget. The limits do not bound all accepted connections or promise latency under starvation. No mixed-application/starvation benchmark was performed, and the prototype's fatal policy for an undrained shutdown is not production recovery.
 
+## Opt-in switches
+
+- `NETWORKPROTO_WINDOWS_TLS=1.2` restricts the transport-owned SChannel server to TLS 1.2. The default negotiates the platform's best protocol (TLS 1.3 where enabled). It exists because the crank lab's `wrk` build uses OpenSSL 1.1.0g, which cannot speak TLS 1.3.
+- `NETWORKPROTO_WINDOWS_TLS_IMPL=session` replaces the direct SSPI state machine (`SchannelConnection.cs`) with the runtime's sans-I/O `TlsBufferSession` ([dotnet/runtime#128871](https://github.com/dotnet/runtime/issues/128871), `[Experimental("SYSLIB5007")]`) in `TlsSessionConnection.cs`. Both implementations sit behind `IWindowsTlsConnection`, share the handshake executor and publish plaintext the same way. The default is the direct SSPI path.
+
+The session path differs in cost, not in contract: `TlsBufferSession.Read` and `Write` copy through runtime-owned scratch buffers, so decrypted records are published from a separate 16 KiB plaintext page instead of in place. A server session always suspends at handshake completion with `NeedsCertificateValidation`; the adapter resolves it with `SetRemoteCertificateValidationResult(SslPolicyErrors.None)` because no client certificate is requested. Single crank runs (TLS 1.2, keep-alive, 8 KiB, 256 connections) were within run-to-run noise of the direct path for RIO and about 8% lower for IOCP; this is reported, not independently reproduced.
+
 ## Public-source review and experiments
 
 | Source | What was verified / used |

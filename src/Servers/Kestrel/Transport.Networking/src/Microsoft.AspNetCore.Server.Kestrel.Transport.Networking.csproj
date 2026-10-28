@@ -5,6 +5,7 @@
     <IsPackable>false</IsPackable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);SYSLIB5007</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Primitives\src\NetworkTransport.Primitives.csproj" />

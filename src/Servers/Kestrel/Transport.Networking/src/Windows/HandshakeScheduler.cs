@@ -9,14 +9,14 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 internal sealed class HandshakeScheduler(int workers)
 {
     private readonly Lock _gate = new();
-    private readonly Queue<Work> _queued = new();
+    private readonly Queue<IThreadPoolWorkItem> _queued = new();
     private readonly int _maximumActive = checked(workers * 2);
     private readonly int _maximumQueued = checked(workers * 128);
     private int _active, _peakActive, _peakQueued;
     private long _submitted, _completed, _rejected;
     private TaskCompletionSource? _drained;
 
-    internal bool TryQueue(Work work)
+    internal bool TryQueue(IThreadPoolWorkItem work)
     {
         lock (_gate)
         {
@@ -44,7 +44,7 @@ internal sealed class HandshakeScheduler(int workers)
         return true;
     }
 
-    private Work? ReleaseSlot()
+    internal IThreadPoolWorkItem? ReleaseSlot()
     {
         lock (_gate)
         {

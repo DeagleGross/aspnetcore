@@ -45,6 +45,8 @@ internal sealed class WindowsWorker
     private long _stopStarted;
     private long _waitTicks;
     private int _pendingHandshakes;
+    private readonly long _statsIntervalMs = long.TryParse(Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_STATS_SECONDS"), CultureInfo.InvariantCulture, out var statsSeconds) ? statsSeconds * 1000 : 0;
+    private long _nextStats;
 
     internal int Index { get; }
     internal long WaitTicks => Volatile.Read(ref _waitTicks);
@@ -53,6 +55,7 @@ internal sealed class WindowsWorker
     internal bool Shared => _listener.Shared;
     internal bool TlsTiming { get; } = Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_TIMING") == "1";
     internal Schannel.Credential? TlsCredential => _listener.TlsCredential;
+    internal TlsSessionServer? TlsSession => _listener.TlsSession;
     internal HandshakeScheduler? Handshakes => _listener.Handshakes;
     internal bool IsCurrentThread => Environment.CurrentManagedThreadId == _threadId;
     internal bool ZeroByteReads { get; } = Environment.GetEnvironmentVariable("NETWORKPROTO_IOCP_ZERO_BYTE") != "0";
@@ -176,6 +179,11 @@ internal sealed class WindowsWorker
                     {
                         state.CheckDeadline(now);
                     }
+                    if (_statsIntervalMs > 0 && now >= _nextStats)
+                    {
+                        _nextStats = now + _statsIntervalMs;
+                        WriteProgress(now);
+                    }
                 }
                 if (_stopping && Environment.TickCount64 - _stopStarted > 15000 && (_pendingIo != 0 || _connections.Count != 0 || _pendingHandshakes != 0))
                 {
@@ -220,7 +228,7 @@ internal sealed class WindowsWorker
             _unbound.TrySetResult();
             Console.WriteLine("WINDOWS_TRANSPORT " + JsonSerializer.Serialize(new
             {
-                backend = Backend, shared = Shared, nativeTls = TlsCredential is not null, worker = Index, cpu = _cpu,
+                backend = Backend, shared = Shared, nativeTls = TlsCredential is not null || TlsSession is not null, tlsImpl = TlsSession is not null ? "session" : TlsCredential is not null ? "schannel" : "none", worker = Index, cpu = _cpu,
                 accepted = Metrics.Accepted, closed = Metrics.Closed, rejected = Metrics.Rejected,
                 polls = Metrics.Polls, wakes = Metrics.Wakes, completions = Metrics.Completions,
                 waitMs = (long)(WaitTicks * 1000.0 / Stopwatch.Frequency), firstWorkerShare = _listener.FirstWorkerShare,
@@ -265,6 +273,24 @@ internal sealed class WindowsWorker
                 _stopped.TrySetException(_failure);
             }
         }
+    }
+
+    private void WriteProgress(long now)
+    {
+        Console.WriteLine("WINDOWS_PROGRESS " + JsonSerializer.Serialize(new
+        {
+            tick = now, backend = Backend, worker = Index,
+            accepted = Metrics.Accepted, closed = Metrics.Closed, rejected = Metrics.Rejected, connections = _connections.Count,
+            polls = Metrics.Polls, wakes = Metrics.Wakes, completions = Metrics.Completions, rioNotifications = Metrics.RioNotifications,
+            receives = Metrics.Receives, sends = Metrics.Sends, pendingIo = _pendingIo,
+            tlsHandshakes = Metrics.TlsHandshakes, tlsHandshakeCalls = Metrics.TlsHandshakeCalls, offloadedHandshakes = Metrics.OffloadedHandshakes,
+            pendingHandshakes = _pendingHandshakes, handshakeQueueMs = Metrics.TlsHandshakeQueueTicks * 1000 / Stopwatch.Frequency,
+            gracefulTimeouts = Metrics.GracefulTimeouts, connectionErrors = Metrics.ConnectionErrors, firstConnectionError = Metrics.FirstConnectionError,
+            tlsCloseNotify = Metrics.TlsCloseNotify, waitMs = WaitTicks * 1000 / Stopwatch.Frequency,
+            tlsEncryptCalls = Metrics.TlsEncryptCalls, tlsDecryptCalls = Metrics.TlsDecryptCalls, tlsSendCopyBytes = Metrics.TlsSendCopyBytes,
+            tlsPlaintextBytes = Metrics.TlsPlaintextBytes, sentBytes = Metrics.SentBytes, receivedBytes = Metrics.ReceivedBytes,
+            states = _connections.Values.GroupBy(state => state.Describe(now)).ToDictionary(group => group.Key, group => group.Count()),
+        }));
     }
 
     private void DrainCommands(int budget)

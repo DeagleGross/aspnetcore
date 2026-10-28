@@ -15,7 +15,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 internal sealed class ConnectionState : IDisposable
 {
     private readonly WindowsWorker _worker;
-    private readonly SchannelConnection? _tls;
+    private readonly IWindowsTlsConnection? _tls;
     private IMemoryOwner<byte>? _receiveOwner;
     private MemoryHandle _receivePin;
     private ReadOnlyMemory<byte> _sendMemory;
@@ -41,6 +41,12 @@ internal sealed class ConnectionState : IDisposable
     internal bool Closing => _closing;
     internal int Leased => _leased;
     internal bool Published { get => _published; set => _published = value; }
+
+    internal string Describe(long now)
+    {
+        var age = now - (_handshakeDeadline - 10000);
+        return $"tls={(_tls is null ? "-" : _tls.Authenticated ? "done" : _tls.HandshakePending ? "offload" : "pending")} pub={(_published ? 1 : 0)} rd={(Read.Outstanding ? 1 : 0)} wr={(Write.Outstanding ? 1 : 0)} lease={_leased} buf={(_tls is { BufferedCiphertext: > 0 } ? "Y" : "0")} closing={(_closing ? 1 : 0)} eof={(_readEof ? 1 : 0)} age={(age < 1000 ? "<1s" : age < 5000 ? "<5s" : ">=5s")}";
+    }
 
     internal void OutputQueued()
     {
@@ -70,7 +76,8 @@ internal sealed class ConnectionState : IDisposable
         RemoteEndPoint = Native.GetEndPoint(socket, peer: true);
         Read = new IoOperation(this, IoKind.Receive);
         Write = new IoOperation(this, IoKind.Send);
-        _tls = worker.TlsCredential is { } credential ? new SchannelConnection(worker, this, credential) : null;
+        _tls = worker.TlsSession is { } session ? new TlsSessionConnection(worker, this, session)
+            : worker.TlsCredential is { } credential ? new SchannelConnection(worker, this, credential) : null;
         Application = worker.Shared ? ProviderNetworkConnection.ForWindows(worker, this) : new Connection(worker, this);
     }
 
