@@ -47,6 +47,8 @@ Raw TCP uses provided-buffer multishot receive and ordinary send SQEs. Fd TLS us
 
 Through the shared `NetworkEngine` API, the io_uring engine with `NativeTls` now defaults to the custom-BIO (ring-owned ciphertext) path, so io_uring performs all socket I/O and OpenSSL never touches the fd. `NETWORKPROTO_URING_TLS=fd` selects the previous fd-bound OpenSSL path; `NETWORKPROTO_KTLS=1` also selects it because a custom BIO cannot use kTLS. The handshake-prefix callback observes the first received ciphertext page in BIO mode (previously this combination threw). Matched results are in [SHARED-API.md](../../SHARED-API.md#linux-io_uring-tls-ring-owned-ciphertext-2026-10-21); `scripts/uring-tls-ab.sh` reproduces the stock/fd/ring comparison.
 
+`NETWORKPROTO_LINUX_TLS_IMPL=session` (October 28) selects a third TLS mode: the runtime's experimental fd-bound `TlsSocketSession` ([dotnet/runtime#128871](https://github.com/dotnet/runtime/issues/128871)) through `SessionTls.cs`. The ring supplies readiness only (`ReadPoll`/`WritePoll`), exactly as in `NETWORKPROTO_URING_TLS=fd`, so this mode forces the layered BIO path off. It cannot satisfy `NETWORKPROTO_KTLS=1` and throws if kTLS is required. A server `TlsSocketSession` reports `Closed` after it has written `close_notify` directly to the fd; the adapter maps that to success. Off by default.
+
 ## Completion, buffer, and descriptor ownership
 
 CQEs use connection IDs and operation-kind tokens rather than native object pointers. Each connection tracks original read/write/shutdown operations separately from cancellation acknowledgments. A cancel completion is not permission to free the original operation; multishot remains live while `IORING_CQE_F_MORE` is present.

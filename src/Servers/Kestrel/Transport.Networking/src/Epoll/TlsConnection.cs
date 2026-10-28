@@ -8,10 +8,11 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
 // Only the owning epoll thread mutates TLS and readiness state.
-internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint session) : ConnectionState(id)
+internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint session, SessionTls? managed = null) : ConnectionState(id)
 {
     private int _fd = fd;
     private nint _session = session;
+    private SessionTls? _managed = managed;
     private bool _registered, _handshake, _closeRequested, _readPaused, _pending, _finalSend;
     private int _readPage = -1, _sendLength, _sendOffset;
     private nint _sendData;
@@ -192,7 +193,16 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
 
     private Native.TlsResult Call(Native.TlsOperation operation, nint data = 0, int length = 0)
     {
-        Native.Tls(_session, operation, data, length, out var result);
+        Native.TlsResult result;
+        if (_managed is { } managedSession)
+        {
+            var managedResult = managedSession.Call((SessionTlsOperation)operation, data, length);
+            result = new Native.TlsResult { Status = (Native.TlsStatus)managedResult.Status, Length = managedResult.Length, Pending = managedResult.Pending ? 1 : 0 };
+        }
+        else
+        {
+            Native.Tls(_session, operation, data, length, out result);
+        }
         if (result.Status == Native.TlsStatus.Complete)
         {
             _pending = result.Pending != 0;
@@ -225,7 +235,7 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
                 return false;
             default:
                 engine.Metrics.TlsErrors++;
-                var error = new IOException($"OpenSSL operation failed: status={result.Status}, errno={result.Error}, reason=0x{result.Reason:x}.");
+                var error = new IOException($"OpenSSL operation failed: status={result.Status}, errno={result.Error}, reason=0x{result.Reason:x}.", _managed?.LastError);
                 engine.Logger.LogError(error, "Epoll TLS connection failed.");
                 Finish(error);
                 return false;
@@ -379,7 +389,15 @@ internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint s
                 engine.Logger.LogError("Epoll socket shutdown failed: {Error}", result);
             }
             engine.CloseDescriptor(ref _fd);
-            Native.FreeSession(_session);
+            if (_managed is not null)
+            {
+                _managed.Dispose();
+                _managed = null;
+            }
+            else
+            {
+                Native.FreeSession(_session);
+            }
             _session = 0;
             _sendData = 0;
             engine.Metrics.Closed++;

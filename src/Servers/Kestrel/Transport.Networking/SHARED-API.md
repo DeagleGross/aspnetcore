@@ -59,7 +59,7 @@ Pipe output and `SendAsync`/`EnqueueSend` are **alternative modes**, not concurr
 | Consume a raw prefix, then TLS | Consume only the parsed prefix; leave any prefetched TLS bytes; authenticate | A real client sent a raw prefix plus ClientHello. TLS plaintext, replies, `close_notify` and native drain passed on all four providers. |
 | STARTTLS-style server greeting | Write the greeting through `connection.Output`, then hand off to TLS | Composes with pipe mode; the complete greeting/negotiation protocol was not separately exercised. Direct `SendAsync` before TLS would select the incompatible direct-send mode. |
 | Ordinary TLS / Kestrel HTTPS | Install `SslStream` directly, or use Kestrel `UseHttps` above the TCP adapter | Explicit wrapper path: OpenSSL through `SslStream` on Linux, SChannel on Windows. Distinct from transport-owned `NativeTls`. |
-| Transport-owned TLS | Set `NetworkListenOptions.NativeTls` when binding | Linux epoll: fd-bound OpenSSL; Linux io_uring: ring-owned ciphertext through a custom BIO by default (`NETWORKPROTO_URING_TLS=fd`, or `NETWORKPROTO_KTLS=1`, selects fd-bound OpenSSL); both TLS 1.2. Windows: worker-owned SChannel (TLS 1.3). Authenticated plaintext is published. No server `SslStream` or arbitrary pre-TLS upgrade. |
+| Transport-owned TLS | Set `NetworkListenOptions.NativeTls` when binding | Linux epoll: fd-bound OpenSSL; Linux io_uring: ring-owned ciphertext through a custom BIO by default (`NETWORKPROTO_URING_TLS=fd`, or `NETWORKPROTO_KTLS=1`, selects fd-bound OpenSSL); both TLS 1.2. `NETWORKPROTO_LINUX_TLS_IMPL=session` makes both Linux providers use the runtime's fd-bound `TlsSocketSession` instead of the native OpenSSL wrapper. Windows: worker-owned SChannel (TLS 1.3). Authenticated plaintext is published. No server `SslStream` or arbitrary pre-TLS upgrade. |
 
 ### Peeking before native TLS
 
@@ -159,6 +159,23 @@ Counterbalanced, three rounds, medians; same WSL host, four server cores, twelve
 TCP-only io_uring in the same batch: short 64,109 vs stock 50,176 (+27.8%), long 286,599 vs 261,378 (+9.6%). Mid-run `/proc/<pid>/io` sampling showed about 3.2 `read`+`write` syscalls per request for fd-bound OpenSSL and about zero for ring-owned. TLS short is dominated by the RSA-2048 handshake, so the ring change is not expected to move it much. Ring-owned mode costs another 32 MiB of pinned ciphertext storage per worker.
 
 [Exact metrics and profile boundaries](src/Shared/shared-results-20261007.json); raw/rejected logs remain in ignored artifact folders.
+
+### Linux TLS: runtime `TlsSocketSession` vs native OpenSSL (2026-10-28)
+
+`NETWORKPROTO_LINUX_TLS_IMPL=session` swaps only the TLS state machine in both Linux providers for the runtime's experimental fd-bound `TlsSocketSession` ([dotnet/runtime#128871](https://github.com/dotnet/runtime/issues/128871)); readiness, page ownership and TCP are unchanged, and TCP needs no setting. Both providers keep the fixed TLS 1.2 / `ECDHE-RSA-AES128-GCM-SHA256` / no-resumption policy. Close-notify was verified with a Python client using `suppress_ragged_eofs=False` against a negative-control server; file-descriptor counts stay flat (a constant +3 per process for the session variants).
+
+Local WSL, loopback, server pinned to 2 CPUs (`DOTNET_PROCESSOR_COUNT=2`, 2 workers), `wrk` -t8 -c256 on 8 other CPUs, 3 s warmup, 10 s measurement, 3 interleaved reps, means; reported, not independently reproduced. RPS is computed from monotonic time because WSL2's intermittently stepped realtime clock corrupts `wrk`'s own runtime. Close-mode TCP rows are unreliable because the load generator saturates.
+
+| Mode | Size | epoll session vs native | io_uring session vs fd-bound OpenSSL | io_uring session vs ring/BIO |
+|---|---|---:|---:|---:|
+| keep-alive | 1 KiB | -1.3% | -7.6% | -26.3% |
+| keep-alive | 8 KiB | -3.9% | -5.0% | -24.0% |
+| keep-alive | 64 KiB | -0.9% | -2.1% | +19.3% |
+| close | 1 KiB | -6.4% | -6.3% | -13.4% |
+| close | 8 KiB | -8.3% | -6.6% | -12.4% |
+| close | 64 KiB | -6.0% | -4.5% | -11.6% |
+
+The session variant is therefore a small cost over the native fd-bound wrapper, larger on per-connection handshake work. The cause was not profiled.
 
 ### Layering inversion: no-regression check (2026-10-21)
 

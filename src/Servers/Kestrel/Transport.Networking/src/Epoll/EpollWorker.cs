@@ -36,6 +36,7 @@ internal sealed class EpollWorker
     private readonly Stack<int> _freePages = new(Enumerable.Range(0, PageCount));
     private int _epoll = -1, _listener = -1, _wake = -1, _pumpThread, _wakeScheduled;
     private nint _context;
+    private SessionTlsContext? _sessionContext;
     private bool _disposed, _stopping, _resumePages;
     private ulong _nextId = WakeId;
     private int _pendingRejections;
@@ -102,7 +103,11 @@ internal sealed class EpollWorker
             _pumpThread = Environment.CurrentManagedThreadId;
             ArgumentOutOfRangeException.ThrowIfNegative(_sendBufferSize);
             Native.Check(Native.SetCpu(_cpu), "affinity");
-            if (Tls)
+            if (Tls && SessionTlsContext.IsSelected)
+            {
+                _sessionContext = new SessionTlsContext(certificate, key);
+            }
+            else if (Tls)
             {
                 _context = Native.CreateContext(certificate, key, out var error);
                 if (_context == 0)
@@ -117,7 +122,7 @@ internal sealed class EpollWorker
             Control(Native.Add, _listener, Native.Readable, ListenerId);
             if (Tls)
             {
-                Console.WriteLine($"EPOLL_TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" cpu={_cpu} batch=128 managed=true");
+                Console.WriteLine($"EPOLL_TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" impl={(_sessionContext is null ? "native" : "session")} cpu={_cpu} batch=128 managed=true");
             }
             _started.SetResult();
             var events = new Native.ReadyEvent[128];
@@ -183,6 +188,7 @@ internal sealed class EpollWorker
             {
                 Native.FreeContext(_context);
             }
+            _sessionContext?.Dispose();
             if (OutputPool is { Outstanding: 0 } outputPool)
             {
                 outputPool.Dispose();
@@ -244,6 +250,7 @@ internal sealed class EpollWorker
             Native.Check(fd, "accept");
             Metrics.Accepts++;
             nint session = 0;
+            SessionTls? managed = null;
             try
             {
                 Native.Check(Native.SetSocketOption(fd, Native.SocketOption.NoDelay, 1), "TCP_NODELAY");
@@ -251,7 +258,11 @@ internal sealed class EpollWorker
                 {
                     Native.Check(Native.SetSocketOption(fd, Native.SocketOption.SendBuffer, _sendBufferSize), "SO_SNDBUF");
                 }
-                if (Tls)
+                if (_sessionContext is not null)
+                {
+                    managed = _sessionContext.CreateSession(fd);
+                }
+                else if (Tls)
                 {
                     session = Native.CreateSession(_context, fd, out var error);
                     if (session == 0)
@@ -266,13 +277,14 @@ internal sealed class EpollWorker
                 {
                     Native.FreeSession(session);
                 }
+                managed?.Dispose();
                 CloseDescriptor(ref fd);
                 Metrics.Closed++;
                 throw;
             }
             var id = checked(++_nextId);
             ConnectionState state = Tls
-                ? new TlsConnection(this, id, fd, session)
+                ? new TlsConnection(this, id, fd, session, managed)
                 : new TcpConnection(this, id, fd);
             _connections.Add(state.Id, state);
             state.Drive(Native.Readable | Native.Writable);

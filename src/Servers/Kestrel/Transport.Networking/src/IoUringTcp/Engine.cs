@@ -55,6 +55,10 @@ internal sealed class Engine
     {
         get; private set;
     }
+    internal SessionTlsContext? SessionContext
+    {
+        get; private set;
+    }
     internal bool BioTls => Tls && Layered;
     internal bool FinalSendEnabled => FinalMode != 0;
     internal Task Started => _started.Task;
@@ -66,7 +70,8 @@ internal sealed class Engine
         _endpoint = endpoint;
         _cpu = cpu;
         Tls = tls;
-        Layered = layered;
+        // The runtime's fd-bound TlsSession owns the ciphertext, so the ring-owned BIO layer never applies.
+        Layered = layered && !(tls && SessionTlsContext.IsSelected);
         Logger = logger;
         _accepted = accepted;
         Shared = shared;
@@ -147,7 +152,16 @@ internal sealed class Engine
                     Native.Offer(_ring, Buffer(page, BioTls), PageSize, page);
                 }
             }
-            if (Tls)
+            if (Tls && SessionTlsContext.IsSelected)
+            {
+                if (RequireKtls)
+                {
+                    throw new NotSupportedException("kTLS is not available through the runtime TlsSession.");
+                }
+                SessionContext = new SessionTlsContext(cert, key);
+                Console.WriteLine($"TLS_LIBRARY impl=session managed=true cpu={_cpu}");
+            }
+            else if (Tls)
             {
                 Context = Native.Context(cert, key, RequireKtls ? 1 : 0, out var tlsError);
                 if (Context == 0)
@@ -234,6 +248,7 @@ internal sealed class Engine
             {
                 Native.FreeContext(Context);
             }
+            SessionContext?.Dispose();
 
             GC.KeepAlive(_pageStorage);
             GC.KeepAlive(_cipherStorage);

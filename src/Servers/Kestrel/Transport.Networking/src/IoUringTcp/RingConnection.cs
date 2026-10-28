@@ -24,6 +24,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
     private bool _finalSend, _tlsWriteDone, _shutdownSent, _peerEof, _pending;
     private bool _prefixObserved;
     private nint _session, _bio, _sendData;
+    private SessionTls? _managed;
     private int _sendLength, _sendOffset;
     private readonly Queue<(int Page, int Length)> _cipher = new();
     private int _bioInputPage = -1, _bioInputLength, _cipherBytes;
@@ -40,13 +41,28 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
 
         if (engine.Tls)
         {
-            _session = engine.BioTls
-                ? BioNative.Session(engine.Context, engine.BioMethod, out _bio)
-                : Native.Session(engine.Context, _fd);
-            if (_session == 0)
+            if (engine.SessionContext is { } sessionContext)
             {
-                Fail(new IOException("OpenSSL session creation failed."));
-                return;
+                try
+                {
+                    _managed = sessionContext.CreateSession(_fd);
+                }
+                catch (Exception error)
+                {
+                    Fail(new IOException("TlsSession creation failed.", error));
+                    return;
+                }
+            }
+            else
+            {
+                _session = engine.BioTls
+                    ? BioNative.Session(engine.Context, engine.BioMethod, out _bio)
+                    : Native.Session(engine.Context, _fd);
+                if (_session == 0)
+                {
+                    Fail(new IOException("OpenSSL session creation failed."));
+                    return;
+                }
             }
             DriveTls();
         }
@@ -394,7 +410,16 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             FeedBio();
         }
 
-        Native.Tls(_session, operation, data, length, out var result);
+        Native.TlsResult result;
+        if (_managed is { } managedSession)
+        {
+            var managedResult = managedSession.Call((SessionTlsOperation)operation, data, length);
+            result = new Native.TlsResult { Status = (Native.TlsStatus)managedResult.Status, Length = managedResult.Length, Pending = managedResult.Pending ? 1 : 0 };
+        }
+        else
+        {
+            Native.Tls(_session, operation, data, length, out result);
+        }
         if (operation == Native.TlsOperation.Write && result.Status is Native.TlsStatus.WantRead or Native.TlsStatus.WantWrite)
         {
             engine.Metrics.TlsWriteRetries++;
@@ -444,7 +469,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                     engine.Logger.LogError("OpenSSL failure: errno={Error} reason={Reason}", result.Error, result.Reason);
                 }
 
-                Fail(new IOException($"TLS operation failed: {result.Status}, errno={result.Error}, reason=0x{result.Reason:x}."));
+                Fail(new IOException($"TLS operation failed: {result.Status}, errno={result.Error}, reason=0x{result.Reason:x}.", _managed?.LastError));
                 return false;
         }
     }
@@ -518,7 +543,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             }
 
             _handshake = true;
-            var ktls = Native.Ktls(_session);
+            var ktls = _managed is null ? Native.Ktls(_session) : 0;
             engine.Metrics.Handshakes++;
             if ((ktls & 1) != 0)
             {
@@ -687,7 +712,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                 return;
             }
 
-            if (_session != 0 && _handshake && !_fatal && _sendData == 0)
+            if ((_session != 0 || _managed is not null) && _handshake && !_fatal && _sendData == 0)
             {
                 if (_writeActive)
                 {
@@ -825,6 +850,8 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         }
 
         Native.FreeSession(_session);
+        _managed?.Dispose();
+        _managed = null;
         if (_bio != 0)
         {
             BioNative.Free(_bio);
