@@ -32,12 +32,13 @@ int ep_create(void)
     return fd < 0 ? -errno : fd;
 }
 
-int ep_listener(int port)
+// ipv4 is the address in host byte order (127.0.0.1 is 0x7F000001).
+int ep_listener(uint32_t ipv4, int port)
 {
     int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
     if (fd < 0) return -errno;
     int one = 1;
-    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(ipv4) };
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one))
         || setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one))
         || bind(fd, (struct sockaddr *)&address, sizeof(address)) || listen(fd, 4096)) {

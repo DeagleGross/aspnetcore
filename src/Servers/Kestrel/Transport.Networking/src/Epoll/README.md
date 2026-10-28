@@ -121,7 +121,7 @@ dotnet artifacts/bin/NetworkProtoSample/Release/net11.0/NetworkProtoSample.dll \
 
 The sample expects the existing local test certificate/key. The native epoll library links to OpenSSL and libc, not liburing; building the containing experiment project still builds the neighboring io_uring libraries and therefore retains that project's existing liburing prerequisite.
 
-Scope limits: IPv4 loopback and a fixed nonzero port, TLS 1.2 with `ECDHE-RSA-AES128-GCM-SHA256`, no resumption or renegotiation, no TLS 1.3, ALPN/HTTP2, mTLS, callback selection, custom BIO, or kTLS. A nonzero `NETWORKPROTO_KTLS` request fails explicitly. The shared sample's TLS features reflect these fixed settings, not a general negotiated-feature API. PublicAPI.Unshipped tracks the experiment registration, not approval for a framework API.
+Scope limits: an IPv4 address and a fixed nonzero port (IPv6 is not supported), TLS 1.2 with `ECDHE-RSA-AES128-GCM-SHA256`, no resumption or renegotiation, no TLS 1.3, ALPN/HTTP2, mTLS, callback selection, custom BIO, or kTLS. A nonzero `NETWORKPROTO_KTLS` request fails explicitly. The shared sample's TLS features reflect these fixed settings, not a general negotiated-feature API. PublicAPI.Unshipped tracks the experiment registration, not approval for a framework API.
 
 ## Direct worker output and scaling, October 1
 

@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Linq;
@@ -111,7 +112,7 @@ internal sealed class EpollWorker
             }
             _epoll = Native.Check(Native.Create(), "create");
             _wake = Native.Check(Native.CreateWake(), "eventfd");
-            _listener = Native.Check(Native.Listen(_endpoint.Port), "listen");
+            _listener = Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
             Control(Native.Add, _wake, Native.Readable, WakeId);
             Control(Native.Add, _listener, Native.Readable, ListenerId);
             if (Tls)

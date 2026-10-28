@@ -53,7 +53,7 @@ internal static unsafe partial class Native
     [LibraryImport("networkproto2", EntryPoint = "ur_cpu")]
     internal static partial int SetCpu(int cpu);
     [LibraryImport("networkproto2", EntryPoint = "ur_listener")]
-    internal static partial int Listen(int port);
+    internal static partial int Listen(uint ipv4, int port);
     [LibraryImport("networkproto2", EntryPoint = "ur_option")]
     internal static partial int Option(int fd, int option, int value);
     [LibraryImport("networkproto2", EntryPoint = "ur_shutdown")]

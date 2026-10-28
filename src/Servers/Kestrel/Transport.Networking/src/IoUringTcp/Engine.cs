@@ -1,5 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Globalization;
@@ -163,7 +164,7 @@ internal sealed class Engine
                 }
                 Console.WriteLine($"TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" managed=true cpu={_cpu}");
             }
-            _listener = Native.Check(Native.Listen(_endpoint.Port), "listen");
+            _listener = Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
             _wakeFd = Native.Check(Native.EventFd(), "eventfd");
             StartAccept();
             StartWake();

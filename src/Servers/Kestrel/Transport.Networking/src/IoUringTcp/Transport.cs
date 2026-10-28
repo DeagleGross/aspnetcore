@@ -15,9 +15,9 @@ internal sealed class TransportFactory(bool tls, string cert, string key, ILogge
     public async ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip || !IPAddress.IsLoopback(ip.Address))
+        if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip)
         {
-            throw new NotSupportedException("Prototype supports IPv4 loopback and a fixed port only.");
+            throw new NotSupportedException("Prototype supports an IPv4 address and a fixed port only.");
         }
         var listener = new Listener(ip, tls, cert, key, logging.CreateLogger("NetworkProto.Owned"), layered, shared, processors, handshakePrefixCallback);
         await listener.StartAsync().ConfigureAwait(false);

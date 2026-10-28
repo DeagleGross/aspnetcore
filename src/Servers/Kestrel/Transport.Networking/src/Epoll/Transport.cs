@@ -16,10 +16,9 @@ internal sealed class TransportFactory(string certificate, string key, int worke
     public async ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip
-            || !IPAddress.IsLoopback(ip.Address))
+        if (endpoint is not IPEndPoint { AddressFamily: System.Net.Sockets.AddressFamily.InterNetwork, Port: > 0 } ip)
         {
-            throw new NotSupportedException("Epoll requires IPv4 loopback and a fixed nonzero port.");
+            throw new NotSupportedException("Epoll requires an IPv4 address and a fixed nonzero port.");
         }
         var cpus = processors ?? (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") is { } setting
             ? setting.Split(',').Select(value => int.Parse(value, CultureInfo.InvariantCulture)).ToArray()

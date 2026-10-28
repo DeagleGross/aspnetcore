@@ -36,7 +36,7 @@ internal static unsafe partial class Native
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_create")]
     internal static partial int Create();
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_listener")]
-    internal static partial int Listen(int port);
+    internal static partial int Listen(uint ipv4, int port);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_accept")]
     internal static partial int Accept(int listener);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_socket_option")]
