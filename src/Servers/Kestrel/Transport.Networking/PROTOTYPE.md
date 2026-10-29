@@ -99,7 +99,7 @@ The connection is an abstract class. A shared base type implements the receive p
 
 `ReceiveAsync` returns a `NetworkReceiveResult` as soon as there are unconsumed bytes, and waits otherwise. `Buffer` holds every byte that has been received and not yet consumed, as a `ReadOnlySequence<byte>` that can span several provider pages. `IsCompleted` is `true` once the peer has closed its side, and `Buffer` can still hold the final bytes in that same result. A reset or other receive failure makes `ReceiveAsync` throw.
 
-After looking at the bytes, call `AdvanceReceiveTo(consumed)` or `AdvanceReceiveTo(consumed, examined)`:
+After looking at the bytes, call `connection.AdvanceReceiveTo(consumed)` or `connection.AdvanceReceiveTo(consumed, examined)`:
 
 - `consumed` is the position up to which the application is finished with the bytes. The provider can reuse those pages.
 - `examined` is the position up to which the application has looked. If it is the end of the buffer and `consumed` is earlier, the next `ReceiveAsync` waits for new bytes instead of returning the same partial data again. This is how a parser waits for the rest of a message.
@@ -159,3 +159,75 @@ static async Task HandleAsync(NetworkConnection connection)
 ```
 
 `SendAsync` is awaited before `AdvanceReceiveTo`, so the received pages are still valid while the native send uses them. This is the borrowed-bytes contract in practice: the send reads the provider's own receive pages in place, without a copy.
+
+### Pages
+
+A page is a fixed-size block of memory that the transport reads into or sends from. Applications never see pages as a type: they see a `ReadOnlySequence<byte>` when receiving and a `NetworkBuffer` when sending. Pages exist because native I/O needs memory with a stable address for as long as an operation is in flight, and some providers (RIO) need that memory registered with the OS ahead of time. Allocating, pinning or registering memory for every operation would cost more than the I/O itself, so each provider worker owns pools of long-lived pages and lends them out.
+
+#### How pages work
+
+- **Receive pages.** Each worker owns a pool of fixed-size pages (16 KiB in the current prototype). When data arrives, the provider reads it into a free page and publishes that page to the connection it belongs to. The connection keeps its published pages in order, and `ReceiveAsync` exposes them as one `ReadOnlySequence<byte>`. Nothing is copied or joined, so a message that spans two pages is simply two segments of the sequence. `AdvanceReceiveTo` releases the pages that have been consumed.
+- **Reference counting.** Every page has a reference count. The connection's own list holds one reference, and `Retain` adds more. When the last reference is released, the page is queued back to the worker that owns it, and that worker puts it back in its pool.
+- **Backpressure.** A connection can hold only a few unreleased receive pages (four in the current prototype). At that limit the provider stops reading from that connection, and reading resumes when pages come back. A slow consumer therefore pushes back on the peer through TCP flow control instead of the transport buffering without bound.
+- **Output blocks.** Sending uses a separate per-worker pool, and `AllocateBuffer` rents from it (so does the `Output` pipe). Output blocks are not receive pages. Their size is a provider detail and can be larger than requested: a request for 25 bytes returned a 64 KiB block on both IOCP and RIO, and the Linux providers use a 4 KiB minimum. They follow the same reference counting: a block goes back to the pool when its last reference is released, which includes the connection's own reference while a send is in flight.
+
+The memory kind describes what a block is, and it is reported by `NetworkBuffer.Kind`: `Managed` is an ordinary array that the provider pins during the I/O, `Pinned` is address-stable managed memory, `Native` is unmanaged memory, and `Registered` is native memory that is also registered with the provider.
+
+| Provider | Receive pages | Output blocks |
+| --- | --- | --- |
+| IOCP | `Native` | `Native` |
+| RIO | `Registered` | `Registered` |
+| epoll | `Pinned` | `Native` |
+| io_uring | `Pinned` | `Native` |
+
+On the Linux providers the output pool is `Native` by default. If the adaptive output pool is switched off, which is only a benchmark option, output falls back to `Managed`.
+
+#### NetworkBuffer and AllocateBuffer
+
+Three public types carry page ownership, and they all share the same reference count:
+
+- `NetworkBuffer` is one owned, disposable reference to a block. `AllocateBuffer` returns one, and so does `NetworkBuffer.TakeOwnership` when the application wraps its own `IMemoryOwner<byte>`.
+- `NetworkBufferSlice` is a borrowed view of part of a buffer. Copying a slice does not add a reference, but `Retain()` creates an independent `NetworkBuffer` for it.
+- `NetworkPayload` is a retained message from `NetworkReceiveResult.Retain`. It can span several receive pages and has a `Sequence` over them.
+
+`AllocateBuffer` helps in these situations:
+
+- **Building a message in provider-ready memory.** RIO can only send from registered memory, and a borrowed `SendAsync` over memory that is not registered is first copied into a staging block. A block from `AllocateBuffer` is already registered, so the send needs no copy.
+- **Fire-and-forget sends.** `EnqueueSend` takes its own reference, so the caller can dispose its buffer immediately and does not have to await each send or keep the memory alive.
+- **Forwarding received data.** A retained `NetworkPayload` can be passed to `EnqueueSend` as it is, so received pages can be sent without being copied. The `RetainedPages` sample does this.
+
+It is not needed for small constant messages. A `static readonly byte[]` is valid forever, so `SendAsync(array)` is enough, and an allocated block would be much bigger than the message.
+
+#### Example: allocate a buffer and send it
+
+This sends a greeting from a block that the connection allocated. `AllocateBuffer` can return more bytes than requested, so the example sends only the bytes it wrote.
+
+```csharp
+static void SendGreeting(NetworkConnection connection)
+{
+    var text = "hello from the transport\n";
+    using var buffer = connection.AllocateBuffer(Encoding.UTF8.GetMaxByteCount(text.Length));
+    var written = Encoding.UTF8.GetBytes(text, buffer.Memory.Span);
+
+    connection.EnqueueSend(buffer.Slice.Slice(0, written));
+}   // our reference is released here; the connection keeps its own until the send finishes
+```
+
+The same message with `SendAsync` borrows the memory instead, so the buffer has to stay alive until the send completes:
+
+```csharp
+static async Task SendGreetingAsync(NetworkConnection connection)
+{
+    var text = "hello from the transport\n";
+    using var buffer = connection.AllocateBuffer(Encoding.UTF8.GetMaxByteCount(text.Length));
+    var written = Encoding.UTF8.GetBytes(text, buffer.Memory.Span);
+
+    await connection.SendAsync(buffer.Memory[..written]);
+}   // disposed only after the awaited send has finished
+```
+
+Rules for buffers:
+
+- Write into `buffer.Memory` before handing the bytes to the connection, and do not change them afterwards. The connection can read them at any time until the send completes.
+- Dispose each `NetworkBuffer` exactly once. With `EnqueueSend` that can be right after the call. With `SendAsync` it must be after the task completes.
+- A buffer that is never disposed keeps its block out of the pool.
