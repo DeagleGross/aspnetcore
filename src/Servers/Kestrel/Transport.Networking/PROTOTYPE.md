@@ -279,3 +279,7 @@ A few more details:
 - **Protocol.** Schannel is TLS 1.3 by default (`NETWORKPROTO_WINDOWS_TLS=1.2` selects TLS 1.2). The Linux OpenSSL and session contexts are configured for TLS 1.2 with `ECDHE-RSA-AES128-GCM-SHA256`, with no tickets and no session cache.
 - **Backpressure.** The limit of four unreleased plaintext pages applies to decrypted pages too. At the limit the provider stops decrypting buffered ciphertext and stops reading, and both resume when a page is returned.
 - **Page kinds.** Plaintext pages are `Registered` on RIO, `Native` on IOCP and `Pinned` on io_uring, as in the table in the Pages section.
+
+#### Other Windows I/O APIs
+
+The prototype does not use `ProcessSocketNotifications` or Windows I/O rings. What the public documentation says about them is in [Windows I/O options](Windows%20IO%20options.md).
