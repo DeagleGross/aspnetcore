@@ -206,26 +206,28 @@ internal static class BedrockChecks
             {
                 var upload = new byte[size];
                 Random.Shared.NextBytes(upload);
-                using var response = await client.PostAsync($"http://127.0.0.1:{port}/echo", new ByteArrayContent(upload)).WaitAsync(Timeout);
-                var echoed = await response.Content.ReadAsByteArrayAsync().WaitAsync(Timeout);
-                Require(echoed.AsSpan().SequenceEqual(upload), $"POST echo of {size} bytes differs");
+                try
+                {
+                    using var response = await client.PostAsync($"http://127.0.0.1:{port}/echo", new ByteArrayContent(upload)).WaitAsync(Timeout);
+                    var echoed = await response.Content.ReadAsByteArrayAsync().WaitAsync(Timeout);
+                    Require(echoed.AsSpan().SequenceEqual(upload), $"POST echo of {size} bytes differs");
+                }
+                catch (TimeoutException ex)
+                {
+                    throw new TimeoutException($"POST echo of {size} bytes timed out", ex);
+                }
             }
             Require(Volatile.Read(ref viaNetwork) == 1, $"expected one pooled keep-alive connection via the network transport, saw {viaNetwork}");
 
             var detail = $"55 requests over {viaNetwork} connection(s), uploads of 1 KiB..1 MiB echoed";
-            using (var direct = new HttpClient(new SocketsHttpHandler { UseProxy = false }.UseConnectionFactory(factory, receiveBufferBytes: 0)))
+            using (var readAhead = new HttpClient(new SocketsHttpHandler { UseProxy = false }.UseConnectionFactory(factory, receiveBufferBytes: 1024 * 1024)))
             {
-                var stalled = false;
-                try
-                {
-                    using var response = await direct.PostAsync($"http://127.0.0.1:{port}/echo", new ByteArrayContent(new byte[1024 * 1024 + 3])).WaitAsync(TimeSpan.FromSeconds(5));
-                    await response.Content.ReadAsByteArrayAsync().WaitAsync(TimeSpan.FromSeconds(5));
-                }
-                catch (TimeoutException)
-                {
-                    stalled = true;
-                }
-                detail += stalled ? "; without read-ahead a 1 MiB echo stalls (expected)" : "; without read-ahead a 1 MiB echo completed";
+                var upload = new byte[1024 * 1024 + 3];
+                Random.Shared.NextBytes(upload);
+                using var response = await readAhead.PostAsync($"http://127.0.0.1:{port}/echo", new ByteArrayContent(upload)).WaitAsync(Timeout);
+                var echoed = await response.Content.ReadAsByteArrayAsync().WaitAsync(Timeout);
+                Require(echoed.AsSpan().SequenceEqual(upload), "POST echo through the read-ahead adapter differs");
+                detail += "; the explicit 1 MiB read-ahead overload echoed too";
             }
             if (port6 != 0)
             {

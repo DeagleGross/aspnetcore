@@ -20,7 +20,9 @@ internal sealed class ConnectionState : IDisposable
     private MemoryHandle _receivePin;
     private ReadOnlyMemory<byte> _sendMemory;
     private nint _sendAddress;
-    private int _sendOffset, _leased;
+    private int _sendOffset, _leased, _leasedBytes, _receiveBlock = NativeMemoryPool.DefaultPageSize;
+    // The client budget counts received bytes per leased page (pages release in order), because a block holds a fraction of its size when completions are small.
+    private Queue<int>? _leasedCounts;
     private bool _closing, _signalled, _readEof, _ready, _forgotten, _sendShutdown;
     private long _shutdownDeadline;
     private Exception? _error;
@@ -81,9 +83,11 @@ internal sealed class ConnectionState : IDisposable
         Application = worker.Shared ? ProviderNetworkConnection.ForWindows(worker, this) : new Connection(worker, this);
     }
 
+    private bool AtLeaseLimit => _worker.Client ? _leasedBytes >= _worker.ClientLeaseBytes : _leased >= 4;
+
     internal unsafe void StartRead()
     {
-        if (_closing || _readEof || Read.Outstanding || _leased >= 4)
+        if (_closing || _readEof || Read.Outstanding || AtLeaseLimit)
         {
             return;
         }
@@ -105,7 +109,7 @@ internal sealed class ConnectionState : IDisposable
             }
             else
             {
-                _receiveOwner = _worker.InputPool.TryRent();
+                _receiveOwner = _worker.InputPool.TryRent(_receiveBlock);
                 if (_receiveOwner is null)
                 {
                     _worker.WaitForPool(this);
@@ -194,6 +198,10 @@ internal sealed class ConnectionState : IDisposable
             return;
         }
         _worker.Metrics.ReceivedBytes += count;
+        if (count == owner.Memory.Length && _receiveBlock < _worker.MaxReceiveBlock)
+        {
+            _receiveBlock = Math.Min(_receiveBlock * 2, _worker.MaxReceiveBlock);
+        }
         PublishPlaintext(owner, count);
         StartRead();
     }
@@ -201,8 +209,13 @@ internal sealed class ConnectionState : IDisposable
     internal void PublishPlaintext(IMemoryOwner<byte> owner, int count)
     {
         _leased++;
+        if (_worker.Client)
+        {
+            (_leasedCounts ??= new()).Enqueue(count);
+            _leasedBytes += count;
+        }
         _worker.Metrics.MaxLeasedPages = Math.Max(_worker.Metrics.MaxLeasedPages, _leased);
-        if (_leased == 4)
+        if (AtLeaseLimit)
         {
             _worker.Metrics.ReceiveBackpressure++;
         }
@@ -224,6 +237,10 @@ internal sealed class ConnectionState : IDisposable
         }
         owner.Dispose();
         _leased--;
+        if (_leasedCounts is not null && _leasedCounts.TryDequeue(out var leasedBytes))
+        {
+            _leasedBytes -= leasedBytes;
+        }
         try
         {
             _tls?.ResumeInput();

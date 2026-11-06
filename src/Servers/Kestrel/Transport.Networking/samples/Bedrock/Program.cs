@@ -117,14 +117,21 @@ internal static class BedrockBenchmark
         var warmup = TimeSpan.FromSeconds(arguments.Get("warmup", 3));
         var expected = arguments.Get("body-bytes", 1024);
         var workers = arguments.Get("workers", 2);
-        var readAhead = arguments.Get("read-ahead", 1024 * 1024);
+        var readAhead = arguments.Get("read-ahead", -1);
 
         NetworkTransportFactory? factory = null;
         var handler = new SocketsHttpHandler { UseProxy = false, MaxConnectionsPerServer = int.MaxValue, PooledConnectionLifetime = System.Threading.Timeout.InfiniteTimeSpan };
         if (handlerName != "sockets")
         {
             factory = new NetworkTransportFactory(Backends.Create(handlerName, workers));
-            handler.UseConnectionFactory(factory, readAhead);
+            if (readAhead < 0)
+            {
+                handler.UseConnectionFactory(factory);
+            }
+            else
+            {
+                handler.UseConnectionFactory(factory, readAhead);
+            }
         }
         using var client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -197,7 +204,7 @@ internal static class BedrockBenchmark
         var p50 = requests == 0 ? 0 : all[requests / 2];
         var p99 = requests == 0 ? 0 : all[(int)(requests * 0.99)];
         var cpuPerKiloRequest = requests == 0 ? 0 : cpu.TotalMilliseconds * 1000 / requests;
-        Console.WriteLine($"RESULT handler={handlerName} readAhead={(handlerName == "sockets" ? "n/a" : readAhead.ToString(System.Globalization.CultureInfo.InvariantCulture))} connections={connections} body={expected} requests={requests} rps={rps:F0} cpuMsPer1kReq={cpuPerKiloRequest:F2} p50us={p50} p99us={p99} errors={errors} workingSetMB={process.WorkingSet64 / (1024 * 1024)}");
+        Console.WriteLine($"RESULT handler={handlerName} readAhead={(handlerName == "sockets" ? "n/a" : readAhead < 0 ? "default" : readAhead.ToString(System.Globalization.CultureInfo.InvariantCulture))} connections={connections} body={expected} requests={requests} rps={rps:F0} cpuMsPer1kReq={cpuPerKiloRequest:F2} p50us={p50} p99us={p99} errors={errors} workingSetMB={process.WorkingSet64 / (1024 * 1024)}");
 
         if (factory is not null)
         {

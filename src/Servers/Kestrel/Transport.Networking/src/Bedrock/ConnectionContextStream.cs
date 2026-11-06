@@ -9,9 +9,10 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 /// <summary>
 /// A stream that owns a connection and reads and writes through its duplex pipe.
-/// The transport stops receiving once a few pages are leased and unconsumed, so a consumer that writes a large message
-/// before it reads (HTTP/1.1 request bodies) can deadlock against a peer that echoes. A read-ahead buffer drains the leased
-/// pages into a bounded local pipe and plays the role the kernel receive buffer plays for a socket.
+/// A consumer that writes a large message before it reads (HTTP/1.1 request bodies) can deadlock against a peer that echoes
+/// if the receive side stops once a few pages are leased and unconsumed. A native client connection bounds its own receive
+/// window by bytes, so it needs no read-ahead and reads straight from the pipe. For any other connection, an optional
+/// read-ahead buffer drains the pipe into a bounded local pipe and plays the role the kernel receive buffer plays for a socket.
 /// </summary>
 internal sealed class ConnectionContextStream : Stream
 {

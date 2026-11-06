@@ -2,7 +2,7 @@
 # Usage (from the repository root, after `. ./activate.ps1` and a Release build of Bedrock.csproj):
 #   pwsh -NoProfile -File src\Servers\Kestrel\Transport.Networking\samples\Bedrock\run-bench.ps1 -Plan client -Out <dir>
 # Plans:
-#   client - plain sockets server (default cpus 16-31); client handler varies (sockets / iocp / rio, with and without read-ahead), client on cpus 0-7.
+#   client - plain sockets server (default cpus 16-31); client handler varies (sockets / iocp / rio; read-ahead -1 is the default UseConnectionFactory overload), client on cpus 0-7.
 #   server - plain SocketsHttpHandler client (default cpus 16-31); server registration varies (sockets / AddNetworkTransport / UseNetworkTransport), server on cpus 0-3.
 #   both   - Bedrock transport on both sides (server cpus 0-7, client cpus 16-31).
 param(
@@ -14,10 +14,11 @@ param(
     [int]$Connections = 64,
     [int[]]$Bodies = @(1024, 8192, 65536),
     [int]$Port = 5443,
-    [int]$ClientWorkers = 2,
+    [int]$ClientWorkers = 8,
     [int]$ServerWorkers = 4,
     [string]$ServerCpus = '',
-    [string]$ClientCpus = ''
+    [string]$ClientCpus = '',
+    [string[]]$Cells = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -97,7 +98,6 @@ function Invoke-Cell($rep, $server, $registration, $client, $readAhead, $body, $
     }
 }
 
-$mib = 1048576
 $defaults = @{ client = @('16-31', '0-7'); server = @('0-3', '16-31'); both = @('0-7', '16-31') }
 if ($ServerCpus -eq '')
 {
@@ -115,8 +115,12 @@ for ($rep = 1; $rep -le $Reps; $rep++)
         {
             'client'
             {
-                foreach ($c in @(@('sockets', $mib), @('iocp', $mib), @('iocp', 0), @('rio', $mib), @('rio', 0)))
+                foreach ($c in @(@('sockets', -1), @('iocp', -1), @('rio', -1)))
                 {
+                    if ($Cells.Count -gt 0 -and "$($c[0]):$($c[1])" -notin $Cells)
+                    {
+                        continue
+                    }
                     Invoke-Cell $rep 'sockets' 'bedrock' $c[0] $c[1] $body $ServerCpus $ClientCpus
                 }
             }
@@ -124,12 +128,12 @@ for ($rep = 1; $rep -le $Reps; $rep++)
             {
                 foreach ($s in @(@('sockets', 'bedrock'), @('iocp', 'bedrock'), @('iocp', 'legacy'), @('rio', 'bedrock'), @('rio', 'legacy')))
                 {
-                    Invoke-Cell $rep $s[0] $s[1] 'sockets' $mib $body $ServerCpus $ClientCpus
+                                    Invoke-Cell $rep $s[0] $s[1] 'sockets' -1 $body $ServerCpus $ClientCpus
                 }
             }
             'both'
             {
-                foreach ($p in @(@('sockets', 'sockets', $mib), @('iocp', 'iocp', $mib), @('iocp', 'iocp', 0), @('rio', 'rio', $mib), @('rio', 'rio', 0)))
+                foreach ($p in @(@('sockets', 'sockets', -1), @('iocp', 'iocp', -1), @('rio', 'rio', -1)))
                 {
                     Invoke-Cell $rep $p[0] 'bedrock' $p[1] $p[2] $body $ServerCpus $ClientCpus
                 }

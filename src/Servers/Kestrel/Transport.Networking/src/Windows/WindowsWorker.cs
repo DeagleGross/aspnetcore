@@ -62,7 +62,10 @@ internal sealed class WindowsWorker
     internal TlsSessionServer? TlsSession => _listener.TlsSession;
     internal HandshakeScheduler? Handshakes => _listener.Handshakes;
     internal bool IsCurrentThread => Environment.CurrentManagedThreadId == _threadId;
-    internal bool ZeroByteReads { get; } = Environment.GetEnvironmentVariable("NETWORKPROTO_IOCP_ZERO_BYTE") != "0";
+    internal bool ZeroByteReads { get; }
+    internal bool Client => _listener.Client;
+    internal int ClientLeaseBytes { get; } = ReadKnob("NETWORKPROTO_CLIENT_LEASE_BYTES", 1024 * 1024);
+    internal int MaxReceiveBlock { get; }
     internal NativeMemoryPool InputPool { get; private set; } = null!;
     internal NativeMemoryPool OutputPool { get; private set; } = null!;
     internal ILogger Logger { get; }
@@ -81,7 +84,11 @@ internal sealed class WindowsWorker
         _poolSettings = pool;
         _trimIdleMs = pool.IdleTrimDelay == Timeout.InfiniteTimeSpan ? 0 : Math.Max(1, (long)pool.IdleTrimDelay.TotalMilliseconds);
         ArgumentOutOfRangeException.ThrowIfNegative(_sendBufferSize);
+        MaxReceiveBlock = listener.Client ? ReadKnob("NETWORKPROTO_CLIENT_MAX_RECEIVE_BLOCK", 262144) : NativeMemoryPool.DefaultPageSize;
+        ZeroByteReads = Environment.GetEnvironmentVariable("NETWORKPROTO_IOCP_ZERO_BYTE") is { } zeroByte ? zeroByte != "0" : !listener.Client;
     }
+
+    private static int ReadKnob(string name, int fallback) => int.TryParse(Environment.GetEnvironmentVariable(name), CultureInfo.InvariantCulture, out var value) && value > 0 ? value : fallback;
 
     internal void Start()
     {
