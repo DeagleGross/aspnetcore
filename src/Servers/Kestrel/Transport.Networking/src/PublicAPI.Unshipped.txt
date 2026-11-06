@@ -6,6 +6,20 @@ Microsoft.AspNetCore.Hosting.OwnedTransportExtensions
 Microsoft.AspNetCore.Hosting.WebHostBuilderIoUringExtensions
 Microsoft.AspNetCore.Hosting.WindowsTransportExtensions
 System.Net.Transport.NetworkEngineFactory
+Microsoft.Extensions.DependencyInjection.NetworkTransportServiceCollectionExtensions
+System.Net.Transport.INetworkConnectionFeature
+System.Net.Transport.INetworkConnectionFeature.Connection.get -> System.Net.Transport.NetworkConnection!
+System.Net.Transport.NetworkTransportFactory
+System.Net.Transport.NetworkTransportFactory.BindAsync(System.Net.EndPoint! endpoint, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<Microsoft.AspNetCore.Connections.IConnectionListener!>
+System.Net.Transport.NetworkTransportFactory.CanBind(System.Net.EndPoint! endpoint) -> bool
+System.Net.Transport.NetworkTransportFactory.ConnectAsync(System.Net.EndPoint! endpoint, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<Microsoft.AspNetCore.Connections.ConnectionContext!>
+System.Net.Transport.NetworkTransportFactory.DisposeAsync() -> System.Threading.Tasks.ValueTask
+System.Net.Transport.NetworkTransportFactory.Kind.get -> System.Net.Transport.NetworkEngineKind
+System.Net.Transport.NetworkTransportFactory.NetworkTransportFactory(System.Net.Transport.NetworkEngineOptions! options, Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null, System.Net.Transport.NetworkNativeTlsOptions? nativeTls = null) -> void
+System.Net.Transport.NetworkTransportHttpExtensions
+static Microsoft.Extensions.DependencyInjection.NetworkTransportServiceCollectionExtensions.AddNetworkTransport(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Net.Transport.NetworkEngineOptions! options, System.Net.Transport.NetworkNativeTlsOptions? nativeTls = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+static System.Net.Transport.NetworkTransportHttpExtensions.UseConnectionFactory(this System.Net.Http.SocketsHttpHandler! handler, Microsoft.AspNetCore.Connections.IConnectionFactory! factory) -> System.Net.Http.SocketsHttpHandler!
+static System.Net.Transport.NetworkTransportHttpExtensions.UseConnectionFactory(this System.Net.Http.SocketsHttpHandler! handler, Microsoft.AspNetCore.Connections.IConnectionFactory! factory, int receiveBufferBytes) -> System.Net.Http.SocketsHttpHandler!
 static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTcp(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.EpollTransportExtensions.UseEpollTls(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, string! certificatePath, string! keyPath, int workerCount = 4) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.LayeredTransportExtensions.UseIoUringBio(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! builder, bool tls, string! certificatePath, string! keyPath) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!

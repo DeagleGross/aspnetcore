@@ -287,3 +287,7 @@ The prototype does not use `ProcessSocketNotifications` or Windows I/O rings. Wh
 #### Scaling and memory
 
 How the providers behave when CPUs or memory are added after start is in [ScalingCapabilities.md](ScalingCapabilities.md). What they cost in memory, per connection and after a burst, is in [MemoryFootprint.md](MemoryFootprint.md).
+
+#### Project Bedrock
+
+An experiment that reaches the providers through `IConnectionListenerFactory` and `IConnectionFactory`, and uses them as the connect side of `SocketsHttpHandler`, is in [Bedrock.md](Bedrock.md).

@@ -16,13 +16,16 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 /// The Kestrel view of a <see cref="NetworkConnection"/>. This and <see cref="RawKestrelListenerFactory"/> are the only
 /// places the shared path touches a Kestrel connection type: providers and workers publish Kestrel-free connections.
 /// </summary>
-internal sealed class KestrelConnectionContext : DefaultConnectionContext
+internal sealed class KestrelConnectionContext : DefaultConnectionContext, INetworkConnectionFeature
 {
     private readonly NetworkConnection _network;
+
+    public NetworkConnection Connection => _network;
 
     internal KestrelConnectionContext(NetworkConnection network) : base(network.Id)
     {
         _network = network;
+        Features.Set<INetworkConnectionFeature>(this);
         LocalEndPoint = network.LocalEndPoint;
         RemoteEndPoint = network.RemoteEndPoint;
         ConnectionClosed = network.ConnectionClosed;

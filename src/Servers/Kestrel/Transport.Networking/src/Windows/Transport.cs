@@ -48,6 +48,57 @@ internal sealed class TransportFactory(bool rio, int workerCount, ILoggerFactory
     }
 }
 
+internal sealed class WindowsClient : IProviderClient
+{
+    private readonly WindowsListener _host;
+
+    private WindowsClient(WindowsListener host) => _host = host;
+
+    internal static async ValueTask<WindowsClient> CreateAsync(bool rio, int workerCount, ILoggerFactory logging, int[]? processors, WindowsPoolSettings? pool,
+        CancellationToken cancellationToken)
+    {
+        Native.ValidatePlatform();
+        var cpus = processors ?? Enumerable.Repeat(-1, workerCount).ToArray();
+        var host = new WindowsListener(null, rio, cpus, logging.CreateLogger(rio ? "NetworkProto.Rio.Client" : "NetworkProto.Iocp.Client"), shared: true, nativeTls: null,
+            pool ?? WindowsPoolSettings.Default);
+        try
+        {
+            await host.StartAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            return new WindowsClient(host);
+        }
+        catch
+        {
+            await host.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    public async ValueTask<IProviderConnection> ConnectAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
+    {
+        if (endpoint is not IPEndPoint { AddressFamily: AddressFamily.InterNetwork } ip)
+        {
+            throw new NotSupportedException("The Windows prototypes currently connect to IPv4 TCP endpoints only.");
+        }
+        var socket = Native.CreateSocket(_host.IsRio);
+        // The prototype connects with a blocking connect() on the thread pool: connection setup is not the measured path.
+        var connect = Task.Run(() => Native.Connect(socket, ip), CancellationToken.None);
+        try
+        {
+            await connect.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            _ = connect.ContinueWith(static (_, state) => ((SocketHandle)state!).Dispose(), socket, TaskScheduler.Default);
+            throw;
+        }
+        var completion = new TaskCompletionSource<IProviderConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _host.Connected(socket, completion);
+        return await completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public ValueTask DisposeAsync() => _host.DisposeAsync();
+}
+
 internal sealed class WindowsListener : IProviderListener
 {
     private readonly WinsockSession _winsock;
@@ -67,18 +118,22 @@ internal sealed class WindowsListener : IProviderListener
 
     internal SocketHandle Socket { get; }
     internal bool PoolAccept { get; }
+    internal bool Client { get; }
+    internal bool IsRio => _rio;
     internal bool Shared { get; }
     internal Schannel.Credential? TlsCredential { get; }
     internal TlsSessionServer? TlsSession { get; }
     internal HandshakeScheduler? Handshakes { get; }
     public EndPoint EndPoint { get; }
 
-    internal WindowsListener(IPEndPoint endpoint, bool rio, int[] cpus, ILogger logger, bool shared, NetworkNativeTlsOptions? nativeTls, WindowsPoolSettings pool)
+    // A null endpoint creates a client host: the same workers and pools, but no listening socket and no AcceptEx. Socket is then only a probe that loads the RIO function table.
+    internal WindowsListener(IPEndPoint? endpoint, bool rio, int[] cpus, ILogger logger, bool shared, NetworkNativeTlsOptions? nativeTls, WindowsPoolSettings pool)
     {
         Shared = shared;
+        Client = endpoint is null;
         _rio = rio;
         _logger = logger;
-        PoolAccept = Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_ACCEPT") == "pool";
+        PoolAccept = !Client && Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_ACCEPT") == "pool";
         var balance = Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_BALANCE");
         _adaptiveBalance = balance == "adaptive" && !PoolAccept;
         if (int.TryParse(balance, NumberStyles.None, CultureInfo.InvariantCulture, out var share))
@@ -93,8 +148,8 @@ internal sealed class WindowsListener : IProviderListener
             TlsCredential = nativeTls is null || useSession ? null : new Schannel.Credential(nativeTls);
             Handshakes = (TlsCredential is not null || TlsSession is not null) && Environment.GetEnvironmentVariable("NETWORKPROTO_TLS_HANDSHAKE_OFFLOAD") != "0"
                 ? new HandshakeScheduler(cpus.Length) : null;
-            Socket = Native.Listen(endpoint, rio);
-            EndPoint = Native.GetEndPoint(Socket, peer: false);
+            Socket = endpoint is null ? Native.CreateSocket(rio) : Native.Listen(endpoint, rio);
+            EndPoint = endpoint is null ? new IPEndPoint(IPAddress.Any, 0) : Native.GetEndPoint(Socket, peer: false);
             var api = rio ? new RioApi(Socket) : null;
             _workers = cpus.Select((cpu, index) => new WindowsWorker(this, index, cpu, api, logger, pool)).ToArray();
         }
@@ -183,6 +238,14 @@ internal sealed class WindowsListener : IProviderListener
     }
 
     internal bool Publish(IProviderConnection connection) => _accepted.Writer.TryWrite(connection);
+
+    // Outbound sockets are connected by the caller and adopted by a worker exactly like accepted ones, except that the worker completes the caller instead of publishing.
+    internal void Connected(SocketHandle socket, TaskCompletionSource<IProviderConnection> completion)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _unbound) != 0, this);
+        var index = (uint)Interlocked.Increment(ref _nextWorker) % (uint)_workers.Length;
+        _workers[index].Enqueue(new WindowsWorker.Command(WindowsWorker.CommandKind.Accepted, Socket: socket, Connect: completion));
+    }
 
     internal void Failed(Exception error)
     {

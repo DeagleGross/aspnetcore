@@ -19,7 +19,8 @@ internal sealed class WindowsWorker
 {
     internal enum CommandKind { Accepted, OutputReady, ReturnPage, Close, Forget, Unbind, Stop, DisposalCompleted, HandshakeCompleted }
     internal readonly record struct Command(CommandKind Kind, ConnectionState? State = null,
-        IMemoryOwner<byte>? Page = null, SocketHandle? Socket = null, Exception? Error = null);
+        IMemoryOwner<byte>? Page = null, SocketHandle? Socket = null, Exception? Error = null,
+        TaskCompletionSource<IProviderConnection>? Connect = null);
 
     private readonly WindowsListener _listener;
     private readonly int _cpu;
@@ -126,7 +127,7 @@ internal sealed class WindowsWorker
                 _completionQueue = _rio.CreateCompletionQueue(_port, _rioNotification, 8192);
                 ArmNotification();
             }
-            if (Index == 0 && !_listener.PoolAccept)
+            if (Index == 0 && !_listener.PoolAccept && !_listener.Client)
             {
                 StartAccepts();
             }
@@ -331,7 +332,7 @@ internal sealed class WindowsWorker
         switch (command.Kind)
         {
             case CommandKind.Accepted:
-                Adopt(command.Socket!);
+                Adopt(command.Socket!, command.Connect);
                 break;
             case CommandKind.OutputReady:
                 command.State!.OutputDequeued();
@@ -402,7 +403,7 @@ internal sealed class WindowsWorker
 
     private void StopAccepts()
     {
-        if (Index != 0 || _listener.PoolAccept || _listener.Socket.IsClosed)
+        if (Index != 0 || _listener.PoolAccept || _listener.Client || _listener.Socket.IsClosed)
         {
             _unbound.TrySetResult();
             return;
@@ -473,12 +474,13 @@ internal sealed class WindowsWorker
         }
     }
 
-    private unsafe void Adopt(SocketHandle socket)
+    private unsafe void Adopt(SocketHandle socket, TaskCompletionSource<IProviderConnection>? connect = null)
     {
         if (_stopping || _connections.Count >= 4096)
         {
             Metrics.Rejected++;
             socket.Dispose();
+            connect?.TrySetException(new ConnectionAbortedException("The Windows worker is stopping or full."));
             return;
         }
         ConnectionState state;
@@ -491,6 +493,7 @@ internal sealed class WindowsWorker
             Logger.LogDebug(error, "Peer closed before adoption.");
             Metrics.Rejected++;
             socket.Dispose();
+            connect?.TrySetException(error);
             return;
         }
         _connections.Add(state.Id, state);
@@ -509,7 +512,12 @@ internal sealed class WindowsWorker
             }
             Metrics.Accepted++;
             state.StartRead();
-            if (!state.HasTls)
+            if (connect is not null)
+            {
+                state.Published = true;
+                connect.TrySetResult(state.Application);
+            }
+            else if (!state.HasTls)
             {
                 Publish(state);
             }
@@ -519,6 +527,7 @@ internal sealed class WindowsWorker
             Logger.LogError(error, "Windows socket adoption failed.");
             Metrics.Rejected++;
             state.Close(error, abortive: true);
+            connect?.TrySetException(error);
         }
     }
 

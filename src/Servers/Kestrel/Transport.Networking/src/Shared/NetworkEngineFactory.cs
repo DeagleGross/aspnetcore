@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using EpollFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.TransportFactory;
 using RingFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.TransportFactory;
+using WindowsClient = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.WindowsClient;
 using WindowsFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.TransportFactory;
 using WindowsPoolSettings = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.WindowsPoolSettings;
 
@@ -52,14 +53,45 @@ public static class NetworkEngineFactory
         return new ProviderEngine(kind, options.WorkerCount, processors, loggerFactory ?? NullLoggerFactory.Instance, pool);
     }
 
-    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine
+    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine, IConnectableEngine
     {
         private readonly List<NetworkListener> _listeners = new();
         private readonly SemaphoreSlim _binding = new(1, 1);
         private readonly Lock _disposeGate = new();
         private Task? _disposing;
+        private Task<IProviderClient>? _client;
         private int _disposed;
         public override NetworkEngineKind Kind => kind;
+
+        public async ValueTask<NetworkConnection> ConnectAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            ArgumentNullException.ThrowIfNull(endpoint);
+            Task<IProviderClient> client;
+            await _binding.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+                client = _client ??= CreateClientAsync();
+            }
+            finally
+            {
+                _binding.Release();
+            }
+            var connection = await (await client.WaitAsync(cancellationToken).ConfigureAwait(false)).ConnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
+            return connection as NetworkConnection ?? throw new InvalidOperationException("The provider returned a raw connection through the shared engine.");
+        }
+
+        // The client host is created once per engine and shares the engine's worker count, processors and pool limits.
+        private async Task<IProviderClient> CreateClientAsync()
+        {
+            return kind switch
+            {
+                NetworkEngineKind.Iocp or NetworkEngineKind.Rio => await WindowsClient.CreateAsync(kind == NetworkEngineKind.Rio, workers, logging, processors, pool,
+                    CancellationToken.None).ConfigureAwait(false),
+                _ => throw new NotSupportedException($"The {kind} prototype provider does not implement outbound connections yet.")
+            };
+        }
 
         // Default: the ring receives/sends ciphertext and OpenSSL only sees it through a custom BIO. NETWORKPROTO_URING_TLS=fd selects the fd-bound OpenSSL path,
         // which is also used when NETWORKPROTO_KTLS=1 because a custom BIO cannot activate kernel TLS.
@@ -122,6 +154,16 @@ public static class NetworkEngineFactory
                 foreach (var listener in _listeners)
                 {
                     await listener.DisposeAsync().ConfigureAwait(false);
+                }
+                if (_client is not null)
+                {
+                    try
+                    {
+                        await (await _client.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception) when (_client.IsFaulted)
+                    {
+                    }
                 }
             }
             finally

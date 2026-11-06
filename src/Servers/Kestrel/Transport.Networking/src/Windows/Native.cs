@@ -190,6 +190,14 @@ internal static unsafe partial class Native
         CheckSocket(setsockopt(socket, 6, 1, &noDelay, sizeof(int)), "TCP_NODELAY");
     }
 
+    internal static void Connect(SocketHandle socket, IPEndPoint endpoint)
+    {
+        var address = Address(endpoint);
+        CheckSocket(connect(socket, &address, sizeof(SocketAddress)), "connect");
+        var noDelay = 1;
+        CheckSocket(setsockopt(socket, 6, 1, &noDelay, sizeof(int)), "TCP_NODELAY");
+    }
+
     internal static void SetSendBuffer(SocketHandle socket, int size)
     {
         CheckSocket(setsockopt(socket, SocketLevel, SendBuffer, &size, sizeof(int)), "SO_SNDBUF");
@@ -255,6 +263,8 @@ internal static unsafe partial class Native
     internal static partial int closesocket(nint socket);
     [LibraryImport("ws2_32.dll")]
     private static partial int bind(SocketHandle socket, SocketAddress* address, int length);
+    [LibraryImport("ws2_32.dll")]
+    private static partial int connect(SocketHandle socket, SocketAddress* address, int length);
     [LibraryImport("ws2_32.dll")]
     private static partial int listen(SocketHandle socket, int backlog);
     [LibraryImport("ws2_32.dll")]

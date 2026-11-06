@@ -34,3 +34,15 @@ internal interface IProviderListenerFactory
 {
     ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default);
 }
+
+/// <summary>Opens outbound provider connections that run on the same workers, pools and rings as accepted ones.</summary>
+internal interface IProviderClient : IAsyncDisposable
+{
+    ValueTask<IProviderConnection> ConnectAsync(EndPoint endpoint, CancellationToken cancellationToken = default);
+}
+
+/// <summary>Implemented by prototype engines that can also dial out. It keeps the public <see cref="NetworkEngine"/> surface unchanged.</summary>
+internal interface IConnectableEngine
+{
+    ValueTask<NetworkConnection> ConnectAsync(EndPoint endpoint, CancellationToken cancellationToken = default);
+}
