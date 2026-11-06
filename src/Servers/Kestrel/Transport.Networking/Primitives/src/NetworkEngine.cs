@@ -36,13 +36,70 @@ public sealed class IoUringEngineOptions : NetworkEngineOptions
 {
 }
 
+/// <summary>
+/// Configures the native memory pools shared by the Windows providers. Each worker owns an input pool and an output pool
+/// that grow in 4 MiB slabs. With RIO every slab is registered, so it is committed and locked until the slab is released.
+/// </summary>
+public abstract class WindowsEngineOptions : NetworkEngineOptions
+{
+    private const int SlabBytes = 4 * 1024 * 1024;
+    private const int LargestPoolBytes = 1024 * 1024 * 1024;
+    private int _inputPoolMaximumBytes = 256 * 1024 * 1024;
+    private int _outputPoolMaximumBytes = 512 * 1024 * 1024;
+    private TimeSpan _poolIdleTrimDelay = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// Gets or sets the most native memory, per worker, that receive buffers and TLS ciphertext may hold.
+    /// A connection waits for a free buffer when the pool is full. The value is between 4 MiB and 1 GiB.
+    /// </summary>
+    public int InputPoolMaximumBytes
+    {
+        get => _inputPoolMaximumBytes;
+        set => _inputPoolMaximumBytes = ValidatePoolBytes(value);
+    }
+
+    /// <summary>
+    /// Gets or sets the most native memory, per worker, that response buffers may hold.
+    /// A write that cannot rent a buffer fails the connection. The value is between 4 MiB and 1 GiB.
+    /// </summary>
+    public int OutputPoolMaximumBytes
+    {
+        get => _outputPoolMaximumBytes;
+        set => _outputPoolMaximumBytes = ValidatePoolBytes(value);
+    }
+
+    /// <summary>
+    /// Gets or sets how long a slab must have no leased buffers before the worker unregisters it and returns its memory.
+    /// <see cref="Timeout.InfiniteTimeSpan"/> keeps every slab until the worker stops.
+    /// </summary>
+    public TimeSpan PoolIdleTrimDelay
+    {
+        get => _poolIdleTrimDelay;
+        set
+        {
+            if (value != Timeout.InfiniteTimeSpan)
+            {
+                ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(value, TimeSpan.Zero);
+            }
+            _poolIdleTrimDelay = value;
+        }
+    }
+
+    private static int ValidatePoolBytes(int value)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(value, SlabBytes);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(value, LargestPoolBytes);
+        return value;
+    }
+}
+
 /// <summary>Configures the IOCP provider.</summary>
-public sealed class IocpEngineOptions : NetworkEngineOptions
+public sealed class IocpEngineOptions : WindowsEngineOptions
 {
 }
 
 /// <summary>Configures the explicitly selected registered-I/O provider.</summary>
-public sealed class RioEngineOptions : NetworkEngineOptions
+public sealed class RioEngineOptions : WindowsEngineOptions
 {
 }
 

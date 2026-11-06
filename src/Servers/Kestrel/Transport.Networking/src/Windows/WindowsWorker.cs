@@ -35,6 +35,9 @@ internal sealed class WindowsWorker
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _unbound = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly int _sendBufferSize = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_WINDOWS_SNDBUF") ?? "0", CultureInfo.InvariantCulture);
+    private readonly WindowsPoolSettings _poolSettings;
+    private readonly long _trimIdleMs;
+    private const int MaxTrimmedSlabsPerPass = 8;
     private PortHandle? _port;
     private NativeAllocation? _rioNotification;
     private RioApi.CompletionQueueHandle? _completionQueue;
@@ -67,13 +70,15 @@ internal sealed class WindowsWorker
     internal Task Stopped => _stopped.Task;
     internal Task Unbound => _unbound.Task;
 
-    internal WindowsWorker(WindowsListener listener, int index, int cpu, RioApi? rio, ILogger logger)
+    internal WindowsWorker(WindowsListener listener, int index, int cpu, RioApi? rio, ILogger logger, WindowsPoolSettings pool)
     {
         _listener = listener;
         Index = index;
         _cpu = cpu;
         _rio = rio;
         Logger = logger;
+        _poolSettings = pool;
+        _trimIdleMs = pool.IdleTrimDelay == Timeout.InfiniteTimeSpan ? 0 : Math.Max(1, (long)pool.IdleTrimDelay.TotalMilliseconds);
         ArgumentOutOfRangeException.ThrowIfNegative(_sendBufferSize);
     }
 
@@ -113,8 +118,8 @@ internal sealed class WindowsWorker
             _threadId = Environment.CurrentManagedThreadId;
             Native.PinThread(_cpu);
             _port = Native.CreatePort();
-            InputPool = new NativeMemoryPool(_rio, 32 * 1024 * 1024);
-            OutputPool = new NativeMemoryPool(_rio, 128 * 1024 * 1024);
+            InputPool = new NativeMemoryPool(_rio, _poolSettings.InputMaximumBytes);
+            OutputPool = new NativeMemoryPool(_rio, _poolSettings.OutputMaximumBytes);
             if (_rio is not null)
             {
                 _rioNotification = new NativeAllocation(sizeof(Native.Overlapped), zero: true);
@@ -128,7 +133,7 @@ internal sealed class WindowsWorker
             _started.TrySetResult();
             var completions = stackalloc Native.Completion[128];
             var rioResults = stackalloc RioApi.Result[128];
-            long nextSweep = 0;
+            long nextSweep = 0, nextTrim = 0;
             while (!_stopping || _connections.Count != 0 || _pendingIo != 0 || !_commands.IsEmpty || Volatile.Read(ref _pendingDisposals) != 0)
             {
                 Volatile.Write(ref _wakeScheduled, 0);
@@ -184,6 +189,12 @@ internal sealed class WindowsWorker
                         _nextStats = now + _statsIntervalMs;
                         WriteProgress(now);
                     }
+                }
+                if (_trimIdleMs > 0 && now >= nextTrim)
+                {
+                    nextTrim = now + Math.Clamp(_trimIdleMs / 4, 100, 1000);
+                    InputPool.TrimIdle(now, _trimIdleMs, MaxTrimmedSlabsPerPass);
+                    OutputPool.TrimIdle(now, _trimIdleMs, MaxTrimmedSlabsPerPass);
                 }
                 if (_stopping && Environment.TickCount64 - _stopStarted > 15000 && (_pendingIo != 0 || _connections.Count != 0 || _pendingHandshakes != 0))
                 {
@@ -262,7 +273,10 @@ internal sealed class WindowsWorker
                 gracefulTimeouts = Metrics.GracefulTimeouts,
                 connections = _connections.Count, inputLeases = InputPool?.Outstanding ?? 0,
                 outputLeases = OutputPool?.Outstanding ?? 0,
-                inputPoolBytes = InputPool?.AllocatedBytes ?? 0, outputPoolBytes = OutputPool?.AllocatedBytes ?? 0
+                inputPoolBytes = InputPool?.AllocatedBytes ?? 0, outputPoolBytes = OutputPool?.AllocatedBytes ?? 0,
+                inputPoolTrimmedSlabs = InputPool?.TrimmedSlabs ?? 0, outputPoolTrimmedSlabs = OutputPool?.TrimmedSlabs ?? 0,
+                inputPoolTrimmedBytes = InputPool?.TrimmedBytes ?? 0, outputPoolTrimmedBytes = OutputPool?.TrimmedBytes ?? 0,
+                inputPoolPeakBytes = InputPool?.PeakBytes ?? 0, outputPoolPeakBytes = OutputPool?.PeakBytes ?? 0
             }));
             if (_failure is null)
             {
@@ -283,6 +297,8 @@ internal sealed class WindowsWorker
             accepted = Metrics.Accepted, closed = Metrics.Closed, rejected = Metrics.Rejected, connections = _connections.Count,
             polls = Metrics.Polls, wakes = Metrics.Wakes, completions = Metrics.Completions, rioNotifications = Metrics.RioNotifications,
             receives = Metrics.Receives, sends = Metrics.Sends, pendingIo = _pendingIo,
+            inputPoolBytes = InputPool.AllocatedBytes, outputPoolBytes = OutputPool.AllocatedBytes,
+            trimmedSlabs = InputPool.TrimmedSlabs + OutputPool.TrimmedSlabs, trimmedBytes = InputPool.TrimmedBytes + OutputPool.TrimmedBytes,
             tlsHandshakes = Metrics.TlsHandshakes, tlsHandshakeCalls = Metrics.TlsHandshakeCalls, offloadedHandshakes = Metrics.OffloadedHandshakes,
             pendingHandshakes = _pendingHandshakes, handshakeQueueMs = Metrics.TlsHandshakeQueueTicks * 1000 / Stopwatch.Frequency,
             gracefulTimeouts = Metrics.GracefulTimeouts, connectionErrors = Metrics.ConnectionErrors, firstConnectionError = Metrics.FirstConnectionError,

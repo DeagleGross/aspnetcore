@@ -283,3 +283,7 @@ A few more details:
 #### Other Windows I/O APIs
 
 The prototype does not use `ProcessSocketNotifications` or Windows I/O rings. What the public documentation says about them is in [Windows I/O options](Windows%20IO%20options.md).
+
+#### Scaling and memory
+
+How the providers behave when CPUs or memory are added after start is in [ScalingCapabilities.md](ScalingCapabilities.md). What they cost in memory, per connection and after a burst, is in [MemoryFootprint.md](MemoryFootprint.md).

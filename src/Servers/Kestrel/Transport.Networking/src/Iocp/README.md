@@ -56,7 +56,7 @@ Output uses an ordinary `Pipe`, backed by the native memory pool. Its inline rea
 
 If a `WSARecv` or `WSASend` finishes synchronously, `FILE_SKIP_COMPLETION_PORT_ON_SUCCESS` suppresses an unnecessary kernel completion packet. The worker queues that result locally and processes it with the same ownership accounting. Pending operations still finish through IOCP. This avoids recursive completion processing and does not run arbitrary caller code inline.
 
-Pools grow in 4 MiB slabs. Input is bounded at 32 MiB per worker; output at 128 MiB per worker. These are prototype limits, not general framework policy. Exhaustion is explicit rather than a silent fallback. A native address being stable does not mean that the kernel/network path is zero-copy.
+Pools grow in 4 MiB slabs. Input is bounded at `IocpEngineOptions.InputPoolMaximumBytes` per worker (default 256 MiB); output at `OutputPoolMaximumBytes` (default 512 MiB). A slab whose slots have all been returned and that stays unused for `PoolIdleTrimDelay` (default 10 s) is freed by the worker thread; `Timeout.InfiniteTimeSpan` disables that. These are prototype defaults, not general framework policy. Exhaustion is explicit rather than a silent fallback. A native address being stable does not mean that the kernel/network path is zero-copy.
 
 ## Closing a connection
 

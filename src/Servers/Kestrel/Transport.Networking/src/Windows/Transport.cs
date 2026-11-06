@@ -16,7 +16,7 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows;
 
 internal sealed class TransportFactory(bool rio, int workerCount, ILoggerFactory logging, bool shared = false, int[]? processors = null,
-    NetworkNativeTlsOptions? nativeTls = null) : IProviderListenerFactory
+    NetworkNativeTlsOptions? nativeTls = null, WindowsPoolSettings? pool = null) : IProviderListenerFactory
 {
     public async ValueTask<IProviderListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)
     {
@@ -34,7 +34,7 @@ internal sealed class TransportFactory(bool rio, int workerCount, ILoggerFactory
         {
             throw new ArgumentException("Worker count must match NETWORKPROTO_CPUS, whose entries are logical CPUs 0..63.");
         }
-        var listener = new WindowsListener(ip, rio, cpus, logging.CreateLogger(rio ? "NetworkProto.Rio" : "NetworkProto.Iocp"), shared, nativeTls);
+        var listener = new WindowsListener(ip, rio, cpus, logging.CreateLogger(rio ? "NetworkProto.Rio" : "NetworkProto.Iocp"), shared, nativeTls, pool ?? WindowsPoolSettings.Default);
         try
         {
             await listener.StartAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -73,7 +73,7 @@ internal sealed class WindowsListener : IProviderListener
     internal HandshakeScheduler? Handshakes { get; }
     public EndPoint EndPoint { get; }
 
-    internal WindowsListener(IPEndPoint endpoint, bool rio, int[] cpus, ILogger logger, bool shared, NetworkNativeTlsOptions? nativeTls)
+    internal WindowsListener(IPEndPoint endpoint, bool rio, int[] cpus, ILogger logger, bool shared, NetworkNativeTlsOptions? nativeTls, WindowsPoolSettings pool)
     {
         Shared = shared;
         _rio = rio;
@@ -96,7 +96,7 @@ internal sealed class WindowsListener : IProviderListener
             Socket = Native.Listen(endpoint, rio);
             EndPoint = Native.GetEndPoint(Socket, peer: false);
             var api = rio ? new RioApi(Socket) : null;
-            _workers = cpus.Select((cpu, index) => new WindowsWorker(this, index, cpu, api, logger)).ToArray();
+            _workers = cpus.Select((cpu, index) => new WindowsWorker(this, index, cpu, api, logger, pool)).ToArray();
         }
         catch
         {

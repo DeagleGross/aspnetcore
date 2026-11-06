@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using EpollFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.TransportFactory;
 using RingFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.TransportFactory;
 using WindowsFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.TransportFactory;
+using WindowsPoolSettings = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.WindowsPoolSettings;
 
 namespace System.Net.Transport;
 
@@ -47,10 +48,11 @@ public static class NetworkEngineFactory
         {
             processors = Enumerable.Range(0, options.WorkerCount).Select(cpu => 2 * cpu).ToArray();
         }
-        return new ProviderEngine(kind, options.WorkerCount, processors, loggerFactory ?? NullLoggerFactory.Instance);
+        var pool = options is WindowsEngineOptions windows ? WindowsPoolSettings.From(windows) : null;
+        return new ProviderEngine(kind, options.WorkerCount, processors, loggerFactory ?? NullLoggerFactory.Instance, pool);
     }
 
-    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, ILoggerFactory logging) : NetworkEngine
+    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine
     {
         private readonly List<NetworkListener> _listeners = new();
         private readonly SemaphoreSlim _binding = new(1, 1);
@@ -90,7 +92,7 @@ public static class NetworkEngineFactory
                         logging, layered: tls is not null && UseRingOwnedCiphertext(),
                         shared: true, processors: processors, handshakePrefixCallback: tls?.HandshakePrefixCallback),
                     NetworkEngineKind.Iocp or NetworkEngineKind.Rio => new WindowsFactory(kind == NetworkEngineKind.Rio, workers, logging,
-                        shared: true, processors, tls),
+                        shared: true, processors, tls, pool),
                     _ => throw new NotSupportedException("Unknown network engine.")
                 };
                 var listener = new ProviderListener(await factory.BindAsync(endpoint, cancellationToken).ConfigureAwait(false));

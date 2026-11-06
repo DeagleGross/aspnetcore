@@ -111,3 +111,11 @@ System.Net.Transport.NetworkReceiveResult.Retain(long start, long length) -> Sys
 System.Net.Transport.NetworkTlsExtensions
 System.Net.Transport.RioEngineOptions
 System.Net.Transport.RioEngineOptions.RioEngineOptions() -> void
+System.Net.Transport.WindowsEngineOptions
+System.Net.Transport.WindowsEngineOptions.InputPoolMaximumBytes.get -> int
+System.Net.Transport.WindowsEngineOptions.InputPoolMaximumBytes.set -> void
+System.Net.Transport.WindowsEngineOptions.OutputPoolMaximumBytes.get -> int
+System.Net.Transport.WindowsEngineOptions.OutputPoolMaximumBytes.set -> void
+System.Net.Transport.WindowsEngineOptions.PoolIdleTrimDelay.get -> System.TimeSpan
+System.Net.Transport.WindowsEngineOptions.PoolIdleTrimDelay.set -> void
+System.Net.Transport.WindowsEngineOptions.WindowsEngineOptions() -> void

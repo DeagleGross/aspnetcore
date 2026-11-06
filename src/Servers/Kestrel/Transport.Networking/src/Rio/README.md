@@ -54,7 +54,9 @@ Output is an ordinary `Pipe` with a registered-memory pool. Kestrel's output wri
 
 **RIO has a different idle-memory cost from IOCP.** It posts a real receive slice, so an idle connection normally occupies one 16 KiB input page. The IOCP experiment can use a zero-byte probe instead. RIO's larger CQ/RQ and registered-memory commitments are reasons not to select it blindly for every workload.
 
-Input allocation is bounded at 32 MiB per worker; output at 128 MiB per worker. CQ capacity is 8,192, and per-worker connection admission is bounded at 4,096. The shared accepted-connection channel is bounded at 1,024. These are prototype limits, not an API proposal.
+Input allocation is bounded at `RioEngineOptions.InputPoolMaximumBytes` per worker (default 256 MiB); output at `OutputPoolMaximumBytes` (default 512 MiB). CQ capacity is 8,192, and per-worker connection admission is bounded at 4,096. The shared accepted-connection channel is bounded at 1,024. The CQ and admission limits are prototype constants, not an API proposal.
+
+Slabs are 4 MiB and each is registered with `RIORegisterBuffer`. A slab whose slots have all been returned and that stays unused for `PoolIdleTrimDelay` (default 10 s) is deregistered and freed by the worker thread, at most 8 slabs per pass and pool. Registration commits and locks the pages, so only the free gives memory back. A burst therefore costs registration again; set `Timeout.InfiniteTimeSpan` to keep every slab. One long-lived lease keeps its whole 4 MiB slab.
 
 Registration and garbage-collector pinning are different concepts. The native slab's address is already stable; RIO registration additionally tells Windows about its pages. Neither implies that TCP bypasses the kernel or the network stack.
 

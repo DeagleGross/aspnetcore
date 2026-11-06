@@ -21,12 +21,16 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
     private readonly ConcurrentStack<Slot>[] _classes = CreateClasses(pageSize, maximumBytes);
     private readonly List<Slab> _slabs = new();
     private bool _disposed;
-    private int _bytes, _outstanding;
+    private int _bytes, _outstanding, _peakBytes, _nextSlabId;
+    private long _trimmedSlabs, _trimmedBytes;
 
     public override int MaxBufferSize => maximumBytes;
     internal OutputBlockHint OutputHint { get; } = new();
     internal int AllocatedBytes => Volatile.Read(ref _bytes);
+    internal int PeakBytes => Volatile.Read(ref _peakBytes);
     internal int Outstanding => Volatile.Read(ref _outstanding);
+    internal long TrimmedSlabs => Volatile.Read(ref _trimmedSlabs);
+    internal long TrimmedBytes => Volatile.Read(ref _trimmedBytes);
 
     private static ConcurrentStack<Slot>[] CreateClasses(int pageSize, int maximumBytes)
     {
@@ -54,7 +58,8 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
         ArgumentOutOfRangeException.ThrowIfLessThan(minBufferSize, -1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(minBufferSize, maximumBytes);
         var size = minBufferSize <= pageSize ? pageSize : checked((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)minBufferSize));
-        var stack = _classes[System.Numerics.BitOperations.Log2((uint)size) - _pageShift];
+        var classIndex = System.Numerics.BitOperations.Log2((uint)size) - _pageShift;
+        var stack = _classes[classIndex];
         if (!stack.TryPop(out var slot))
         {
             lock (_gate)
@@ -67,9 +72,10 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
                     {
                         return null;
                     }
-                    var slab = new Slab(allocation, rio);
+                    var slab = new Slab(_nextSlabId++, classIndex, allocation / size, allocation, rio);
                     _slabs.Add(slab);
                     _bytes += allocation;
+                    _peakBytes = Math.Max(_peakBytes, _bytes);
                     for (var offset = size; offset <= allocation - size; offset += size)
                     {
                         stack.Push(new Slot(slab, offset, size));
@@ -78,6 +84,7 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
                 }
             }
         }
+        slot.Slab.Leased();
         Interlocked.Increment(ref _outstanding);
         return new Lease(this, stack, slot);
     }
@@ -85,7 +92,91 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
     private void Return(ConcurrentStack<Slot> stack, Slot slot)
     {
         stack.Push(slot);
+        slot.Slab.Returned();
         Interlocked.Decrement(ref _outstanding);
+    }
+
+    /// <summary>
+    /// Unregisters and frees slabs that have had no leased block for <paramref name="idleMilliseconds"/>, at most <paramref name="maximumSlabs"/> per call.
+    /// Any thread may rent or return concurrently: a slab is freed only after every one of its slots has been popped from the free stack under the pool gate,
+    /// which proves that no lease, and therefore no pending I/O, references it.
+    /// </summary>
+    internal int TrimIdle(long nowMilliseconds, long idleMilliseconds, int maximumSlabs)
+    {
+        List<Slab> released;
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return 0;
+            }
+            ulong candidateClasses = 0;
+            foreach (var slab in _slabs)
+            {
+                if (slab.IsIdle(nowMilliseconds, idleMilliseconds))
+                {
+                    candidateClasses |= 1UL << slab.ClassIndex;
+                }
+            }
+            if (candidateClasses == 0)
+            {
+                return 0;
+            }
+            released = new List<Slab>();
+            for (var index = 0; index < _classes.Length && released.Count < maximumSlabs; index++)
+            {
+                if ((candidateClasses & (1UL << index)) != 0)
+                {
+                    TrimClass(index, nowMilliseconds, idleMilliseconds, maximumSlabs, released);
+                }
+            }
+        }
+        foreach (var slab in released)
+        {
+            ((IDisposable)slab).Dispose();
+            Interlocked.Increment(ref _trimmedSlabs);
+            Interlocked.Add(ref _trimmedBytes, slab.Length);
+        }
+        return released.Count;
+    }
+
+    private void TrimClass(int index, long nowMilliseconds, long idleMilliseconds, int maximumSlabs, List<Slab> released)
+    {
+        var stack = _classes[index];
+        var expected = 0;
+        foreach (var slab in _slabs)
+        {
+            if (slab.ClassIndex == index)
+            {
+                slab.Drained = 0;
+                expected += slab.SlotCount;
+            }
+        }
+        // A renter that finds the stack empty waits on the gate this thread holds, then pops again, so draining cannot fail a rent.
+        var free = new List<Slot>();
+        while (free.Count < expected && stack.TryPop(out var slot))
+        {
+            free.Add(slot);
+            slot.Slab.Drained++;
+        }
+        for (var i = _slabs.Count - 1; i >= 0 && released.Count < maximumSlabs; i--)
+        {
+            var slab = _slabs[i];
+            if (slab.ClassIndex == index && slab.Drained == slab.SlotCount && slab.IsIdle(nowMilliseconds, idleMilliseconds))
+            {
+                slab.Trimmed = true;
+                _slabs.RemoveAt(i);
+                _bytes -= slab.Length;
+                released.Add(slab);
+            }
+        }
+        free.RemoveAll(static slot => slot.Slab.Trimmed);
+        // Lowest slab ids end up on top, so new rentals keep filling older slabs and the newest ones can go idle.
+        free.Sort(static (left, right) => right.Slab.Id.CompareTo(left.Slab.Id));
+        foreach (var slot in free)
+        {
+            stack.Push(slot);
+        }
     }
 
     protected override void Dispose(bool disposing)
@@ -156,11 +247,22 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
         private readonly int _length;
         private readonly RioApi.BufferRegistration? _registration;
         private bool _disposed;
+        private int _rented;
+        private long _lastUsed = Environment.TickCount64;
         internal nint Registration => _registration?.DangerousGetHandle() ?? 0;
         internal bool IsRegistered => _registration is not null;
+        internal int Id { get; }
+        internal int ClassIndex { get; }
+        internal int SlotCount { get; }
+        internal int Length => _length;
+        internal int Drained { get; set; }
+        internal bool Trimmed { get; set; }
 
-        internal Slab(int length, RioApi? rio)
+        internal Slab(int id, int classIndex, int slotCount, int length, RioApi? rio)
         {
+            Id = id;
+            ClassIndex = classIndex;
+            SlotCount = slotCount;
             _length = length;
             _memory = new NativeAllocation(length);
             try
@@ -173,6 +275,18 @@ internal sealed class NativeMemoryPool(RioApi? rio, int maximumBytes, int pageSi
                 throw;
             }
         }
+
+        internal void Leased() => Interlocked.Increment(ref _rented);
+
+        internal void Returned()
+        {
+            Volatile.Write(ref _lastUsed, Environment.TickCount64);
+            Interlocked.Decrement(ref _rented);
+        }
+
+        // A cheap filter only: whether the slab is really free is decided by draining its slots from the free stack.
+        internal bool IsIdle(long nowMilliseconds, long idleMilliseconds)
+            => Volatile.Read(ref _rented) == 0 && nowMilliseconds - Volatile.Read(ref _lastUsed) >= idleMilliseconds;
 
         public override Span<byte> GetSpan()
         {

@@ -36,12 +36,19 @@ namespace System.Net.Transport
         public IoUringEngineOptions();
     }
 
-    public sealed class IocpEngineOptions : NetworkEngineOptions
+    public abstract class WindowsEngineOptions : NetworkEngineOptions
+    {
+        public int InputPoolMaximumBytes { get; set; }    // per worker, default 256 MiB, 4 MiB..1 GiB
+        public int OutputPoolMaximumBytes { get; set; }   // per worker, default 512 MiB, 4 MiB..1 GiB
+        public TimeSpan PoolIdleTrimDelay { get; set; }   // default 10 s, Timeout.InfiniteTimeSpan disables trimming
+    }
+
+    public sealed class IocpEngineOptions : WindowsEngineOptions
     {
         public IocpEngineOptions();
     }
 
-    public sealed class RioEngineOptions : NetworkEngineOptions
+    public sealed class RioEngineOptions : WindowsEngineOptions
     {
         public RioEngineOptions();
     }
