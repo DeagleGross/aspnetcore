@@ -12,7 +12,7 @@ It is an experiment, not an API proposal. The new public types are non-shipping 
 | Is the Bedrock server as fast as the former private-factory prototype? | Yes, within noise. Over three repetitions the two registrations differ by 0-4% in either direction, and the order flips between repetitions. Both stay ahead of the Sockets transport: RIO by about 19-44% and IOCP by about 9-24%. |
 | Can the client side hide behind `IConnectionFactory`? | Yes, for IPv4, on all four providers. The same class implements `IConnectionFactory`, and `UseConnectionFactory` plugs it into `SocketsHttpHandler.ConnectCallback`. Epoll and io_uring got a client path in the Linux follow-up below. |
 | Is the Bedrock client faster than `SocketsHttpHandler`? | At 8 KB and 64 KB, yes: RIO is about +13% and +8% (ahead in 6 of 6 repetitions), IOCP about +6% and +3.5%. At 1 KB it is at parity (IOCP -2%, RIO 0%), which is noise-dominated. Before the changes below the client was at parity at 1-8 KB and 31-43% slower at 64 KB. |
-| Does the Windows advantage carry over to Linux? | **Not uniformly.** On WSL2 the Linux Bedrock server is within about 4% of the former private-factory server in five of six cells, but io_uring at 1 KB is about 8% lower in both repetitions, and neither Linux server beats the Sockets server at 1 KB (epoll about 82%, io_uring about 73% of Sockets with 4 workers). With 8 workers io_uring beats Sockets at 8 KB (2% and 17% in the two repetitions) and epoll is about 6% behind. The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
+| Does the Windows advantage carry over to Linux? | **On the server, yes for io_uring, and for epoll at a small core count. On the client, no.** With matched CPUs and workers and a native `wrk` load generator (1 KB, 1,200 connections, 4 repetitions), the Bedrock io_uring server is about 18% ahead of the Sockets server at both 4 and 8 logical CPUs and has a lower p99. Epoll is about 6-8% ahead at 4 CPUs and at parity at 8. An earlier "epoll about 82%, io_uring about 73% of Sockets" result was a harness artifact (Sockets had 8 CPUs, the native providers 4 workers, and the load generator was a .NET `HttpClient`); it is kept in the Linux section for the record. The Bedrock adapter itself is within about 4% of the former private-factory server in five of six cells, and io_uring at 1 KB is about 8% lower in both repetitions of the old harness. The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
 | What does the client cost? | Memory. RIO registers its slabs, so the client working set is about 140 MB at 1-8 KB and 230 MB at 64 KB against about 65-70 MB for `SocketsHttpHandler`. IOCP is close to Sockets (75-95 MB), but its p99 latency is worse. |
 | Is anything lost by going through the interfaces? | The zero-copy read lease. A `ConnectionContext` exposes `PipeReader` and `PipeWriter`, so the native page lease is hidden unless the consumer asks for `INetworkConnectionFeature`. A `Stream` for `ConnectCallback` is a pipe adapter and copies once. |
 
@@ -187,7 +187,7 @@ Throughput scales about linearly with workers, at about 27k requests per second 
 
 ## Linux: epoll and io_uring under Bedrock
 
-The first pass covered only the Windows providers. The Linux providers could serve `IConnectionListenerFactory` already, but they had no client path, so `IConnectionFactory` threw `NotSupportedException`. This section adds the client paths and measures both providers as a Kestrel transport and as an `HttpClient` connection factory. **The result is less favorable than on Windows, and it should be read as such.**
+The first pass covered only the Windows providers. The Linux providers could serve `IConnectionListenerFactory` already, but they had no client path, so `IConnectionFactory` threw `NotSupportedException`. This section adds the client paths and measures both providers as a Kestrel transport and as an `HttpClient` connection factory. **The client result is less favorable than on Windows. The server result was first reported too unfavorably because of a harness mismatch and was corrected with a matched run, see [Linux server: matched CPUs and workers, native wrk](#linux-server-matched-cpus-and-workers-native-wrk).**
 
 ### What was added
 
@@ -200,7 +200,7 @@ The first pass covered only the Windows providers. The Linux providers could ser
 
 ### Environment
 
-WSL2 (kernel 6.18, Ubuntu) on the same Ryzen 9 7950X3D, 32 logical CPUs, loopback. In the client plan the Sockets Kestrel server runs on CPUs 16-31 and the client on CPUs 0-7. In the server plan Kestrel runs on CPUs 0-7 and the client (`SocketsHttpHandler`) on CPUs 16-31. 64 connections, 2 s warmup, 8 s measured, 2 repetitions per cell, HTTP/1.1 echo, no TLS. All cells had 0 errors. Rows are the average of two repetitions. The Linux runs are noisier than the Windows runs: the Sockets baseline moved by 10-20% between batches, and WSL2 adds virtualization overhead on top. Results are from one machine and were not independently reproduced. Raw CSVs are in the local results folder and are not committed.
+WSL2 (kernel 6.18, Ubuntu) on the same Ryzen 9 7950X3D, 32 logical CPUs, loopback. In the client plan the Sockets Kestrel server runs on CPUs 16-31 and the client on CPUs 0-7. In the server plan Kestrel runs on CPUs 0-7 and the client (`SocketsHttpHandler`) on CPUs 16-31. **The server plan has a flaw that was found afterwards:** the server was given 8 logical CPUs, but the native providers ran only 4 workers, so the Sockets transport (which scales over every CPU it gets) had twice the CPUs of the native providers, and the load generator was a .NET `HttpClient`. The server tables below are kept as measured; the matched run in [Linux server: matched CPUs and workers, native wrk](#linux-server-matched-cpus-and-workers-native-wrk) supersedes their comparison with Sockets. 64 connections, 2 s warmup, 8 s measured, 2 repetitions per cell, HTTP/1.1 echo, no TLS. All cells had 0 errors. Rows are the average of two repetitions. The Linux runs are noisier than the Windows runs: the Sockets baseline moved by 10-20% between batches, and WSL2 adds virtualization overhead on top. Results are from one machine and were not independently reproduced. Raw CSVs are in the local results folder and are not committed.
 
 ### Linux client: `SocketsHttpHandler` against the Bedrock connection factory
 
@@ -228,7 +228,7 @@ The two providers were measured in separate batches, each with its own Sockets r
 
 ### Linux server: the Kestrel transport through the abstractions
 
-A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-7, 4 workers for the native providers. Requests per second, then p99 in µs:
+A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-7, 4 workers for the native providers (so the Sockets server had 8 CPUs against 4 workers, see the note in the environment section). Requests per second, then p99 in µs:
 
 | Body | Sockets | epoll (Bedrock) | epoll (legacy) | io_uring (Bedrock) | io_uring (legacy) |
 | --- | --- | --- | --- | --- | --- |
@@ -237,7 +237,7 @@ A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-7, 4 worker
 | 64 KB | 110.5k, 1649 | 111.7k, 1735 | 107.8k, 1796 | 102.1k, 1648 | 106.3k, 1622 |
 
 - **Bedrock against the former private-factory registration.** Epoll: -2%, +0.5% and +3.7% at 1, 8 and 64 KB. io_uring: -8.4%, -0.2% and -4.0%. Five of the six cells are inside the noise of two repetitions. **The exception is io_uring at 1 KB, where Bedrock was lower in both repetitions** (254.5k and 255.0k against 280.7k and 275.8k). It was not investigated, so "on par" holds for epoll and for io_uring at 8-64 KB, and not for io_uring at 1 KB.
-- **Against Sockets.** Epoll is at 82% at 1 KB, 94% at 8 KB and 101% at 64 KB. io_uring is at 73%, 81% and 92%. The native Linux servers do not beat the Sockets transport at small bodies in this setup. This differs from Windows, where RIO and IOCP lead at every size.
+- **Against Sockets (mismatched CPUs and workers, superseded).** Epoll is at 82% of the Sockets rows at 1 KB, 94% at 8 KB and 101% at 64 KB. io_uring is at 73%, 81% and 92%. Those ratios compare 4 native workers with a Sockets server that had 8 CPUs, so they measure the harness, not the transports. The matched run below gives the opposite picture at 1 KB.
 - CPU per 1,000 requests is about equal across servers: 28-32 at 1 KB, 33-38 at 8 KB, 58-64 at 64 KB. p50 is higher for the native servers (epoll 177 µs, io_uring 202 µs, Sockets 150 µs at 1 KB).
 - Server resident memory (`VmRSS`): Sockets 71-82 MB, epoll 78-90 MB, io_uring 110-123 MB.
 
@@ -257,16 +257,48 @@ A native Linux server owns its workers, and the worker count decides the result.
 - With 2 workers the native servers are clearly behind. The io_uring 8 KB cell includes one outlier repetition (72.8k, p99 6.5 ms), so treat that cell as unreliable.
 - With 8 workers on 8 CPUs, io_uring is ahead of Sockets at 8 KB in both repetitions (264.0k and 273.7k against 259.2k and 233.5k, so the first is within noise), and Sockets still leads at 1 KB. Epoll at 8 KB is at 89% and 100% of Sockets in the two repetitions.
 - io_uring server memory grows with the worker count (94, 112 and 148 MB at 2, 4 and 8 workers, against about 70 MB for Sockets), about 9 MB per worker in these runs.
+- This sweep used the .NET `HttpClient` load generator at 64 connections. With 8 workers on 8 CPUs it is the closest of these cells to a matched plan, and it still shows Sockets ahead at 1 KB, which the native `wrk` run below does not reproduce. The load generator is the main suspect for the difference (it was not isolated further).
+
+### Linux server: matched CPUs and workers, native wrk
+
+This run was added after the results above looked wrong: the earlier prototype measurements in this repository (see [`RPS-RESULTS.md`](src/IoUring/RPS-RESULTS.md)) showed the Linux providers ahead of Sockets at 4 cores. The causes found in the harness above were a Sockets server with more CPUs than the native providers had workers, and a managed load generator that was itself a possible bottleneck. The matched run changes both: the native providers get one worker per server CPU and the load is generated by native `wrk` (`-t12 -c1200`, 3 s warmup, 8 s measured, client on CPUs 16-27), driven by `samples\Bedrock\run-wrk-server.sh`. Bedrock registration for all three servers, 1 KB body, plain HTTP, 4 repetitions, 0 errors except where noted. The "4 CPUs" plan is CPUs `0,2,4,6` (one logical CPU on each of four physical cores, as WSL2 presents the topology) with 4 workers, and the "8 CPUs" plan is CPUs `0-7` (four physical cores with both SMT threads) with 8 workers.
+
+| Server CPUs | Sockets | epoll | io_uring |
+| --- | --- | --- | --- |
+| 4 CPUs, 4 workers | 213.1k | 230.3k (+8%) | 250.9k (+18%) |
+| 8 CPUs, 8 workers | 405.1k | 397.3k (-2%) | 477.8k (+18%) |
+
+Requests per second, mean of 4 repetitions. Per repetition:
+
+| Server CPUs | Sockets | epoll | io_uring |
+| --- | --- | --- | --- |
+| 4 CPUs, 4 workers | 214.3k, 209.0k, 217.8k, 211.0k | 218.4k, 224.9k, 243.5k, 234.2k | 250.8k, 255.1k, 249.5k, 248.1k |
+| 8 CPUs, 8 workers | 408.5k, 404.4k, 399.7k, 407.9k | 402.4k, 389.7k, 403.9k, 393.2k | 479.9k, 481.0k, 486.7k, 463.6k |
+
+Latency (mean, p99):
+
+| Server CPUs | Sockets | epoll | io_uring |
+| --- | --- | --- | --- |
+| 4 CPUs, 4 workers | 5.6 ms, 12.4 ms | 5.3 ms, 12-14 ms | 4.8 ms, 9.4-9.9 ms |
+| 8 CPUs, 8 workers | 3.0 ms, 7.3-8.5 ms | 3.0-3.1 ms, 7.5-8.4 ms | 2.5 ms, 4.8-5.5 ms |
+
+- **io_uring is ahead in every repetition at both sizes**, by about 18%, with a p99 about 20-45% lower. The four repetitions are tight (Sockets 209-218k, io_uring 248-255k at 4 CPUs), so this is not noise.
+- **Epoll is ahead at 4 CPUs and at parity at 8.** In the third 4-CPU epoll repetition (243.5k) `wrk` reported 1,200 socket timeouts, so that rep is suspect. Without it the epoll mean is 225.8k (+6%). The 4-CPU epoll gain is therefore about +6-8%, which is within the spread of its own repetitions (218-244k).
+- **This reproduces the earlier prototype shape**: epoll about +13.5% at 4 cores and about -4% at 8 cores in the October 1 `wrk2` batch, and io_uring ahead of epoll for raw TCP in the September 29 batch. It does not reproduce any individual number, because the load generator, the server cores and the body path differ.
+- **A first run with 4 workers on every plan** (so that 8 CPUs had 4 workers) showed the same artifact as the old harness: at 1,200 connections Sockets reached 415-422k on 8 CPUs, while epoll stayed at about 295k and io_uring at 280-298k. Giving a native provider fewer workers than CPUs caps it, because it does not use the CPUs that it has no worker on.
+- **Not measured under this matched setup:** 8 KB and 64 KB bodies, 64 connections (a first, unmatched 64-connection run had the providers roughly tied with Sockets at 4 CPUs), HTTPS, and the Linux client side. The Linux client conclusions above still come from the older harness.
+- Measured on one machine under WSL2 and not independently reproduced. Raw CSVs (`wrk-server-matched-workers.csv` and the unmatched first matrix) are in the local results folder and are not committed.
 
 ### What the Linux results say
 
-- **The Bedrock adapter costs about nothing for epoll, and for io_uring at 8-64 KB.** The one open item is io_uring at 1 KB.
-- **"Native is faster than Sockets" is a Windows result.** On Linux/WSL2 the server needs enough workers to match Sockets at 8 KB and does not match it at 1 KB, and the clients have lower p50 but higher CPU and p99. An earlier result in this repository that favored the Linux providers came from a different harness (crank across machines, with TLS) and is not comparable with these plain-HTTP loopback runs.
-- **WSL2 is not a production Linux.** Loopback inside a virtual machine, with 10-20% batch noise and only two repetitions. A bare-metal run, more repetitions and a profile of the io_uring 1 KB server and the 64 KB client would be needed before drawing a conclusion about the providers themselves.
+- **The Bedrock adapter costs about nothing for epoll, and for io_uring at 8-64 KB.** The one open item is io_uring at 1 KB in the old harness (about 8% below the legacy registration); the matched `wrk` run was Bedrock-only and did not re-measure the legacy registration.
+- **The comparison with Sockets depends on matching CPUs and workers.** With one native worker per server CPU and `wrk`, the Linux io_uring server is about 18% ahead of Sockets at 1 KB and epoll is about +6-8% at 4 CPUs and at parity at 8. The earlier "native is slower at 1 KB" reading came from giving Sockets twice the CPUs and from a managed load generator. Native providers need the worker count set to the CPU count; Sockets does not.
+- **The Linux client is the part that does not beat `SocketsHttpHandler`.** The clients have lower p50 but higher CPU and p99, and are slower at 64 KB. The client plan did give the native clients 8 workers on 8 CPUs (0-7) against a Sockets server on 16 CPUs, so the CPU/worker mismatch of the server plan does not apply to it. It was still not re-measured with a different load method or an SMT-aware CPU placement, and the 8 workers share four physical cores.
+- **WSL2 is not a production Linux.** Loopback inside a virtual machine, with 10-20% batch noise and few repetitions. A bare-metal run, more repetitions, 8 KB/64 KB and 64-connection matched runs, and a profile of the Linux 64 KB client would be needed before drawing a conclusion about the providers themselves.
 
 ## What this shows
 
-- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and it matches the private factory within noise on Windows, and for epoll and for io_uring at 8-64 KB on Linux.
+- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and it matches the private factory within noise on Windows, and for epoll and for io_uring at 8-64 KB on Linux. With matched CPUs and workers the Linux servers are at or ahead of the Sockets transport at 1 KB (io_uring about +18%, epoll +6-8% at 4 CPUs).
 - **The client side fits mechanically and can be faster on Windows.** `IConnectionFactory` plus `ConnectCallback` carries real HTTP/1.1 traffic including 1 MiB uploads, on all four providers. RIO beats `SocketsHttpHandler` at 8 KB and 64 KB, and IOCP at 8 KB, on this machine. It does not beat it at 1 KB. On Linux the clients reach parity at 1-8 KB and are slower at 64 KB.
 - **The price is memory and tuning.** RIO uses about two to three times the memory of `SocketsHttpHandler` on the client, IOCP has the worse p99, and the Linux clients have the worse p99 and CPU. All of them need the worker count chosen by the application.
 - **The zero-copy path still needs a new contract.** The Windows gains came from the transport's own receive window and block sizing, not from removing the `Stream` copy. The Linux 64 KB gap is consistent with that copy being the remaining cost. A runtime hook that passes a `ConnectionContext` would remove it, and it would require a `System.Net.Http` API proposal.
@@ -283,7 +315,7 @@ A native Linux server owns its workers, and the worker count decides the result.
 
 - One machine, loopback, three repetitions per Windows cell and two per Linux cell (one for the Windows worker sweep). Differences of a few percent are noise, and the Sockets baseline varies by 10-20% between batches.
 - The server in the client plan is the Sockets transport. The Bedrock client was not measured against a Bedrock server (the `both` plan of `run-bench.ps1` and `run-bench.sh` was not run).
-- The clients are IPv4-only. The Linux numbers are from WSL2, not bare metal, and the io_uring 1 KB server and the Linux 64 KB client gaps were not profiled.
+- The clients are IPv4-only. The Linux numbers are from WSL2, not bare metal. The Linux server tables in the first Linux section use a mismatched CPU/worker plan and a managed load generator (see [Linux server: matched CPUs and workers, native wrk](#linux-server-matched-cpus-and-workers-native-wrk)); the matched run covers only 1 KB, 1,200 connections and plain HTTP. The Linux 64 KB client gap and the old-harness io_uring 1 KB server gap were not profiled.
 - No TLS runs: TLS stays in `SocketsHttpHandler` for the client and in Kestrel or the native providers for the server, and the numbers above are plain HTTP.
 - The client wins depend on the receive window (1 MiB) and, on Windows, the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
 - Latency percentiles are from one load generator at a fixed 64 connections. They are not a latency-focused benchmark.

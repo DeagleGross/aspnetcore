@@ -7,6 +7,7 @@
 #   both   - Bedrock transport on both sides.
 # Environment overrides: REPS DURATION WARMUP CONNECTIONS BODIES PORT CLIENT_WORKERS SERVER_WORKERS SERVER_CPUS CLIENT_CPUS CELLS DLL
 # CELLS filters client cells ("epoll:-1 sockets:-1"), server cells ("iouring:bedrock") or both-plan cells ("epoll").
+# The server plan defaults to 8 server CPUs and 4 native workers, which gives the Sockets transport twice the CPUs of the native providers; see run-wrk-server.sh for matched CPU/worker plans.
 set -uo pipefail
 
 plan=${1:-client}
