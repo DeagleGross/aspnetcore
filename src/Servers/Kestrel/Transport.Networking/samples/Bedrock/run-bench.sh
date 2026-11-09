@@ -102,7 +102,10 @@ for rep in $(seq "$reps"); do
     for body in $bodies; do
         case $plan in
             client)
-                for c in sockets epoll iouring; do
+                # Rotate the arm order per rep so no client handler always runs first.
+                handlers=(sockets epoll iouring)
+                for i in 0 1 2; do
+                    c=${handlers[$(((i + rep - 1) % 3))]}
                     wanted "$c:-1" && run_cell "$rep" sockets bedrock "$c" -1 "$body"
                 done
                 ;;

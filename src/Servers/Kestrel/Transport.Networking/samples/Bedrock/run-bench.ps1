@@ -115,8 +115,11 @@ for ($rep = 1; $rep -le $Reps; $rep++)
         {
             'client'
             {
-                foreach ($c in @(@('sockets', -1), @('iocp', -1), @('rio', -1)))
+                # Rotate the arm order per rep so no client handler always runs first.
+                $arms = @(@('sockets', -1), @('iocp', -1), @('rio', -1))
+                for ($i = 0; $i -lt $arms.Count; $i++)
                 {
+                    $c = $arms[($i + $rep - 1) % $arms.Count]
                     if ($Cells.Count -gt 0 -and "$($c[0]):$($c[1])" -notin $Cells)
                     {
                         continue
@@ -126,9 +129,11 @@ for ($rep = 1; $rep -le $Reps; $rep++)
             }
             'server'
             {
-                foreach ($s in @(@('sockets', 'bedrock'), @('iocp', 'bedrock'), @('iocp', 'legacy'), @('rio', 'bedrock'), @('rio', 'legacy')))
+                $arms = @(@('sockets', 'bedrock'), @('iocp', 'bedrock'), @('iocp', 'legacy'), @('rio', 'bedrock'), @('rio', 'legacy'))
+                for ($i = 0; $i -lt $arms.Count; $i++)
                 {
-                                    Invoke-Cell $rep $s[0] $s[1] 'sockets' -1 $body $ServerCpus $ClientCpus
+                    $s = $arms[($i + $rep - 1) % $arms.Count]
+                    Invoke-Cell $rep $s[0] $s[1] 'sockets' -1 $body $ServerCpus $ClientCpus
                 }
             }
             'both'

@@ -3,7 +3,7 @@
 # Usage (after a Release build of Bedrock.csproj, with wrk installed): ./run-wrk-server.sh
 # Each plan is "<server cpu list>:<native worker count>". Keep the worker count equal to the number of server CPUs: the native providers own their workers,
 # while the Sockets transport scales over every CPU it is given, so a CPU list larger than the worker count favors Sockets.
-# Environment overrides: OUT REPS DLL CLIENT_CPUS BODY PLANS CONNS PORT TLS (none|tls: https with Sockets+SslStream versus transport-owned OpenSSL, TLS 1.2 ECDHE-RSA-AES128-GCM-SHA256)
+# Environment overrides: OUT REPS DLL CLIENT_CPUS BODY PLANS CONNS PORT WARMUP (seconds, default 3) DURATION (seconds, default 8) TLS (none|tls: https with Sockets+SslStream versus transport-owned OpenSSL, TLS 1.2 ECDHE-RSA-AES128-GCM-SHA256)
 # REGISTRATION (bedrock|legacy: Connections.Abstractions factories versus the former private UseNetworkTransport factory; Sockets ignores it) SERVERS (default "sockets epoll iouring")
 # Example: PLANS="0,2,4,6:4 0-7:8" CONNS="64 1200" ./run-wrk-server.sh
 set -uo pipefail
@@ -53,9 +53,9 @@ run_cell()
         kill -9 "$pid" 2> /dev/null
         return
     fi
-    taskset -c "$client_cpus" wrk -t12 -c"$conns" -d3s "$scheme://127.0.0.1:$port/" > /dev/null 2>&1
+    taskset -c "$client_cpus" wrk -t12 -c"$conns" -d"${WARMUP:-3}s" "$scheme://127.0.0.1:$port/" > /dev/null 2>&1
     local res
-    res=$(taskset -c "$client_cpus" wrk -t12 -c"$conns" -d8s --latency "$scheme://127.0.0.1:$port/" 2>&1)
+    res=$(taskset -c "$client_cpus" wrk -t12 -c"$conns" -d"${DURATION:-8}s" --latency "$scheme://127.0.0.1:$port/" 2>&1)
     local rps lat p99 err
     rps=$(grep -oP 'Requests/sec:\s+\K\S+' <<< "$res")
     lat=$(grep -P '^\s+Latency\s+\d' <<< "$res" | awk '{print $2}')
