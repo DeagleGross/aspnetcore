@@ -40,6 +40,8 @@ System.Net.Transport.NetworkConnection.AsDuplexPipe() -> System.IO.Pipelines.IDu
 System.Net.Transport.NetworkConnection.AsStream() -> System.IO.Stream!
 System.Net.Transport.NetworkConnection.CompleteCloseCore(System.Exception? error = null) -> void
 System.Net.Transport.NetworkConnection.CompleteSendCore(int count, System.Exception? error = null) -> void
+System.Net.Transport.NetworkConnection.CompleteSendsInline.get -> bool
+System.Net.Transport.NetworkConnection.CompleteSendsInline.set -> void
 System.Net.Transport.NetworkConnection.ConnectionClosed.get -> System.Threading.CancellationToken
 System.Net.Transport.NetworkConnection.DisposeAsync() -> System.Threading.Tasks.ValueTask
 System.Net.Transport.NetworkConnection.EndReceiveCore(System.Exception? error = null) -> void

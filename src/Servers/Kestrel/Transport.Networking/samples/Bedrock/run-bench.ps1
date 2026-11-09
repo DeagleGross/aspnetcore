@@ -31,6 +31,19 @@ if (-not (Test-Path $csv))
     'plan,rep,server,registration,client,readAhead,body,rps,cpuMsPer1kReq,p50us,p99us,errors,clientWorkingSetMB,serverWorkingSetMB' | Set-Content $csv
 }
 
+# The processes pin themselves with ProcessorAffinity after the runtime has started, so Environment.ProcessorCount and the ThreadPool
+# minimum would still describe the whole machine. DOTNET_PROCESSOR_COUNT gives each process the same view taskset gives on Linux.
+function Get-CpuCount([string]$spec)
+{
+    $count = 0
+    foreach ($part in $spec.Split(','))
+    {
+        $range = $part.Split('-')
+        $count += [int]$range[-1] - [int]$range[0] + 1
+    }
+    return $count
+}
+
 function Wait-Port([int]$port)
 {
     for ($i = 0; $i -lt 100; $i++)
@@ -54,12 +67,16 @@ function Invoke-Cell($rep, $server, $registration, $client, $readAhead, $body, $
 {
     $tag = "$Plan-r$rep-s$server-$registration-c$client-ra$readAhead-b$body"
     $serverArgs = @($dll, 'serve', '--backend', $server, '--registration', $registration, '--port', $Port, '--body-bytes', $body, '--workers', $ServerWorkers, '--cpus', $serverCpus)
+    $env:DOTNET_PROCESSOR_COUNT = Get-CpuCount $serverCpus
     $srv = Start-Process -FilePath $dotnet -ArgumentList $serverArgs -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Out "$tag.server.txt") -RedirectStandardError (Join-Path $Out "$tag.server.err")
+    Remove-Item Env:DOTNET_PROCESSOR_COUNT
     try
     {
         Wait-Port $Port
         $clientArgs = @($dll, 'bench', '--handler', $client, '--url', "http://127.0.0.1:$Port/", '--connections', $Connections, '--duration', $Duration, '--warmup', $Warmup, '--body-bytes', $body, '--workers', $ClientWorkers, '--cpus', $clientCpus, '--read-ahead', $readAhead)
+        $env:DOTNET_PROCESSOR_COUNT = Get-CpuCount $clientCpus
         $cli = Start-Process -FilePath $dotnet -ArgumentList $clientArgs -NoNewWindow -PassThru -RedirectStandardOutput (Join-Path $Out "$tag.client.txt") -RedirectStandardError (Join-Path $Out "$tag.client.err")
+        Remove-Item Env:DOTNET_PROCESSOR_COUNT
         if (-not $cli.WaitForExit(($Duration + $Warmup + 90) * 1000))
         {
             Stop-Process -Id $cli.Id -Force

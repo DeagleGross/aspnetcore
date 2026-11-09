@@ -71,6 +71,13 @@ public abstract class NetworkConnection : IAsyncDisposable
     public long MaxQueuedSendBytes { get; set; } = 1024 * 1024;
 
     /// <summary>
+    /// Gets or sets whether continuations of an awaited <see cref="SendAsync(ReadOnlyMemory{byte})"/> run synchronously on the provider worker thread
+    /// that observed the send completion. The default (false) resumes them on the thread pool. Enable only when the continuation never blocks,
+    /// because it then shares the worker with every other connection assigned to it.
+    /// </summary>
+    public bool CompleteSendsInline { get; set; }
+
+    /// <summary>
     /// Gets the pipe output mode. Do not mix pipe output and direct SendAsync/EnqueueSend on one connection.
     /// </summary>
     public PipeWriter Output
@@ -83,10 +90,13 @@ public abstract class NetworkConnection : IAsyncDisposable
         }
     }
 
-    /// <summary>Returns a copy-free input adapter and the worker-drained output pipe.</summary>
+    /// <summary>
+    /// Returns a copy-free input adapter and the worker-drained output pipe.
+    /// The pipe send mode is claimed on the first <see cref="IDuplexPipe.Output"/> access, so a consumer that only reads through the adapter can still use direct sends.
+    /// </summary>
     public IDuplexPipe AsDuplexPipe()
     {
-        return new DuplexPipe(_input, Output);
+        return new DuplexPipe(_input, this);
     }
 
     /// <summary>
@@ -145,7 +155,7 @@ public abstract class NetworkConnection : IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         SelectSendMode(2);
-        var request = new SendRequest(data, null, cancellationToken, observed: true);
+        var request = new SendRequest(data, null, cancellationToken, observed: true, CompleteSendsInline);
         Admit(request);
         return new ValueTask(request.Completion!.Task);
     }
@@ -528,19 +538,23 @@ public abstract class NetworkConnection : IAsyncDisposable
         }
     }
 
-    private sealed class SendRequest(ReadOnlySequence<byte> buffer, IDisposable? owner, CancellationToken cancellationToken, bool observed)
+    private sealed class SendRequest(ReadOnlySequence<byte> buffer, IDisposable? owner, CancellationToken cancellationToken, bool observed, bool inline = false)
     {
         internal ReadOnlySequence<byte> Buffer { get; } = buffer;
         internal IDisposable? Owner { get; } = owner;
         internal CancellationToken CancellationToken { get; } = cancellationToken;
-        internal TaskCompletionSource? Completion { get; } = observed ? new(TaskCreationOptions.RunContinuationsAsynchronously) : null;
+        internal TaskCompletionSource? Completion { get; } = observed
+            ? new(inline ? TaskCreationOptions.None : TaskCreationOptions.RunContinuationsAsynchronously)
+            : null;
         internal CancellationTokenRegistration Registration;
     }
 
-    private sealed class DuplexPipe(PipeReader input, PipeWriter output) : IDuplexPipe
+    private sealed class DuplexPipe(PipeReader input, NetworkConnection connection) : IDuplexPipe
     {
+        private PipeWriter? _output;
+
         public PipeReader Input { get; } = input;
-        public PipeWriter Output { get; } = output;
+        public PipeWriter Output => _output ??= connection.Output;
     }
 
     private sealed class ConnectionStream(Stream input, Stream output) : Stream

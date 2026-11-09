@@ -9,10 +9,11 @@ It is an experiment, not an API proposal. The new public types are non-shipping 
 | Question | Result |
 | --- | --- |
 | Can the server side hide behind `IConnectionListenerFactory`? | Yes. One class, `NetworkTransportFactory`, implements it together with the existing `IConnectionListenerFactorySelector`. The options type (`IocpEngineOptions`, `RioEngineOptions`, ...) chooses the provider. |
-| Is the Bedrock server as fast as the former private-factory prototype? | Yes, within noise. Over three repetitions the two registrations differ by 0-4% in either direction, and the order flips between repetitions. Both stay ahead of the Sockets transport: RIO by about 19-44% and IOCP by about 9-24%. |
+| Is the Bedrock server as fast as the former private-factory prototype? | Yes, within noise. Over three repetitions the two registrations differ by 0-4% in either direction, and the order flips between repetitions. Both stay ahead of the Sockets transport: RIO by about 19-44% and IOCP by about 9-24% in the first Windows run, and by +5% to +14% (RIO) and +1% to +7% (IOCP) after the Windows harness was fixed ([Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed)). |
 | Can the client side hide behind `IConnectionFactory`? | Yes, for IPv4, on all four providers. The same class implements `IConnectionFactory`, and `UseConnectionFactory` plugs it into `SocketsHttpHandler.ConnectCallback`. Epoll and io_uring got a client path in the Linux follow-up below. |
-| Is the Bedrock client faster than `SocketsHttpHandler`? | **On Windows, modestly. On Linux, no.** The first 3-repetition Windows run gave RIO +13% at 8 KB and +8% at 64 KB. The rotated 4-repetition re-run ([Rotated re-run](#rotated-re-run-the-figures-to-rely-on)) gave RIO +10% at 8 KB, +3% at 64 KB and +2% at 1 KB, and IOCP +6%, +2% and -2%, so the Windows client is a small win at 8 KB and roughly parity elsewhere. Before the receive-path changes below the client was at parity at 1-8 KB and 31-43% slower at 64 KB. On Linux the rotated re-run has epoll at 98%, 101% and 86% and io_uring at 87%, 99% and 73% of `SocketsHttpHandler` at 1, 8 and 64 KB. |
-| Do the servers beat Sockets by a margin, and does Bedrock keep the prototype's numbers? | Bedrock matches the former private-factory prototype within about 5% in every cell on both operating systems (rotated re-run, below). Against Sockets the margin is clear on Windows (RIO +18% to +28%, IOCP +12% to +22%) and for io_uring on Linux in 5 of 6 cells (+14% to +50%). Linux epoll is +11% to +12% on TCP at 1 and 8 KB and about +30% on TLS at 8 and 64 KB, but it does **not** beat Sockets at TCP 64 KB (-5%), and io_uring does not at TLS 64 KB (-10%). The crank-sized margins (+22% TCP, +40% TLS for epoll) were not reproduced on this machine for every cell. |
+| Is the Bedrock client faster than `SocketsHttpHandler`? | **On Windows, modestly. On Linux, no.** The first 3-repetition Windows run gave RIO +13% at 8 KB and +8% at 64 KB. The rotated 4-repetition re-run ([Rotated re-run](#rotated-re-run-the-figures-to-rely-on)) gave RIO +10% at 8 KB, +3% at 64 KB and +2% at 1 KB, and IOCP +6%, +2% and -2%. Those Windows runs had a harness artefact that favoured Bedrock ([below](#a-harness-artefact-that-flattered-bedrock-on-windows)); with it fixed ([Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed)) RIO is -4% at 1 KB, +10% at 8 KB and +6% at 64 KB, and IOCP -2%, +3% and +7%, so the Windows client is parity at 1 KB and a small win at 8-64 KB. Before the receive-path changes below the client was at parity at 1-8 KB and 31-43% slower at 64 KB. On Linux the rotated re-run has epoll at 98%, 101% and 86% and io_uring at 87%, 99% and 73% of `SocketsHttpHandler` at 1, 8 and 64 KB. |
+| Do the servers beat Sockets by a margin, and does Bedrock keep the prototype's numbers? | Bedrock matches the former private-factory prototype within about 5% in every cell on both operating systems (rotated re-run, below). Against Sockets the margin on Windows is RIO +5% to +14% and IOCP +1% to +7% after the harness fix (the rotated re-run before the fix said RIO +18% to +28%, IOCP +12% to +22%), and for io_uring on Linux in 5 of 6 cells (+14% to +50%). Linux epoll is +11% to +12% on TCP at 1 and 8 KB and about +30% on TLS at 8 and 64 KB, but it does **not** beat Sockets at TCP 64 KB (-5%), and io_uring does not at TLS 64 KB (-10%). The crank-sized margins (+22% TCP, +40% TLS for epoll) were not reproduced on this machine for every cell. |
+| Is the Bedrock client faster than a plain `Socket` once HTTP and Kestrel are removed? | **io_uring yes (about +7% to +16% at 64 B to 8 KB), epoll only at parity, as long as the consumer does not `await NetworkConnection.SendAsync` on a CPU-limited client.** Raw TCP against a C server, WSL2, 2 client CPUs, one machine ([Raw TCP client](#raw-tcp-client-removing-http-and-kestrel-from-the-picture)). The default awaited send cost epoll 30% of its throughput because its continuation hops to the thread pool. `EnqueueSend`, or the opt-in `CompleteSendsInline`, brings it back to parity. The `Stream` adapter costs another 4-9 points at 8-64 KB. **On Windows (harness fixed), RIO is ahead by about 6-17% at 64 B and 1 KB, IOCP is at parity, and nothing beats `Socket` at 64 KB.** |
 | Does the Windows advantage carry over to Linux? | **On the server, yes for io_uring, and for epoll at a small core count. On the client, no.** With matched CPUs and workers and a native `wrk` load generator (1 KB, 1,200 connections, 4 repetitions), the Bedrock io_uring server is about 18% ahead of the Sockets server at both 4 and 8 logical CPUs and has a lower p99. Epoll is about 6-8% ahead at 4 CPUs and at parity at 8. An earlier "epoll about 82%, io_uring about 73% of Sockets" result was a harness artifact (Sockets had 8 CPUs, the native providers 4 workers, and the load generator was a .NET `HttpClient`); it is kept in the Linux section for the record. The Bedrock adapter itself is within noise of the former private-factory server: an interleaved 8-repetition A/B of epoll at 1 KB and 256 connections gave Bedrock +1.6% (TCP) and +3.8% (TLS) over the legacy registration, with each beating Sockets by about 15-18%. At 256 connections with TLS the Bedrock servers are ahead of Sockets (`SslStream`) at 1-8 KB (epoll +24-40%, io_uring +47-59%, one machine, 3 repetitions); 64 KB is inconclusive. The figures of the earlier crank run (`LINUX-RESULTS.md`) are the pre-Bedrock reference and are compared in [Linux server: TCP and TLS at 256 connections](#linux-server-tcp-and-tls-at-256-connections-and-how-it-compares-with-the-pre-bedrock-numbers). The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
 | What does the client cost? | Memory. RIO registers its slabs, so the client working set is about 140 MB at 1-8 KB and 230 MB at 64 KB against about 65-70 MB for `SocketsHttpHandler`. IOCP is close to Sockets (75-95 MB), but its p99 latency is worse. |
 | Is anything lost by going through the interfaces? | The zero-copy read lease. A `ConnectionContext` exposes `PipeReader` and `PipeWriter`, so the native page lease is hidden unless the consumer asks for `INetworkConnectionFeature`. A `Stream` for `ConnectCallback` is a pipe adapter and copies once. |
@@ -40,6 +41,7 @@ The smallest thing that makes Bedrock happen is one class. Nothing in `Microsoft
 | `System.Net.Transport.INetworkConnectionFeature` with `NetworkConnection Connection { get; }` | No. Optional optimization. | The zero-copy read lease and the explicit send queue are the reason a native transport can be faster, and a `ConnectionContext` pipe hides them. A consumer that does not know the feature still works through the pipes. |
 | `Microsoft.Extensions.DependencyInjection.NetworkTransportServiceCollectionExtensions.AddNetworkTransport(IServiceCollection, NetworkEngineOptions, NetworkNativeTlsOptions? = null)` | No. Convenience. | Registers one singleton as both `IConnectionListenerFactory` and `IConnectionFactory`. Without it, a consumer registers the factory itself. |
 | `System.Net.Transport.NetworkTransportHttpExtensions.UseConnectionFactory(SocketsHttpHandler, IConnectionFactory)` and `(..., int receiveBufferBytes)` | No. Convenience for the experiment. | Sets `ConnectCallback`. The real work is the internal `ConnectionContextStream` that adapts a duplex pipe to a `Stream`. |
+| `System.Net.Transport.NetworkConnection.CompleteSendsInline { get; set; }` (default `false`) | No. Opt-in, only for a consumer that awaits `SendAsync` and whose continuation never blocks. | Found by the [raw TCP client](#raw-tcp-client-removing-http-and-kestrel-from-the-picture) study. It decides which thread runs the continuation of an awaited `SendAsync`. The default hops to the thread pool, which cost the epoll provider 30% of its throughput on a CPU-limited client. See that section for the design tension. |
 
 The prototype options types (`NetworkEngineOptions` and its derived types) and `NetworkNativeTlsOptions` already existed and are reused, so they are not Bedrock additions. Worker count, affinity, pool caps and trimming are provider specific and have to be passed somewhere, so they stay public.
 
@@ -121,7 +123,7 @@ The Windows runs passed all of these for IOCP and RIO, and the Linux runs (WSL2)
 
 ## Benchmarks
 
-The first three subsections are Windows (IOCP and RIO). The Linux results follow in [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock).
+The first three subsections are Windows (IOCP and RIO). **They were measured before the Windows harness was fixed and overstate the Bedrock margin over `System.Net.Sockets`; the corrected figures are in the [Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed).** The Linux results follow in [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock).
 
 All Windows runs use the `samples\Bedrock` app (`serve` and `bench` modes) driven by `samples\Bedrock\run-bench.ps1`. The machine is a Ryzen 9 7950X3D (16 cores, 32 logical) on Windows 11, with client and server on loopback and pinned to disjoint logical CPUs. Each cell is 64 connections, 2 s warmup and 8 s measured. HTTP/1.1, the request body is echoed, and the body size is the number in the first column. All cells had 0 errors. `registration` `bedrock` means `AddNetworkTransport`, `legacy` means `UseNetworkTransport` with the private factory. CPU is the process CPU time in ms per 1,000 requests. Raw CSV files are in a local results folder and are not committed.
 
@@ -363,6 +365,8 @@ What would still be needed to claim the crank figures for Bedrock: running the B
 
 The tables above were measured in several batches, some with a fixed arm order, which lets drift and warm-up favor whichever arm runs first. This section repeats the four comparisons that matter (Linux server, Linux client, Windows server, Windows client) with the **arm order rotated per repetition**, longer runs (3 s warmup, 10 s measured) and more repetitions. Where it disagrees with an earlier table, use this section.
 
+**Correction for the Windows parts of this section.** The Windows runs here, like every earlier Windows run in this document, pinned the benchmark processes after the runtime had started, so .NET sized its thread pool for 32 CPUs ([the harness artefact](#a-harness-artefact-that-flattered-bedrock-on-windows)). That favoured the native providers over `System.Net.Sockets`. For the Windows server and client figures, rely on the [Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed) instead. The Linux parts are unaffected.
+
 Method:
 
 - Rotation: `samples\Bedrock\run-wrk-rotate.sh` (Linux server), `run-bench.sh` and `run-bench.ps1` (the `client` and `server` plans) start each repetition with a different arm, so every arm is first, middle and last equally often.
@@ -441,16 +445,163 @@ Kestrel on the Sockets transport on CPUs 16-31, the client on CPUs 0-7 with 8 wo
 | Question | Answer |
 | --- | --- |
 | Does Bedrock match the former prototype? | Yes. Linux server within about -5% to +7% (no consistent sign), Windows server within ±1.1%. |
-| Do the servers beat Sockets by a margin? | Windows: yes, in every cell (RIO +18% to +28%, IOCP +11% to +22%). Linux io_uring: yes in 5 of 6 cells (+14% to +50%), except TLS 64 KB (-10%). Linux epoll: +11-12% (TCP 1 and 8 KB) and about +30% (TLS 8 and 64 KB), parity or slightly below at TCP 64 KB (-5%) and weak at TLS 1 KB (+6%, noisy baseline). |
-| Do the clients beat `SocketsHttpHandler`? | Windows: slightly (RIO +10% at 8 KB, +3% at 1 and 64 KB; IOCP +8% at 8 KB, about +3% at 64 KB, -2% at 1 KB), at 65-100 MB more memory for RIO and a worse p99 for IOCP. Linux: no (epoll 98%, 101%, 86%; io_uring 87%, 99%, 73%). |
+| Do the servers beat Sockets by a margin? | Windows: yes for RIO in every cell and for IOCP at 8 and 64 KB, but by much less than the rotated re-run said once the harness is fixed (RIO +5% to +14%, IOCP +1% to +7%, [Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed); the rotated re-run before the fix said RIO +18% to +28%, IOCP +11% to +22%). Linux io_uring: yes in 5 of 6 cells (+14% to +50%), except TLS 64 KB (-10%). Linux epoll: +11-12% (TCP 1 and 8 KB) and about +30% (TLS 8 and 64 KB), parity or slightly below at TCP 64 KB (-5%) and weak at TLS 1 KB (+6%, noisy baseline). |
+| Do the clients beat `SocketsHttpHandler`? | Windows, harness fixed: parity at 1 KB (RIO -4%, IOCP -2%, inside a 10% CV), a small win at 8 KB (RIO +10%, IOCP +3%) and 64 KB (+6% and +7%), at 63-163 MB more memory for RIO and a worse p99 for IOCP. The pre-fix rotated re-run said RIO +10% at 8 KB and +3% elsewhere, IOCP +8% at 8 KB. Linux: no (epoll 98%, 101%, 86%; io_uring 87%, 99%, 73%). |
 | What would it take to say more? | A crank run of the Bedrock sample with a separate load generator, bare-metal Linux, a `wrk`-class generator on Windows, and a profile of the Linux 64 KB client path. |
+
+## Raw TCP client: removing HTTP and Kestrel from the picture
+
+The HTTP client benchmarks above compare `SocketsHttpHandler` over a Kestrel Sockets server. They put the HTTP layer, the `Stream` adapter and a managed server between the transport and the number. This section removes all three to see whether the transport itself is faster than `System.Net.Sockets` on the client side.
+
+### Setup
+
+- **Server.** `samples\BedrockTcp\tcpserver\tcp_server.c`, one C file for Linux and Windows. It reads the request bytes, writes the response bytes and repeats, on loopback IPv4 with `TCP_NODELAY` and non-blocking sockets. On Linux it uses 16 level-triggered epoll threads on CPUs 8-31. On Windows it uses `WSAPoll` with a 1 ms timeout, which quantises latency, so Windows numbers are only comparable between arms of the same table.
+- **Client.** `samples\BedrockTcp\Program.cs`. 64 connections, each a closed loop: write the request, read the whole response, repeat. No HTTP, no TLS. The client process is pinned to CPUs 0-1 and the providers run 2 workers, so the client is the CPU-limited side.
+- **Arms.** `sockets` is a plain `Socket`. For a provider, `<provider>-pipe` uses `ConnectionContext.Transport` (what Kestrel and any `IConnectionFactory` consumer sees). `-stream` uses the `ConnectionContextStream` that `UseConnectionFactory` hands to `SocketsHttpHandler`. `-native` uses `INetworkConnectionFeature` with an awaited `NetworkConnection.SendAsync` and `ReceiveAsync`. `-native-inline` is `-native` with `CompleteSendsInline = true`. `-queued` uses `AllocateBuffer` and `EnqueueSend` and never awaits the send.
+- **Method.** Linux (WSL2) on a Ryzen 9 7950X3D, 5 repetitions of 6 s after a 2 s warm-up, arm order rotated per repetition, all errors 0. Measured on one machine, not independently reproduced. Each repetition's ratio is taken against the Sockets arm of the same repetition and the median is shown, with the number of repetitions the arm beat Sockets in.
+
+### Linux results: share of Sockets (100% is parity), paired median, repetitions won
+
+| Arm | 64 B / 64 B | 64 B / 1 KB | 64 B / 8 KB | 64 B / 64 KB |
+| --- | --- | --- | --- | --- |
+| Sockets (mean requests/s) | 125.8k | 122.0k | 119.1k | 84.7k |
+| Sockets (client CPU ms per 1k requests) | 14.62 | 14.70 | 15.42 | 21.98 |
+| epoll-pipe | 100.0%, 3/5 | 99.6%, 2/5 | 103.5%, 5/5 | 102.4%, 4/5 |
+| epoll-stream | 101.2%, 3/5 | 104.6%, 4/5 | 97.1%, 1/5 | 98.1%, 1/5 |
+| **epoll-native (default `SendAsync`)** | **70.3%, 0/5** | **70.2%, 0/5** | **67.0%, 0/5** | **66.3%, 0/5** |
+| epoll-native-inline | 97.3%, 2/5 | 107.1%, 4/5 | 100.1%, 3/5 | 103.4%, 4/5 |
+| epoll-queued | 98.0%, 1/5 | 106.4%, 4/5 | 101.1%, 3/5 | 100.9%, 3/5 |
+| io_uring-pipe | 109.7%, 5/5 | 115.7%, 5/5 | 110.2%, 5/5 | 106.0%, 3/5 |
+| io_uring-stream | 108.1%, 5/5 | 115.5%, 5/5 | 105.1%, 4/5 | 97.9%, 1/5 |
+| io_uring-native (default `SendAsync`) | 102.5%, 3/5 | 109.8%, 4/5 | 106.3%, 4/5 | 97.2%, 2/5 |
+| io_uring-native-inline | 109.8%, 5/5 | 115.3%, 5/5 | 106.7%, 5/5 | 101.7%, 3/5 |
+| io_uring-queued | 110.6%, 5/5 | 109.1%, 5/5 | 107.6%, 4/5 | 100.0%, 3/5 |
+
+Client CPU per request tracks throughput (the client is CPU-limited), so a share above 100% is also a lower cost per request. io_uring uses 89-95% of the Sockets CPU per request at 64 B to 8 KB.
+
+### What the numbers say
+
+- **io_uring beats Sockets on the raw client**, by about 7-16% for the pipe and `-native-inline` layers at 64 B to 8 KB, and is within 2-6% of it at 64 KB. Both layers win in 5 of 5 repetitions at 64 B and 1 KB.
+- **epoll is at parity, not ahead.** Its pipe, `-native-inline` and `-queued` layers have paired medians of 97-107%, and individual repetitions range from 89% to 114%. This is a plausible ceiling rather than a defect: `System.Net.Sockets` is also an epoll engine, so per request both do a `send`, a `recv` and a share of an `epoll_wait`. io_uring wins because it batches submissions and completions. That explanation is a hypothesis; the syscall counts were not measured.
+- **The server-side margin does not carry over.** The Kestrel margin comes from the whole request path (scheduling, pipe hand-offs, parsing), where the native workers remove thread-pool hops. A raw client has almost none of that, so there is little left for the transport to win on epoll.
+
+### The epoll `SendAsync` finding
+
+The first matrix had `epoll-native` at 67-70% of Sockets with +50% client CPU and a p99 of 6-8 ms, in every cell, while its p50 was the lowest of all arms (340 µs against 460 µs). io_uring was unaffected. The cause is the thread-pool hop on the awaited send:
+
+- `NetworkConnection.SendAsync` returns a task from a `TaskCompletionSource` created with `RunContinuationsAsynchronously`.
+- The task completes on the provider worker, but only on the next pump iteration (`PumpOutputCore` calls `FinishRequest` after the data is fully consumed).
+- The continuation is the benchmark's read loop, so every request queued a thread-pool work item. On a 2-CPU client the epoll worker and the thread-pool threads compete for the same two cores. The result is a bimodal latency (a low p50 and a 6 ms tail) and a third more CPU per request.
+
+Evidence, each measured on the same machine, 64 B request and 1 KB response:
+
+| Experiment | epoll-native share of Sockets |
+| --- | --- |
+| Default (`RunContinuationsAsynchronously`) | 69.8% and 68.5% in two runs |
+| `EnqueueSend`, no await (`epoll-queued`) | 106.8% |
+| Hard-coded synchronous continuation (throwaway change) | 101.6% |
+| `CompleteSendsInline = true` | 99.7% |
+
+The cause is CPU contention. A separate diagnostic with no Sockets arm gave epoll-native 68% of epoll-pipe on 2 client CPUs (94.8k against 139.7k requests per second), and 98% of epoll-pipe on 4 client CPUs (176.3k against 179.8k, 2 repetitions). With spare cores the hop is cheap and the arms converge, because a closed loop of 64 connections is then bound by latency rather than CPU. The same diagnostic with the thread pool spin limit set to 0 raised epoll-native from 94.8k to 114.7k, which also points at thread-pool wake-ups as the cost.
+
+### Design consequences
+
+1. **Send-completion scheduling is part of the contract.** An awaited send that resumes on the thread pool is the safe default (user code never stalls the provider worker that serves other connections), but it can cost 30% on a CPU-limited client. Any real `NetworkConnection` would need to say where the continuation runs.
+2. **The fire-and-forget send is the fast path for request/response clients.** `AllocateBuffer` plus `EnqueueSend` took epoll from 70% to 106% with no new API, and it also removes the per-send `TaskCompletionSource`. Errors surface through connection closure instead of the call, which is the price.
+3. **`CompleteSendsInline` is a small opt-in.** It is the only API this study added (see [New public API](#new-public-api-non-shipping)). It runs the continuation synchronously on the worker, so enabling it is only safe if the continuation never blocks. Alternatives not built: a pooled `IValueTaskSource` for the send (removes the allocation and lets the scheduler be chosen), or completing synchronously when the provider sent immediately. Both change a public return type or contract, which is why only the property was added.
+4. **Lazy `Output` in `AsDuplexPipe`.** `NetworkTransportFactory.ConnectAsync` returns a `KestrelConnectionContext`, and its constructor read `Transport.Output`, which claimed the pipe send mode before any native consumer could choose the direct mode. Every native arm failed with `InvalidOperationException: Pipe output and direct queued sends are separate consumption modes`. The pipe is now created on first use. This is a bug fix, not an API change, but it shows that a single connection object exposing two send modes needs a defined choice point.
+
+### The `Stream` adapter at 8 KB and 64 KB
+
+`-stream` is within noise of its `-pipe` sibling at 64 B and 1 KB, and 4-9 points below it at 8 KB and 64 KB (paired medians: epoll 97% and 98%, io_uring 105% and 98%, against 104% and 102%, 110% and 106% for the pipe arms), with 6-16% more client CPU per request. That is what one extra `memcpy` per byte looks like: the pipe arm only advances over the leased page, while `ConnectionContextStream.ReadAsync` copies from the page into the caller's buffer, and `Socket` copies once from the kernel straight into the caller's buffer. The size dependence fits, but the copy was not isolated with a profile. A direct `Stream` that skipped the pipe was already tried on the Windows HTTP client and was not better (see the dropped experiment above), so the pipe hop does not look like the main cost and the remaining candidate is the lease-then-copy model itself. Removing it needs a receive that fills a caller-supplied buffer, which is a different contract from the leased `ReadOnlySequence<byte>`.
+
+### Windows results: RIO and IOCP against a plain `Socket`
+
+Same client, same arms, same C server (Windows build, 16 `WSAPoll` threads on CPUs 8-31, 1 ms poll timeout). The client is pinned to CPUs 0-1 with 2 provider workers and `DOTNET_PROCESSOR_COUNT=2` (see [the harness artefact](#a-harness-artefact-that-flattered-bedrock-on-windows) below, which is why this table replaces an earlier one). 4 repetitions of 6 s after a 2 s warm-up, arm order rotated, all errors 0, 64 connections. Measured on one machine, not independently reproduced. Paired median share of Sockets (100% is parity), repetitions won out of 4, and the median client CPU per request as a share of Sockets.
+
+| Arm | 64 B / 64 B | 64 B / 1 KB | 64 B / 64 KB |
+| --- | --- | --- | --- |
+| Sockets (mean requests/s) | 58.6k | 55.7k | 52.9k |
+| Sockets (client CPU ms per 1k requests) | 31.21 | 33.51 | 34.70 |
+| iocp-pipe | 102.5%, 4/4, cpu 99% | 100.1%, 2/4, cpu 101% | 99.0%, 2/4, cpu 104% |
+| iocp-stream | 98.0%, 2/4 | 102.5%, 4/4 | 90.1%, 0/4, cpu 113% |
+| iocp-native | 93.0%, 2/4 | 99.8%, 2/4 | 95.1%, 0/4 |
+| iocp-native-inline | 93.4%, 1/4 | 100.4%, 2/4 | 98.2%, 2/4 |
+| iocp-queued | 89.5%, 1/4 | 102.0%, 3/4 | 97.6%, 2/4 |
+| rio-pipe | 105.6%, 3/4, cpu 96% | **117.1%, 4/4, cpu 88%** | 93.1%, 1/4, cpu 108% |
+| rio-stream | 109.9%, 3/4 | 110.8%, 4/4 | 79.9%, 1/4, cpu 126% |
+| rio-native | 111.9%, 3/4, cpu 92% | 111.0%, 4/4, cpu 91% | 96.9%, 1/4 |
+| rio-native-inline | 108.9%, 3/4 | 113.8%, 4/4 | 98.0%, 2/4 |
+| rio-queued | 108.8%, 3/4 | 114.1%, 4/4, cpu 89% | 96.7%, 1/4 |
+
+- **RIO is ahead of Sockets at small and medium messages**, by about 6-12% at 64 B and 11-17% at 1 KB, at 4-12% less client CPU per request, and with a lower p50 (about 920-950 µs against about 1,120 µs at 1 KB). The 1 KB cells won 4 of 4 repetitions for every RIO arm. At 64 B the repetitions range from 90% to 130%, so 64 B is a lean win, not a firm one.
+- **IOCP is at parity at 1 KB (100-103%) and for its `-pipe` and `-stream` arms at 64 B (98-103%), and loses at 64 KB.** Its `-native` and `-queued` arms are 5-13 points lower at 64 B (89-93% paired median, ranges 80-118%), which is suggestive rather than established with 4 repetitions. IOCP costs about the same CPU per request as Sockets. This is the expected outcome for a provider that, like `System.Net.Sockets` on Windows, drives overlapped I/O through a completion port.
+- **At 64 KB nothing beats Sockets.** The best arms (`rio-native-inline`, `iocp-native-inline`) are at 98%, and the `Stream` adapter is the worst, at 80% for RIO and 90% for IOCP with 13-26% more CPU per request. That is the extra copy again, and it is larger on Windows than on Linux.
+- **There is no epoll-style awaited-send penalty on Windows.** For RIO, `-native`, `-native-inline` and `-queued` are within noise of `-pipe` (the IOCP 64 B gap above is much smaller than epoll's 30%). The Windows driver sets `CanCompleteInline` (it is true when the call is already on the provider worker), so the send completion does not hop to the thread pool the way the epoll one does.
+- **Sockets still has the lowest p99** (about 1.7-2.1 ms against 1.9-3.0 ms for the Bedrock arms), even where it loses on throughput. Some cells also show a single 50-110 ms pause that hits half of the connections at once (one of the two workers), in 8 of 120 Bedrock cells and not in a consistent arm. That is under 1% of a 6 s window and its cause was not found. Sockets showed an isolated single-connection stall in 2 of 12 cells.
+
+### Allocations: Bedrock allocates 4-7 times as much per request as `Socket`
+
+Measured once (one repetition, 64 B request and 1 KB response, `GC.GetTotalAllocatedBytes` over the measured window), bytes allocated per request:
+
+| Arm | Bytes per request | gen0 GCs in 6 s | GC pause in 6 s |
+| --- | --- | --- | --- |
+| Sockets | 132 | 2 | 0.9 ms |
+| iocp-pipe / rio-pipe | 528 / 528 | 57 / 78 | 21.6 / 24.5 ms |
+| iocp-stream | 664 | 46 | 16.1 ms |
+| iocp-native / rio-native | 619 / 665 | 82 / 108 | 37.1 / 42.3 ms |
+| iocp-queued | 920 | 116 | 50.6 ms |
+
+That is a real cost and an easy target (candidates: the per-send `SendRequest` and `TaskCompletionSource`, the `NetworkReceiveResult` and `NetworkBuffer` wrappers, pipe segments). It is not what limits throughput in these runs: the total pause is 16-51 ms of a 6,000 ms window (under 1%), and `-queued` allocates the most while running faster than `-pipe` at 1 KB. It does matter for the claim that the transport is cheaper than `Socket` per request, which these numbers do not support for IOCP.
+
+### A harness artefact that flattered Bedrock on Windows
+
+The first Windows raw-TCP matrix had Sockets at about 49k requests/s with 600-700 individual stalls of 190-600 ms per 6 s window, and the Bedrock arms 10-29% ahead. The stalls were not a transport property. The benchmark clients pin themselves with `Process.ProcessorAffinity` **after** the runtime has started, so `Environment.ProcessorCount` still reported 32 and the thread pool started with a minimum of 32 threads and grew to 30-48 threads, all contending for 2 CPUs. `System.Net.Sockets` on Windows routes its completions through the thread pool, so it stalled. The Bedrock IOCP and RIO providers complete on their own workers and never touch that path, so the artefact favoured them.
+
+Setting `DOTNET_PROCESSOR_COUNT` to the pinned count (2) made the stalls disappear (685 to 0 per window, p99.9 from 282 ms to 2.5 ms for Sockets) and raised Sockets to 55-65k requests/s. That is the harness fixed here. On Linux the runs pin with `taskset` before the process starts, so .NET sees the right CPU count there and the Linux figures were not affected.
+
+Every earlier Windows table in this document that used `Affinity.Apply` (the Windows server, client and worker-count sections and the Windows rows of the rotated re-run) has the same bias, of unknown size, in Bedrock's favour. They are kept for the record. The re-run is in [Windows HTTP re-run with the CPU count fixed](#windows-http-re-run-with-the-cpu-count-fixed).
+
+### Windows HTTP re-run with the CPU count fixed
+
+Same plans as the Windows server and client sections above (`run-bench.ps1`, 64 connections, 2 s warm-up, 8 s measured, 4 repetitions, arm order rotated, all 96 cells 0 errors), but `run-bench.ps1` now sets `DOTNET_PROCESSOR_COUNT` to the size of each process's pinned CPU set before it starts the process: 4 for the Kestrel server on CPUs 0-3 and 16 for the load generator on CPUs 16-31 in the server plan, and 8 for the client on CPUs 0-7 and 16 for the Sockets server on CPUs 16-31 in the client plan. Measured on one machine, not independently reproduced. The HTTP sample does not print the processor count it saw, so the effect is inferred from the script and from the Sockets 64 KB p99 falling from 7.9-14 ms to 3.0 ms, not observed directly. Paired median share of Sockets (100% is parity), repetitions won out of 4:
+
+**Server plan** (Kestrel on CPUs 0-3, 4 workers; the baseline is the Sockets transport):
+
+| Body | Sockets (mean, CV) | IOCP Bedrock | IOCP legacy | RIO Bedrock | RIO legacy |
+| --- | --- | --- | --- | --- | --- |
+| 1 KB | 87.8k (7.2%) | 100.7%, 2/4 | 98.3%, 1/4 | 105.1%, 3/4 | 108.5%, 4/4 |
+| 8 KB | 75.6k (4.9%) | 103.0%, 4/4 | 102.0%, 3/4 | 108.1%, 3/4 | 107.5%, 3/4 |
+| 64 KB | 48.7k (2.9%) | 106.8%, 4/4 | 105.5%, 4/4 | 113.9%, 4/4 | 113.1%, 4/4 |
+
+| Body | IOCP Bedrock / legacy | RIO Bedrock / legacy | CPU ms/1k (Sockets / IOCP / RIO) | p99 µs (Sockets / IOCP / RIO) | Server working set MB (Sockets / IOCP / RIO) |
+| --- | --- | --- | --- | --- | --- |
+| 1 KB | 100.0% | 97.4% (88-100%) | 73.6 / 69.7 / 65.8 | 1680 / 2460 / 1539 | 55 / 60 / 92 |
+| 8 KB | 102.5% | 101.2% | 79.0 / 77.5 / 76.1 | 1930 / 2365 / 1544 | 56 / 60 / 92 |
+| 64 KB | 100.8% | 101.4% | 96.1 / 92.3 / 89.2 | 2992 / 2912 / 2186 | 65 / 68 / 108 |
+
+**Client plan** (`SocketsHttpHandler` against Bedrock on CPUs 0-7 with 8 workers, Kestrel on the Sockets transport):
+
+| Body | Sockets (mean, CV) | IOCP | RIO | CPU ms/1k (Sockets / IOCP / RIO) | p99 µs (Sockets / IOCP / RIO) | Client working set MB (Sockets / IOCP / RIO) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 KB | 130.2k (10.3%) | 98.5%, 2/4 | 95.5%, 1/4 | 46.6 / 47.9 / 47.8 | 2084 / 3196 / 2148 | 71 / 70 / 134 |
+| 8 KB | 115.5k (8.9%) | 103.4%, 3/4 | 109.9%, 4/4 | 54.4 / 50.4 / 47.6 | 2200 / 2979 / 2253 | 66 / 68 / 134 |
+| 64 KB | 93.7k (5.0%) | 106.5%, 3/4 | 106.4%, 3/4 | 66.0 / 62.0 / 60.7 | 2692 / 3083 / 2642 | 64 / 88 / 227 |
+
+- **The Windows server margin over Sockets is about half of what the earlier tables said.** RIO is now +5%, +8% and +14% at 1, 8 and 64 KB (earlier: +18%, +22%, +28%) and IOCP +1%, +3% and +7% (earlier: +12%, +13%, +22%). The ordering is the same and RIO is ahead in every cell, but IOCP at 1 KB is at parity, and RIO at 1 KB is a 3-of-4 lean rather than a firm win. The Sockets means barely moved (87.8k, 75.6k and 48.7k against 84.8k, 75.4k and 49.5k); the Bedrock servers got slower (RIO 1 KB 100.0k to 90.6k, IOCP 1 KB 94.8k to 87.6k). So the artefact favoured the native providers in this plan, but the mechanism on the server side was not investigated.
+- **Bedrock still equals the former prototype on Windows.** The Bedrock-to-legacy paired medians are 97-103%, with one repetition range of 88-100% for RIO at 1 KB. That is the same conclusion as before.
+- **The client margin is a small win at 8 KB and 64 KB and nothing at 1 KB.** RIO is +10% at 8 KB (4 of 4) and IOCP +3%; both are +6-7% at 64 KB. At 1 KB the per-repetition ratios run 92-112% for RIO and 92-107% for IOCP against a Sockets CV of 10%, which is not distinguishable from parity. The 64 KB gain is larger than in the earlier run (+3% for both), and a 4-repetition run cannot say whether that is a real effect.
+- **CPU per request:** on the server RIO uses 4-11% less than Sockets and IOCP 2-5% less. On the client both are about 3% higher at 1 KB, then RIO is 12% and 8% lower and IOCP 7% and 6% lower at 8 and 64 KB. **p99:** RIO is the lowest on the server at every size; on the client Sockets is lowest at 1 and 8 KB and RIO at 64 KB, and IOCP is worse than Sockets on the client at every size, as before.
+- **Memory is unchanged by the fix**: RIO costs 36-43 MB more than Sockets on the server and 63-163 MB more on the client, IOCP 3-5 MB more on the server and up to 24 MB more on the client at 64 KB.
 
 ## What this shows
 
-- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and in the rotated re-run it matches the private factory within ±1.1% on Windows and within about -5% to +7% (no consistent sign) on Linux. It beats Sockets in every Windows cell and, on Linux, in most cells (io_uring 5 of 6, epoll 5 of 6, with epoll TLS 1 KB weak); the exceptions are listed in the [verdict](#verdict).
-- **The client side fits mechanically and is slightly faster only on Windows.** `IConnectionFactory` plus `ConnectCallback` carries real HTTP/1.1 traffic including 1 MiB uploads, on all four providers. In the rotated re-run RIO is +10% at 8 KB and +3% at 1 and 64 KB over `SocketsHttpHandler`, and IOCP is +8% at 8 KB. On Linux the clients reach parity at 1-8 KB (epoll) and are slower at 64 KB (86% epoll, 73% io_uring).
+- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and in the rotated re-run it matches the private factory within ±1.1% on Windows (97-103% after the harness fix) and within about -5% to +7% (no consistent sign) on Linux. It beats Sockets in every Windows cell with RIO (+5% to +14% after the fix) and in most with IOCP (+1% to +7%), and, on Linux, in most cells (io_uring 5 of 6, epoll 5 of 6, with epoll TLS 1 KB weak); the exceptions are listed in the [verdict](#verdict).
+- **The client side fits mechanically and is slightly faster only on Windows.** `IConnectionFactory` plus `ConnectCallback` carries real HTTP/1.1 traffic including 1 MiB uploads, on all four providers. With the Windows harness fixed, RIO is +10% at 8 KB and +6% at 64 KB over `SocketsHttpHandler` (parity at 1 KB) and IOCP is +3% and +7%. On Linux the clients reach parity at 1-8 KB (epoll) and are slower at 64 KB (86% epoll, 73% io_uring).
 - **The price is memory and tuning.** RIO uses about two to three times the memory of `SocketsHttpHandler` on the client, IOCP has the worse p99, and the Linux clients have the worse p99 and CPU. All of them need the worker count chosen by the application.
 - **The zero-copy path still needs a new contract.** The Windows gains came from the transport's own receive window and block sizing, not from removing the `Stream` copy. The Linux 64 KB gap is consistent with that copy being the remaining cost. A runtime hook that passes a `ConnectionContext` would remove it, and it would require a `System.Net.Http` API proposal.
+- **Below HTTP, io_uring is ahead and epoll is level with Sockets.** The raw TCP client puts the margin where it can be attributed to the transport: io_uring +7% to +16% at 64 B to 8 KB, epoll within about ±5%. The HTTP client numbers are lower because the HTTP layer, the `Stream` copy and the Kestrel Sockets server add cost that the transport does not control.
+- **How the consumer sends matters as much as the provider.** An awaited `SendAsync` on a CPU-limited client cost epoll 30% through a thread-pool hop. Any contract for a public native connection would need to define where send continuations run, and offer a fire-and-forget path.
 
 ## What a real runtime integration would still need
 
@@ -464,6 +615,7 @@ Kestrel on the Sockets transport on CPUs 16-31, the client on CPUs 0-7 with 8 wo
 
 - One machine, loopback. The [rotated re-run](#rotated-re-run-the-figures-to-rely-on) used 4 repetitions per Windows and Linux client cell and 5 per Linux server cell with the arm order rotated; the earlier sections used two or three repetitions in a fixed order (one for the Windows worker sweep). Differences of a few percent are noise, and the Sockets baseline varies by 10-20% between batches.
 - The Windows server runs use a .NET `SocketsHttpClient` load generator, the Linux server runs use native `wrk`. The two operating systems are not directly comparable, and no Windows `wrk`-class generator was available.
+- **Windows methodology changed during the study.** Until the [harness artefact](#a-harness-artefact-that-flattered-bedrock-on-windows) was found, the Windows benchmark processes were pinned with `Process.ProcessorAffinity` after start-up and .NET saw all 32 CPUs. The Windows tables that precede the [Windows HTTP re-run](#windows-http-re-run-with-the-cpu-count-fixed) are biased in Bedrock's favour by an unknown amount and are kept only for the record; the raw-TCP Windows table and the HTTP re-run run with `DOTNET_PROCESSOR_COUNT` set. The HTTP re-run's fix is inferred from the script and from the Sockets p99, because that sample does not print the processor count.
 - The Windows TLS path (Schannel, TLS 1.3 by default) was not measured.
 - The server in the client plan is the Sockets transport. The Bedrock client was not measured against a Bedrock server (the `both` plan of `run-bench.ps1` and `run-bench.sh` was not run).
 - The clients are IPv4-only. The Linux numbers are from WSL2, not bare metal. The Linux server tables in the first Linux section use a mismatched CPU/worker plan and a managed load generator (see [Linux server: matched CPUs and workers, native wrk](#linux-server-matched-cpus-and-workers-native-wrk)); the matched run covers only 1 KB, 1,200 connections and plain HTTP. The Linux 64 KB client gap and the old-harness io_uring 1 KB server gap were not profiled.
@@ -471,3 +623,4 @@ Kestrel on the Sockets transport on CPUs 16-31, the client on CPUs 0-7 with 8 wo
 - The Linux 256-connection runs used native `wrk` on the same host as the server, 2 server CPUs, 8 s measured intervals, 3 to 8 repetitions, and single repetitions varied by more than 2x. Percentages below 10-15% in a single cell are not findings, and the 64 KB cells are inconclusive.
 - The client wins depend on the receive window (1 MiB) and, on Windows, the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
 - Latency percentiles are from one load generator at a fixed 64 connections. They are not a latency-focused benchmark.
+- The raw TCP client runs used a C echo-style server on 16 threads (CPUs 8-31), a client pinned to 2 CPUs with 2 provider workers, 64 connections and 5 repetitions of 6 s on Linux (4 on Windows, with `DOTNET_PROCESSOR_COUNT=2`). The 2-CPU client is deliberate, to make the client the limiting side, and with 4 CPUs the arms converge. Per-arm repetition counts are small (n=5), so differences under about 5% are noise. The Linux run is on WSL2. The Windows C server polls with `WSAPoll` and a 1 ms timeout, so its latency is quantised and its absolute throughput is far below Linux.
