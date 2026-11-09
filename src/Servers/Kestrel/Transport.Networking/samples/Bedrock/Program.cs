@@ -28,7 +28,7 @@ static int Usage()
     Console.WriteLine("""
         Bedrock sample
           check [--backend all|iocp|rio|epoll|iouring]
-          serve --backend sockets|iocp|rio|epoll|iouring [--registration bedrock|legacy] [--port 5443] [--body-bytes 1024] [--workers 4] [--cpus 0-3]
+          serve --backend sockets|iocp|rio|epoll|iouring [--registration bedrock|legacy] [--port 5443] [--body-bytes 1024] [--workers 4] [--cpus 0-3] [--tls none|stream|native]
           bench --handler sockets|iocp|rio|epoll|iouring [--url http://127.0.0.1:5443/] [--connections 64] [--duration 10] [--warmup 3] [--body-bytes 1024] [--workers 2] [--cpus 8-15] [--read-ahead 1048576]
         """);
     return 2;
@@ -66,8 +66,13 @@ internal static class BedrockServer
         var port = arguments.Get("port", 5443);
         var bodyBytes = arguments.Get("body-bytes", 1024);
         var workers = arguments.Get("workers", 4);
+        var tls = arguments.Get("tls", "none");
         var payload = new byte[bodyBytes];
         Array.Fill(payload, (byte)'x');
+
+        using var certificate = tls == "none" ? null : TlsFixture.CreateCertificate();
+        using var files = tls == "native" ? TlsFixture.WritePem(certificate!) : null;
+        var nativeTls = files is null ? null : new NetworkNativeTlsOptions { CertificatePath = files.CertificatePath, PrivateKeyPath = files.PrivateKeyPath };
 
         var builder = WebApplication.CreateBuilder();
         builder.Logging.ClearProviders();
@@ -75,14 +80,26 @@ internal static class BedrockServer
         {
             if (arguments.Get("registration", "bedrock") == "legacy")
             {
-                builder.WebHost.UseNetworkTransport(Backends.Create(backend, workers));
+                builder.WebHost.UseNetworkTransport(Backends.Create(backend, workers), nativeTls);
             }
             else
             {
-                builder.Services.AddNetworkTransport(Backends.Create(backend, workers));
+                builder.Services.AddNetworkTransport(Backends.Create(backend, workers), nativeTls);
             }
         }
-        builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, port, listen => listen.Protocols = HttpProtocols.Http1));
+        builder.WebHost.ConfigureKestrel(options => options.Listen(IPAddress.Loopback, port, listen =>
+        {
+            listen.Protocols = HttpProtocols.Http1;
+            if (tls == "stream")
+            {
+                listen.UseHttps(https =>
+                {
+                    https.ServerCertificate = certificate;
+                    https.SslProtocols = System.Security.Authentication.SslProtocols.Tls12;
+                    https.OnAuthenticate = (_, ssl) => ssl.CipherSuitesPolicy = new System.Net.Security.CipherSuitesPolicy([System.Net.Security.TlsCipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256]);
+                });
+            }
+        }));
         var app = builder.Build();
         app.MapGet("/", (HttpContext context) =>
         {
@@ -99,7 +116,7 @@ internal static class BedrockServer
             lifetime.StopApplication();
             return "ok";
         });
-        Console.WriteLine($"serving backend={backend} port={port} body={bodyBytes}");
+        Console.WriteLine($"serving backend={backend} port={port} body={bodyBytes} tls={tls}");
         await app.RunAsync();
         return 0;
     }

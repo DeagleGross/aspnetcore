@@ -2,6 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Net.Transport;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 internal static class Backends
 {
@@ -15,6 +17,41 @@ internal static class Backends
         "iouring" => new IoUringEngineOptions { WorkerCount = workers },
         _ => throw new ArgumentException($"Unknown backend '{name}'. Use iocp, rio, epoll or iouring.")
     };
+}
+
+internal static class TlsFixture
+{
+    public static X509Certificate2 CreateCertificate()
+    {
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest("CN=localhost", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddDnsName("localhost");
+        san.AddIpAddress(System.Net.IPAddress.Loopback);
+        request.CertificateExtensions.Add(san.Build());
+        using var created = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        return X509CertificateLoader.LoadPkcs12(created.Export(X509ContentType.Pfx), null, X509KeyStorageFlags.Exportable);
+    }
+
+    public static PemFiles WritePem(X509Certificate2 certificate)
+    {
+        var folder = Directory.CreateTempSubdirectory("bedrock-tls-").FullName;
+        var certificatePath = Path.Combine(folder, "certificate.pem");
+        var keyPath = Path.Combine(folder, "key.pem");
+        using var key = certificate.GetRSAPrivateKey() ?? throw new InvalidOperationException("The fixture requires an RSA key.");
+        File.WriteAllText(certificatePath, certificate.ExportCertificatePem());
+        File.WriteAllText(keyPath, key.ExportPkcs8PrivateKeyPem());
+        return new PemFiles(folder, certificatePath, keyPath);
+    }
+
+    internal sealed class PemFiles(string folder, string certificatePath, string privateKeyPath) : IDisposable
+    {
+        public string CertificatePath { get; } = certificatePath;
+
+        public string PrivateKeyPath { get; } = privateKeyPath;
+
+        public void Dispose() => Directory.Delete(folder, recursive: true);
+    }
 }
 
 internal sealed class Arguments(Dictionary<string, string> values)

@@ -12,7 +12,7 @@ It is an experiment, not an API proposal. The new public types are non-shipping 
 | Is the Bedrock server as fast as the former private-factory prototype? | Yes, within noise. Over three repetitions the two registrations differ by 0-4% in either direction, and the order flips between repetitions. Both stay ahead of the Sockets transport: RIO by about 19-44% and IOCP by about 9-24%. |
 | Can the client side hide behind `IConnectionFactory`? | Yes, for IPv4, on all four providers. The same class implements `IConnectionFactory`, and `UseConnectionFactory` plugs it into `SocketsHttpHandler.ConnectCallback`. Epoll and io_uring got a client path in the Linux follow-up below. |
 | Is the Bedrock client faster than `SocketsHttpHandler`? | At 8 KB and 64 KB, yes: RIO is about +13% and +8% (ahead in 6 of 6 repetitions), IOCP about +6% and +3.5%. At 1 KB it is at parity (IOCP -2%, RIO 0%), which is noise-dominated. Before the changes below the client was at parity at 1-8 KB and 31-43% slower at 64 KB. |
-| Does the Windows advantage carry over to Linux? | **On the server, yes for io_uring, and for epoll at a small core count. On the client, no.** With matched CPUs and workers and a native `wrk` load generator (1 KB, 1,200 connections, 4 repetitions), the Bedrock io_uring server is about 18% ahead of the Sockets server at both 4 and 8 logical CPUs and has a lower p99. Epoll is about 6-8% ahead at 4 CPUs and at parity at 8. An earlier "epoll about 82%, io_uring about 73% of Sockets" result was a harness artifact (Sockets had 8 CPUs, the native providers 4 workers, and the load generator was a .NET `HttpClient`); it is kept in the Linux section for the record. The Bedrock adapter itself is within about 4% of the former private-factory server in five of six cells, and io_uring at 1 KB is about 8% lower in both repetitions of the old harness. The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
+| Does the Windows advantage carry over to Linux? | **On the server, yes for io_uring, and for epoll at a small core count. On the client, no.** With matched CPUs and workers and a native `wrk` load generator (1 KB, 1,200 connections, 4 repetitions), the Bedrock io_uring server is about 18% ahead of the Sockets server at both 4 and 8 logical CPUs and has a lower p99. Epoll is about 6-8% ahead at 4 CPUs and at parity at 8. An earlier "epoll about 82%, io_uring about 73% of Sockets" result was a harness artifact (Sockets had 8 CPUs, the native providers 4 workers, and the load generator was a .NET `HttpClient`); it is kept in the Linux section for the record. The Bedrock adapter itself is within noise of the former private-factory server: an interleaved 8-repetition A/B of epoll at 1 KB and 256 connections gave Bedrock +1.6% (TCP) and +3.8% (TLS) over the legacy registration, with each beating Sockets by about 15-18%. At 256 connections with TLS the Bedrock servers are ahead of Sockets (`SslStream`) at 1-8 KB (epoll +24-40%, io_uring +47-59%, one machine, 3 repetitions); 64 KB is inconclusive. The figures of the earlier crank run (`LINUX-RESULTS.md`) are the pre-Bedrock reference and are compared in [Linux server: TCP and TLS at 256 connections](#linux-server-tcp-and-tls-at-256-connections-and-how-it-compares-with-the-pre-bedrock-numbers). The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
 | What does the client cost? | Memory. RIO registers its slabs, so the client working set is about 140 MB at 1-8 KB and 230 MB at 64 KB against about 65-70 MB for `SocketsHttpHandler`. IOCP is close to Sockets (75-95 MB), but its p99 latency is worse. |
 | Is anything lost by going through the interfaces? | The zero-copy read lease. A `ConnectionContext` exposes `PipeReader` and `PipeWriter`, so the native page lease is hidden unless the consumer asks for `INetworkConnectionFeature`. A `Stream` for `ConnectCallback` is a pipe adapter and copies once. |
 
@@ -286,12 +286,74 @@ Latency (mean, p99):
 - **Epoll is ahead at 4 CPUs and at parity at 8.** In the third 4-CPU epoll repetition (243.5k) `wrk` reported 1,200 socket timeouts, so that rep is suspect. Without it the epoll mean is 225.8k (+6%). The 4-CPU epoll gain is therefore about +6-8%, which is within the spread of its own repetitions (218-244k).
 - **This reproduces the earlier prototype shape**: epoll about +13.5% at 4 cores and about -4% at 8 cores in the October 1 `wrk2` batch, and io_uring ahead of epoll for raw TCP in the September 29 batch. It does not reproduce any individual number, because the load generator, the server cores and the body path differ.
 - **A first run with 4 workers on every plan** (so that 8 CPUs had 4 workers) showed the same artifact as the old harness: at 1,200 connections Sockets reached 415-422k on 8 CPUs, while epoll stayed at about 295k and io_uring at 280-298k. Giving a native provider fewer workers than CPUs caps it, because it does not use the CPUs that it has no worker on.
-- **Not measured under this matched setup:** 8 KB and 64 KB bodies, 64 connections (a first, unmatched 64-connection run had the providers roughly tied with Sockets at 4 CPUs), HTTPS, and the Linux client side. The Linux client conclusions above still come from the older harness.
+- **Not measured under this matched 1,200-connection setup:** 8 KB and 64 KB bodies and HTTPS (both are in the 256-connection section below), 64 connections (a first, unmatched 64-connection run had the providers roughly tied with Sockets at 4 CPUs), and the Linux client side. The Linux client conclusions above still come from the older harness.
 - Measured on one machine under WSL2 and not independently reproduced. Raw CSVs (`wrk-server-matched-workers.csv` and the unmatched first matrix) are in the local results folder and are not committed.
+
+### Linux server: TCP and TLS at 256 connections, and how it compares with the pre-Bedrock numbers
+
+The numbers above are plain HTTP at 1,200 connections. The earlier prototype results that the Linux providers were measured with (`LINUX-RESULTS.md` on the `dmkorolev/networking-proto` branch of `aspnet/Benchmarks`, crank, 2026-10-28) used 256 connections, TCP and TLS, and 1, 8 and 64 KB bodies. This section repeats that shape under Bedrock. **Those crank numbers are the pre-Bedrock prototype, not Bedrock**, and they are reported, not reproduced here.
+
+What "epoll" is in the Bedrock server: the epoll provider with the transport-owned TLS (`NetworkNativeTlsOptions`, an fd-bound OpenSSL connection, the same design as the "direct TLS" columns of the earlier document) in the TLS cells, and plain TCP in the TCP cells. The io_uring provider owns its ciphertext through a custom BIO by default. The Sockets baseline is stock Kestrel `UseHttps` (`SslStream`) in the TLS cells. The earlier Bedrock tables in this document are TCP only, which is why the epoll rows there do not show the TLS gain.
+
+Setup of the new runs: WSL2, `samples\Bedrock\run-wrk-matrix.sh` and `run-wrk-ab.sh`, server on CPUs `0,2` with 2 workers, native `wrk -t12 -c256` on CPUs 16-27 (3 s warmup, 8 s measured), TLS 1.2 `ECDHE_RSA_AES_128_GCM_SHA256` with a self-signed certificate, 0 errors apart from a one-per-connection start-up timeout in some cells. The crank runs used a separate load-generator machine (32 `wrk` threads), 15 s warmup and 15 s measured, a different server app (`app.Run`, no Server header, `BodyWriter.WriteAsync`; the Bedrock sample uses `MapGet`) and a CPU about half as fast, so absolute numbers are not comparable (the WSL2 Sockets baseline is about twice the crank baseline).
+
+Bedrock registration for all three servers, mean of 3 repetitions (requests per second, percent over the Sockets mean in the same table):
+
+| Mode | Body | Sockets | epoll | io_uring |
+| --- | --- | --- | --- | --- |
+| TCP | 1 KB | 145.9k | 153.6k (+5%) | 172.3k (+18%) |
+| TCP | 8 KB | 99.6k | 129.6k (+30%) | 134.4k (+35%) |
+| TCP | 64 KB | 34.9k | 38.9k (+11%) | 46.2k (+32%) |
+| TLS | 1 KB | 84.9k | 105.1k (+24%) | 125.0k (+47%) |
+| TLS | 8 KB | 67.4k | 94.1k (+40%) | 107.5k (+59%) |
+| TLS | 64 KB | 20.1k | 20.9k (+4%) | 14.9k (-26%) |
+
+The 64 KB cells were repeated five times and swing too much to conclude anything (TCP: Sockets 49.7k mean, epoll 42.4k, io_uring 57.0k, which is -15% and +15%; TLS: Sockets 18.2k, epoll 22.3k, io_uring 16.5k, with a spread of 9-28k inside each server). The Sockets TCP 64 KB baseline itself moved from 34.9k to 49.7k between the two batches. Treat 64 KB as inconclusive.
+
+Pre-Bedrock crank numbers for the same cells (from `LINUX-RESULTS.md`, mean of 3 runs, percent over its own Sockets baseline, reported):
+
+| Mode | Body | Sockets | epoll | io_uring |
+| --- | --- | --- | --- | --- |
+| TCP | 1 KB | 73.0k | 79.5k (+8.9%) | 90.0k (+23.2%) |
+| TCP | 8 KB | 50.5k | 59.3k (+17.4%) | 65.5k (+29.7%) |
+| TCP | 64 KB | 14.5k | 17.7k (+22.3%) | 17.9k (+23.8%) |
+| TLS | 1 KB | 37.2k | 52.8k (+41.7%) | 57.5k (+54.3%) |
+| TLS | 8 KB | 24.9k | 35.6k (+42.6%) | 37.2k (+49.2%) |
+| TLS | 64 KB | 6.6k | 9.2k (+39.7%) | 8.7k (+31.9%) |
+
+Two points about reading that table. The "+20% to +40%" for epoll is the TLS rows against `SslStream`. The TCP rows are +9%, +17% and +22% for epoll, and +23%, +30% and +24% for io_uring. Against those, the Bedrock server on this machine agrees at TCP 8 KB (epoll +30%, io_uring +35%), TLS 8 KB (+40% and +59%) and TLS 1 KB for io_uring (+47%). It is lower only for epoll at TCP 1 KB and TLS 1 KB, and that is addressed next. Io_uring at TLS 64 KB is below Sockets here and above it in the crank run; 64 KB is the noisy cell.
+
+#### Is the gap to the earlier numbers caused by Bedrock?
+
+To test that, the former private registration (`UseNetworkTransport`, `--registration legacy`) and the Bedrock registration (`AddNetworkTransport`, `--registration bedrock`) were run on the same harness, interleaved repetition by repetition so that host drift hits both (`samples\Bedrock\run-wrk-ab.sh`). Sockets runs in the Bedrock cells as the common baseline. The same server app and flags are used for both. The first A/B run (3 repetitions, epoll and io_uring, TCP and TLS, 1 KB and 8 KB) was too noisy for epoll at 1 KB (the Sockets baseline alone varied between 48k and 128k in one cell, and single repetitions of 46-52k appeared for Bedrock epoll), so epoll at 1 KB was repeated 8 times.
+
+Epoll at 1 KB, 256 connections, 8 interleaved repetitions (requests per second):
+
+| Mode | Sockets mean | Bedrock epoll mean | Legacy epoll mean | Bedrock epoll over Sockets (paired median) | Legacy epoll over Sockets (paired median) | Bedrock over legacy (paired median) |
+| --- | --- | --- | --- | --- | --- | --- |
+| TCP | 138.2k | 158.8k | 156.9k | +17.7% | +15.8% | +1.6% |
+| TLS | 111.7k | 131.1k | 129.2k | +17.1% | +14.6% | +3.8% |
+
+Per repetition, Bedrock epoll over legacy epoll ranged 0.94-1.08 (TCP) and 0.91-1.11 (TLS) with no consistent sign, and the run-to-run coefficient of variation of each server was 4-7%. **The Bedrock adapter is within noise of the former private registration.**
+
+First A/B run, means of 3 repetitions (percent over the Sockets mean of the same cell; noisy, shown for completeness):
+
+| Cell | Sockets | epoll Bedrock | epoll legacy | io_uring Bedrock | io_uring legacy |
+| --- | --- | --- | --- | --- | --- |
+| TCP 1 KB | 88.0k | 112.0k (+27%) | 128.5k (+46%) | 138.2k (+57%) | 129.4k (+47%) |
+| TCP 8 KB | 84.5k | 121.2k (+43%) | 117.4k (+39%) | 132.8k (+57%) | 130.9k (+55%) |
+| TLS 1 KB | 84.4k | 88.5k (+5%) | 106.4k (+26%) | 128.1k (+52%) | 136.1k (+61%) |
+| TLS 8 KB | 66.3k | 91.4k (+38%) | 93.2k (+41%) | 106.3k (+60%) | 97.5k (+47%) |
+
+The two registrations differ by -17% to +9% in the means, in both directions, and the large deviations are single repetitions (Bedrock epoll TCP 1 KB had one repetition at 52k against 135k and 148k in the other two; Bedrock epoll TLS 1 KB had one at 46k against 96k for legacy). No cell shows a consistent Bedrock penalty. Io_uring at 1 KB TLS and TCP, which was about 8% lower than legacy in the old harness, was +7% and -6% here, so that earlier gap is also within noise.
+
+**Reading.** The server numbers in `LINUX-RESULTS.md` are the reference for "the transport against Sockets" on a dedicated server with a separate load generator. The Bedrock registration reproduces them within the noise of this machine. The remaining difference from crank is the environment (WSL2 loopback on a shared desktop with `wrk` on the same host, 12 `wrk` threads instead of 32 on another machine, shorter runs, an absolute Sockets baseline about twice as high, which suggests a faster CPU and a different kernel-versus-user balance; this was not isolated) and a different server app. In this environment the Sockets baseline moves 10-20% between batches and by more than 2x between single repetitions, so a repetition-level percentage below about 10-15% is not a finding. The epoll TCP 1 KB gain is the smallest in both crank (+8.9%) and here (+5% in the 3-repetition matrix, +15-18% in the 8-repetition A/B).
+
+What would still be needed to claim the crank figures for Bedrock: running the Bedrock sample through crank with a separate load generator (the `aspnet/Benchmarks` application uses the private factory), 64 connections, bare-metal Linux, and the plain-TCP-plus-`TlsBufferSession` variant (group D, [dotnet/aspnetcore#69565](https://github.com/dotnet/aspnetcore/pull/69565)), which was not measured in either run. Raw CSVs and logs: `D:\code\NetworkingTransports-Results\2026-11-09\linux\wrk\ab-legacy-vs-bedrock` and `c256-tcp-vs-tls` (local, not committed).
 
 ### What the Linux results say
 
-- **The Bedrock adapter costs about nothing for epoll, and for io_uring at 8-64 KB.** The one open item is io_uring at 1 KB in the old harness (about 8% below the legacy registration); the matched `wrk` run was Bedrock-only and did not re-measure the legacy registration.
+- **The Bedrock adapter costs about nothing for epoll, and for io_uring at 8-64 KB.** The io_uring 1 KB gap of about 8% in the old harness did not reproduce in the interleaved 256-connection A/B (+7% TCP, -6% TLS, both within noise). See the previous section.
 - **The comparison with Sockets depends on matching CPUs and workers.** With one native worker per server CPU and `wrk`, the Linux io_uring server is about 18% ahead of Sockets at 1 KB and epoll is about +6-8% at 4 CPUs and at parity at 8. The earlier "native is slower at 1 KB" reading came from giving Sockets twice the CPUs and from a managed load generator. Native providers need the worker count set to the CPU count; Sockets does not.
 - **The Linux client is the part that does not beat `SocketsHttpHandler`.** The clients have lower p50 but higher CPU and p99, and are slower at 64 KB. The client plan did give the native clients 8 workers on 8 CPUs (0-7) against a Sockets server on 16 CPUs, so the CPU/worker mismatch of the server plan does not apply to it. It was still not re-measured with a different load method or an SMT-aware CPU placement, and the 8 workers share four physical cores.
 - **WSL2 is not a production Linux.** Loopback inside a virtual machine, with 10-20% batch noise and few repetitions. A bare-metal run, more repetitions, 8 KB/64 KB and 64-connection matched runs, and a profile of the Linux 64 KB client would be needed before drawing a conclusion about the providers themselves.
@@ -316,6 +378,7 @@ Latency (mean, p99):
 - One machine, loopback, three repetitions per Windows cell and two per Linux cell (one for the Windows worker sweep). Differences of a few percent are noise, and the Sockets baseline varies by 10-20% between batches.
 - The server in the client plan is the Sockets transport. The Bedrock client was not measured against a Bedrock server (the `both` plan of `run-bench.ps1` and `run-bench.sh` was not run).
 - The clients are IPv4-only. The Linux numbers are from WSL2, not bare metal. The Linux server tables in the first Linux section use a mismatched CPU/worker plan and a managed load generator (see [Linux server: matched CPUs and workers, native wrk](#linux-server-matched-cpus-and-workers-native-wrk)); the matched run covers only 1 KB, 1,200 connections and plain HTTP. The Linux 64 KB client gap and the old-harness io_uring 1 KB server gap were not profiled.
-- No TLS runs: TLS stays in `SocketsHttpHandler` for the client and in Kestrel or the native providers for the server, and the numbers above are plain HTTP.
+- TLS was measured only on the Linux server (256 connections, `UseHttps` for Sockets and transport-owned TLS for epoll and io_uring, see [Linux server: TCP and TLS at 256 connections](#linux-server-tcp-and-tls-at-256-connections-and-how-it-compares-with-the-pre-bedrock-numbers)). The clients (`SocketsHttpHandler` TLS stays in `SslStream`) and the Windows server were measured as plain HTTP only.
+- The Linux 256-connection runs used native `wrk` on the same host as the server, 2 server CPUs, 8 s measured intervals, 3 to 8 repetitions, and single repetitions varied by more than 2x. Percentages below 10-15% in a single cell are not findings, and the 64 KB cells are inconclusive.
 - The client wins depend on the receive window (1 MiB) and, on Windows, the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
 - Latency percentiles are from one load generator at a fixed 64 connections. They are not a latency-focused benchmark.
