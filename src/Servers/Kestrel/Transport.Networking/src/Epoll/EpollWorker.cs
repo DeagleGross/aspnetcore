@@ -20,8 +20,9 @@ internal sealed class EpollWorker
 {
     internal const int PageCount = 2048, PageSize = 16384;
     private const ulong ListenerId = 1, WakeId = 2;
-    internal enum CommandKind { OutputReady, ReturnPage, Close, Forget, Unbind, Stop }
-    internal readonly record struct Command(CommandKind Kind, ConnectionState? State = null, int Page = 0);
+    internal enum CommandKind { OutputReady, ReturnPage, Close, Forget, Unbind, Stop, Connected }
+    internal readonly record struct Command(CommandKind Kind, ConnectionState? State = null, int Page = 0, int Fd = -1, IPEndPoint? Remote = null,
+        TaskCompletionSource<IProviderConnection>? Connect = null);
 
     private readonly ConcurrentQueue<Command> _commands = new();
     private readonly Dictionary<ulong, ConnectionState> _connections = new();
@@ -29,11 +30,14 @@ internal sealed class EpollWorker
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Lock _wakeGate = new();
     private readonly ChannelWriter<IProviderConnection> _accepted;
-    private readonly IPEndPoint _endpoint;
+    private readonly IPEndPoint? _endpoint;
     private readonly int _cpu;
-    private readonly byte[] _pages = GC.AllocateUninitializedArray<byte>(PageCount * PageSize, pinned: true);
-    private readonly ulong[] _pageOwners = new ulong[PageCount];
-    private readonly Stack<int> _freePages = new(Enumerable.Range(0, PageCount));
+    // Client workers read whole responses per syscall, so they use fewer, larger pages from a pool of the same total size.
+    private static readonly int ClientPageBytes = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_PAGE_KB") ?? "64", CultureInfo.InvariantCulture) * 1024;
+    private readonly byte[] _pages;
+    private readonly ulong[] _pageOwners;
+    private readonly Stack<int> _freePages;
+    private readonly int _pageCount;
     private int _epoll = -1, _listener = -1, _wake = -1, _pumpThread, _wakeScheduled;
     private nint _context;
     private SessionTlsContext? _sessionContext;
@@ -42,13 +46,14 @@ internal sealed class EpollWorker
     private int _pendingRejections;
     private long _iterations, _wakes, _commandsProcessed, _pagesRead, _bytes, _sendCommands, _finalSendCommands;
     private long _rejectedAccepts, _rejectedDisposed;
-    private readonly bool _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") == "1";
+    private readonly bool _coalesced;
     private readonly int _sendBufferSize = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_EPOLL_SNDBUF") ?? "0", CultureInfo.InvariantCulture);
     internal readonly bool FinalSendEnabled = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") is "1" or "2" or "3";
     internal readonly bool CorkFinal = Environment.GetEnvironmentVariable("NETWORKPROTO_FINAL_SEND") == "3";
     internal readonly Counters Metrics = new();
     internal readonly ILogger Logger;
     internal NativeMemoryPool? OutputPool { get; }
+    internal int PageBytes { get; }
     internal bool Tls { get; }
     internal bool Shared { get; }
     internal Action<ReadOnlySpan<byte>>? HandshakePrefixCallback { get; }
@@ -56,11 +61,20 @@ internal sealed class EpollWorker
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal EpollWorker(IPEndPoint endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<IProviderConnection> accepted, ILogger logger, bool shared = false,
+    // A null endpoint makes this a client worker: it never listens and only adopts sockets connected by EpollClient.
+    internal EpollWorker(IPEndPoint? endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<IProviderConnection> accepted, ILogger logger, bool shared = false,
         Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
         _cpu = cpu;
+        var client = endpoint is null;
+        PageBytes = client ? ClientPageBytes : PageSize;
+        _pageCount = client ? PageCount * PageSize / PageBytes : PageCount;
+        _pages = GC.AllocateUninitializedArray<byte>(_pageCount * PageBytes, pinned: true);
+        _pageOwners = new ulong[_pageCount];
+        _freePages = new Stack<int>(Enumerable.Range(0, _pageCount));
+        // A client worker is woken by every page its consumer returns, so it joins pending wakes unless told otherwise.
+        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is { } coalesce ? coalesce == "1" : client;
         Tls = tls;
         Shared = shared;
         if (shared && AdaptiveOutputPool.Enabled)
@@ -117,9 +131,12 @@ internal sealed class EpollWorker
             }
             _epoll = Native.Check(Native.Create(), "create");
             _wake = Native.Check(Native.CreateWake(), "eventfd");
-            _listener = Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
+            _listener = _endpoint is null ? -1 : Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
             Control(Native.Add, _wake, Native.Readable, WakeId);
-            Control(Native.Add, _listener, Native.Readable, ListenerId);
+            if (_listener >= 0)
+            {
+                Control(Native.Add, _listener, Native.Readable, ListenerId);
+            }
             if (Tls)
             {
                 Console.WriteLine($"EPOLL_TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" impl={(_sessionContext is null ? "native" : "session")} cpu={_cpu} batch=128 managed=true");
@@ -193,7 +210,7 @@ internal sealed class EpollWorker
             {
                 outputPool.Dispose();
             }
-            if (_connections.Count != 0 || _freePages.Count != PageCount)
+            if (_connections.Count != 0 || _freePages.Count != _pageCount)
             {
                 failure ??= new InvalidOperationException("Epoll stopped with outstanding connection/page ownership.");
                 Logger.LogError(failure, "Epoll ownership did not drain.");
@@ -303,6 +320,11 @@ internal sealed class EpollWorker
             StopConnections(null);
             return;
         }
+        if (command.Kind == CommandKind.Connected)
+        {
+            AdoptConnected(command.Fd, command.Remote!, command.Connect!);
+            return;
+        }
         var state = command.State;
         if (state is null)
         {
@@ -369,12 +391,39 @@ internal sealed class EpollWorker
 
     internal IProviderConnection Publish(ConnectionState state)
     {
-        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForEpoll(this, state, _endpoint) : new Connection(this, state, _endpoint);
+        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForEpoll(this, state, _endpoint!) : new Connection(this, state, _endpoint!);
         if (!_accepted.TryWrite(connection))
         {
             _rejectedAccepts++;
             Interlocked.Increment(ref _pendingRejections);
             connection.Abort(new ConnectionAbortedException("Listener stopped."));
+            _ = DisposeRejectedAsync(connection);
+        }
+        return connection;
+    }
+
+    // Outbound sockets are connected by EpollClient and adopted like accepted ones, except that the caller is completed instead of the accept channel.
+    private void AdoptConnected(int fd, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    {
+        if (_stopping)
+        {
+            CloseDescriptor(ref fd);
+            completion.TrySetException(new ObjectDisposedException(nameof(EpollWorker)));
+            return;
+        }
+        var id = checked(++_nextId);
+        var state = new TcpConnection(this, id, fd, remote, completion);
+        _connections.Add(id, state);
+        state.Drive(Native.Readable | Native.Writable);
+    }
+
+    internal IProviderConnection PublishClient(ConnectionState state, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    {
+        var connection = ProviderNetworkConnection.ForEpoll(this, state, new IPEndPoint(IPAddress.Loopback, 0), remote);
+        if (!completion.TrySetResult(connection))
+        {
+            connection.Abort(new ConnectionAbortedException("Connect was abandoned."));
+            Interlocked.Increment(ref _pendingRejections);
             _ = DisposeRejectedAsync(connection);
         }
         return connection;
@@ -414,11 +463,11 @@ internal sealed class EpollWorker
         return page;
     }
 
-    internal Memory<byte> Page(int page) => _pages.AsMemory(page * PageSize, PageSize);
+    internal Memory<byte> Page(int page) => _pages.AsMemory(page * PageBytes, PageBytes);
 
     internal void OfferPage(ulong owner, int page)
     {
-        if ((uint)page >= PageCount || _pageOwners[page] != owner)
+        if ((uint)page >= (uint)_pageCount || _pageOwners[page] != owner)
         {
             throw new InvalidOperationException("Epoll page returned by the wrong connection.");
         }
@@ -481,7 +530,7 @@ internal sealed class EpollWorker
             nativeSubmitWaitCalls = 0, returnedPages = Metrics.ReturnedPages, sslReads = Metrics.SslReads,
             receiveAdapterCopyBytes = 0, rejectedAccepts = _rejectedAccepts, rejectedAcceptsDisposed = _rejectedDisposed,
             sendCommands = _sendCommands, finalSendCommands = _finalSendCommands,
-            liveConnections = _connections.Count, leasedPages = PageCount - _freePages.Count
+            liveConnections = _connections.Count, leasedPages = _pageCount - _freePages.Count
         }));
         Console.WriteLine("EPOLL_METRICS " + JsonSerializer.Serialize(Metrics, new JsonSerializerOptions { IncludeFields = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         Console.WriteLine("EPOLL_FINAL_SEND_METRICS " + JsonSerializer.Serialize(new

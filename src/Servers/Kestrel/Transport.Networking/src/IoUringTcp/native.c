@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <liburing.h>
 #include <netinet/tcp.h>
 #include <openssl/err.h>
@@ -114,6 +115,25 @@ int ur_listener(uint32_t ipv4, int port)
         || setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one))
         || bind(fd, (struct sockaddr *)&address, sizeof(address)) || listen(fd, 4096)) {
         int error = errno; close(fd); return -error;
+    }
+    return fd;
+}
+
+// Blocking connect for the client side; the returned socket is nonblocking with TCP_NODELAY. ipv4 is in host byte order.
+int ur_connect(uint32_t ipv4, int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(ipv4) };
+    int one = 1;
+    int flags;
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address))
+        || setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one))
+        || (flags = fcntl(fd, F_GETFL, 0)) < 0
+        || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int error = errno;
+        close(fd);
+        return -error;
     }
     return fd;
 }

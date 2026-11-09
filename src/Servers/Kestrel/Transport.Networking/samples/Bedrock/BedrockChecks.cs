@@ -59,11 +59,12 @@ internal static class BedrockChecks
         Require(factory.CanBind(new IPEndPoint(IPAddress.Loopback, 1)), "IPv4 endpoint must be accepted");
         Require(!factory.CanBind(new DnsEndPoint("localhost", 1)), "DnsEndPoint must fall through");
         Require(!factory.CanBind(new UnixDomainSocketEndPoint("/tmp/x.sock")), "Unix endpoint must fall through");
-        if (OperatingSystem.IsWindows())
+        Require(!factory.CanBind(new IPEndPoint(IPAddress.IPv6Loopback, 1)), "The providers are IPv4 only, so IPv6 must fall through");
+        if (!OperatingSystem.IsWindows())
         {
-            Require(!factory.CanBind(new IPEndPoint(IPAddress.IPv6Loopback, 1)), "Windows providers are IPv4 only, so IPv6 must fall through");
+            Require(!factory.CanBind(new IPEndPoint(IPAddress.Loopback, 0)), "The Linux providers need a fixed port, so port 0 must fall through");
         }
-        return Task.FromResult("IPv4 yes; Dns/Unix (and IPv6 on Windows) fall through");
+        return Task.FromResult("IPv4 yes; Dns/Unix/IPv6 (and port 0 on Linux) fall through");
     }
 
     private static async Task<string> EchoAsync(string backend, int workers)

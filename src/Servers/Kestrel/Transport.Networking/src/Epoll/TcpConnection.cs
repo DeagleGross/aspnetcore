@@ -2,15 +2,20 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.ComponentModel;
+using System.Globalization;
+using System.Net;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : ConnectionState(id)
+internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd, IPEndPoint? remote = null, TaskCompletionSource<IProviderConnection>? connect = null) : ConnectionState(id)
 {
     private const int WriteBudget = 256 * 1024;
+    // A client may write a whole request before reading the response, so it needs a receive window far larger than a server's to keep an echoing peer unblocked.
+    private static readonly int ClientLeaseBytes = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_LEASE_BYTES") ?? "1048576", CultureInfo.InvariantCulture);
+    private readonly int _maxLeased = connect is null ? 4 : Math.Max(2, ClientLeaseBytes / engine.PageBytes);
     private int _fd = fd, _sendLength, _sendOffset;
     private nint _sendData;
     private uint _interest;
@@ -22,7 +27,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
         {
             return;
         }
-        Application ??= engine.Publish(this);
+        Application ??= connect is null ? engine.Publish(this) : engine.PublishClient(this, remote!, connect);
         if (_sendData != 0 && (ready & Native.Writable) != 0)
         {
             Write();
@@ -98,7 +103,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
 
     private unsafe void Read()
     {
-        while (Leased < 4)
+        while (Leased < _maxLeased)
         {
             var page = engine.RentPage(Id);
             if (page < 0)
@@ -109,7 +114,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             engine.Metrics.RecvCalls++;
             fixed (byte* pointer = engine.Page(page).Span)
             {
-                count = Native.Receive(_fd, (nint)pointer, EpollWorker.PageSize);
+                count = Native.Receive(_fd, (nint)pointer, engine.PageBytes);
             }
             if (count <= 0)
             {
@@ -136,7 +141,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
             engine.Received(Application!, page, count);
             // Level-triggered epoll will report any remaining input. Do not make
             // another usually-empty recv after the common small request.
-            if (count < EpollWorker.PageSize && Leased < 4)
+            if (count < engine.PageBytes && Leased < _maxLeased)
             {
                 return;
             }
@@ -182,7 +187,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
 
     internal override void ResumeForPool()
     {
-        if (!Closed && _readPaused && Leased < 4)
+        if (!Closed && _readPaused && Leased < _maxLeased)
         {
             engine.Metrics.PageResumes++;
             ResumeReader();
@@ -191,7 +196,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd) : Conn
 
     private void ResumeReader()
     {
-        if (!Closed && _readPaused && Leased < 4)
+        if (!Closed && _readPaused && Leased < _maxLeased)
         {
             _readPaused = false;
             Drive(Native.Readable);

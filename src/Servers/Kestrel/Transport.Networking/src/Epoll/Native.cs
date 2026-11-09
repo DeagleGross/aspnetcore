@@ -39,6 +39,8 @@ internal static unsafe partial class Native
     internal static partial int Listen(uint ipv4, int port);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_accept")]
     internal static partial int Accept(int listener);
+    [LibraryImport("networkprotoepoll", EntryPoint = "ep_connect")]
+    internal static partial int Connect(uint ipv4, int port);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_socket_option")]
     internal static partial int SetSocketOption(int fd, SocketOption option, int value);
     [LibraryImport("networkprotoepoll", EntryPoint = "ep_shutdown")]

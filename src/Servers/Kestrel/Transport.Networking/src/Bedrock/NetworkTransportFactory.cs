@@ -33,8 +33,8 @@ public sealed class NetworkTransportFactory : IConnectionListenerFactory, IConne
 
     /// <summary>Returns whether the prototype provider handles the endpoint; other endpoints fall through to the next registered factory.</summary>
     /// <param name="endpoint">The endpoint Kestrel asks to bind.</param>
-    /// <returns><see langword="true"/> for IPv4 endpoints on Windows and IP endpoints on Linux.</returns>
-    public bool CanBind(EndPoint endpoint) => endpoint is IPEndPoint ip && (!OperatingSystem.IsWindows() || ip.AddressFamily == AddressFamily.InterNetwork);
+    /// <returns><see langword="true"/> for IPv4 endpoints; the Linux providers also need a fixed nonzero port.</returns>
+    public bool CanBind(EndPoint endpoint) => endpoint is IPEndPoint { AddressFamily: AddressFamily.InterNetwork } ip && (OperatingSystem.IsWindows() || ip.Port > 0);
 
     /// <inheritdoc />
     public async ValueTask<IConnectionListener> BindAsync(EndPoint endpoint, CancellationToken cancellationToken = default)

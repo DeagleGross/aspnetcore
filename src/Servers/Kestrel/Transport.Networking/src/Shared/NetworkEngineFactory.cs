@@ -6,7 +6,9 @@ using System.Linq;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using EpollClient = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.EpollClient;
 using EpollFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll.TransportFactory;
+using RingClient = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.RingClient;
 using RingFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp.TransportFactory;
 using WindowsClient = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.WindowsClient;
 using WindowsFactory = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Windows.TransportFactory;
@@ -45,15 +47,17 @@ public static class NetworkEngineFactory
         {
             throw new ArgumentException("Worker processor IDs must be nonnegative and match WorkerCount.", nameof(options));
         }
+        var defaultPlacement = false;
         if (processors is null && kind == NetworkEngineKind.IoUring)
         {
             processors = Enumerable.Range(0, options.WorkerCount).Select(cpu => 2 * cpu).ToArray();
+            defaultPlacement = true;
         }
         var pool = options is WindowsEngineOptions windows ? WindowsPoolSettings.From(windows) : null;
-        return new ProviderEngine(kind, options.WorkerCount, processors, loggerFactory ?? NullLoggerFactory.Instance, pool);
+        return new ProviderEngine(kind, options.WorkerCount, processors, defaultPlacement, loggerFactory ?? NullLoggerFactory.Instance, pool);
     }
 
-    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine, IConnectableEngine
+    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, bool defaultPlacement, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine, IConnectableEngine
     {
         private readonly List<NetworkListener> _listeners = new();
         private readonly SemaphoreSlim _binding = new(1, 1);
@@ -89,6 +93,9 @@ public static class NetworkEngineFactory
             {
                 NetworkEngineKind.Iocp or NetworkEngineKind.Rio => await WindowsClient.CreateAsync(kind == NetworkEngineKind.Rio, workers, logging, processors, pool,
                     CancellationToken.None).ConfigureAwait(false),
+                NetworkEngineKind.Epoll => await EpollClient.CreateAsync(workers, logging, processors, CancellationToken.None).ConfigureAwait(false),
+                // The ring's default 2*cpu placement is sized for a server on the first cores; an outbound host only pins when the caller asked for specific processors.
+                NetworkEngineKind.IoUring => await RingClient.CreateAsync(workers, logging, defaultPlacement ? null : processors, CancellationToken.None).ConfigureAwait(false),
                 _ => throw new NotSupportedException($"The {kind} prototype provider does not implement outbound connections yet.")
             };
         }

@@ -29,7 +29,7 @@ static int Usage()
         Bedrock sample
           check [--backend all|iocp|rio|epoll|iouring]
           serve --backend sockets|iocp|rio|epoll|iouring [--registration bedrock|legacy] [--port 5443] [--body-bytes 1024] [--workers 4] [--cpus 0-3]
-          bench --handler sockets|iocp|rio [--url http://127.0.0.1:5443/] [--connections 64] [--duration 10] [--warmup 3] [--body-bytes 1024] [--workers 2] [--cpus 8-15] [--read-ahead 1048576]
+          bench --handler sockets|iocp|rio|epoll|iouring [--url http://127.0.0.1:5443/] [--connections 64] [--duration 10] [--warmup 3] [--body-bytes 1024] [--workers 2] [--cpus 8-15] [--read-ahead 1048576]
         """);
     return 2;
 }

@@ -10,8 +10,9 @@ It is an experiment, not an API proposal. The new public types are non-shipping 
 | --- | --- |
 | Can the server side hide behind `IConnectionListenerFactory`? | Yes. One class, `NetworkTransportFactory`, implements it together with the existing `IConnectionListenerFactorySelector`. The options type (`IocpEngineOptions`, `RioEngineOptions`, ...) chooses the provider. |
 | Is the Bedrock server as fast as the former private-factory prototype? | Yes, within noise. Over three repetitions the two registrations differ by 0-4% in either direction, and the order flips between repetitions. Both stay ahead of the Sockets transport: RIO by about 19-44% and IOCP by about 9-24%. |
-| Can the client side hide behind `IConnectionFactory`? | Yes, for IPv4 on Windows. The same class implements `IConnectionFactory`, and `UseConnectionFactory` plugs it into `SocketsHttpHandler.ConnectCallback`. Epoll and io_uring have no client path yet. |
+| Can the client side hide behind `IConnectionFactory`? | Yes, for IPv4, on all four providers. The same class implements `IConnectionFactory`, and `UseConnectionFactory` plugs it into `SocketsHttpHandler.ConnectCallback`. Epoll and io_uring got a client path in the Linux follow-up below. |
 | Is the Bedrock client faster than `SocketsHttpHandler`? | At 8 KB and 64 KB, yes: RIO is about +13% and +8% (ahead in 6 of 6 repetitions), IOCP about +6% and +3.5%. At 1 KB it is at parity (IOCP -2%, RIO 0%), which is noise-dominated. Before the changes below the client was at parity at 1-8 KB and 31-43% slower at 64 KB. |
+| Does the Windows advantage carry over to Linux? | **Not uniformly.** On WSL2 the Linux Bedrock server is within about 4% of the former private-factory server in five of six cells, but io_uring at 1 KB is about 8% lower in both repetitions, and neither Linux server beats the Sockets server at 1 KB (epoll about 82%, io_uring about 73% of Sockets with 4 workers). With 8 workers io_uring beats Sockets at 8 KB (2% and 17% in the two repetitions) and epoll is about 6% behind. The Linux clients are near parity with `SocketsHttpHandler` at 1-8 KB (epoll 99-106%, io_uring 89-105% per repetition) and slower at 64 KB (epoll about 85-95%, io_uring about 75-80%), with higher CPU per request and a higher p99. See [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock). |
 | What does the client cost? | Memory. RIO registers its slabs, so the client working set is about 140 MB at 1-8 KB and 230 MB at 64 KB against about 65-70 MB for `SocketsHttpHandler`. IOCP is close to Sockets (75-95 MB), but its p99 latency is worse. |
 | Is anything lost by going through the interfaces? | The zero-copy read lease. A `ConnectionContext` exposes `PipeReader` and `PipeWriter`, so the native page lease is hidden unless the consumer asks for `INetworkConnectionFeature`. A `Stream` for `ConnectCallback` is a pipe adapter and copies once. |
 
@@ -58,6 +59,7 @@ using var client = new HttpClient(new SocketsHttpHandler().UseConnectionFactory(
 
 - `ConnectionContextStream` (the pipe-to-`Stream` adapter) is internal.
 - Environment variables read by the Windows worker (`WindowsWorker.cs`): `NETWORKPROTO_CLIENT_LEASE_BYTES` (client receive window, default 1 MiB), `NETWORKPROTO_CLIENT_MAX_RECEIVE_BLOCK` (client receive block cap, default 256 KB) and `NETWORKPROTO_IOCP_ZERO_BYTE` (override of the IOCP zero-byte probe). They are tuning knobs for the experiment. A real design would turn at most one of them into an option.
+- Environment variables read by the Linux providers (`EpollWorker.cs`, `TcpConnection.cs`, `Engine.cs`, `RingConnection.cs`), client mode only unless noted: `NETWORKPROTO_CLIENT_PAGE_KB` (receive page size, default 64), `NETWORKPROTO_CLIENT_PAGES` (io_uring only, pages pinned per client engine, default 128), `NETWORKPROTO_CLIENT_LEASE_BYTES` (receive window, default 1 MiB, the same name the Windows worker reads) and `NETWORKPROTO_COALESCE` (`1` or `0`, joins pending worker wakes; defaults to on for clients and off for servers).
 - The private `KestrelFactory` in `src\Shared\Registration.cs` could be removed: `UseNetworkTransport` could register `NetworkTransportFactory` instead. The server benchmark below shows the two perform the same.
 
 ### What the existing abstractions cannot express
@@ -66,18 +68,20 @@ These are the places where something new would be needed for more than an experi
 
 1. **A receive window.** The client needs the transport to keep some bytes in flight for a consumer that writes before it reads. Nothing in `ConnectionContext` carries that. Here it is a transport-internal byte budget configured by an environment variable. If it had to be public, it belongs on the factory or engine options, not on `ConnectionContext`.
 2. **A zero-copy `Stream`.** `ConnectCallback` returns a `Stream`, so the native lease is converted to a pipe and then to a `Stream`. Removing that copy needs a runtime change: a handler hook that accepts an `IConnectionFactory` or a `ConnectionContext`. That is a `System.Net.Http` API proposal and is outside this experiment.
-3. **Client-side selection.** There is a selector for binding but no equivalent for connecting. A factory that supports only IPv4 on Windows cannot say so before `ConnectAsync`, and there is no fallback to a sockets factory. A composite factory would be needed, or a `CanConnect` counterpart.
+3. **Client-side selection.** There is a selector for binding but no equivalent for connecting. A factory whose providers connect only over IPv4 cannot say so before `ConnectAsync`, and there is no fallback to a sockets factory. A composite factory would be needed, or a `CanConnect` counterpart.
 4. **Engine lifetime and worker sizing for clients.** A server owns its workers for the life of the host. A client factory is created ad hoc, and its worker count has no default that fits every machine (see the worker sweep). This is configuration and ownership policy, not a missing interface.
 
-Implementation work that is not API: `ConnectEx` in place of a blocking `connect`, IPv6 and DNS-aware connect, and an epoll or io_uring client path.
+Implementation work that is not API: `ConnectEx` in place of a blocking `connect`, and IPv6 and DNS-aware connect. The epoll and io_uring client paths are implemented in the Linux follow-up.
 
 ## The server side
 
-`NetworkTransportFactory` is the whole server integration. Kestrel selects the factory per endpoint. `CanBind` accepts an `IPEndPoint` (IPv4 only on Windows), so an IPv6, DNS or Unix endpoint falls through to the default sockets factory in the same process. The check run covers this: an IPv6 listener fell through to the default factory.
+`NetworkTransportFactory` is the whole server integration. Kestrel selects the factory per endpoint. `CanBind` accepts an IPv4 `IPEndPoint` (on Linux also only with a non-zero port), so an IPv6, DNS or Unix endpoint falls through to the default sockets factory in the same process. The check run covers this: an IPv6 listener fell through to the default factory.
+
+The Linux follow-up found that `CanBind` had been accepting any `IPEndPoint` on Linux. Kestrel's IPv6 loopback listener then went to the epoll or io_uring factory, which threw `NotSupportedException`. The rule is now the same on both platforms, apart from the port-0 case.
 
 ## The client side
 
-`SocketsHttpHandler.ConnectCallback` returns a `Stream`, and TLS and HTTP framing stay in the handler. `ConnectAsync` resolves a `DnsEndPoint` to the first IPv4 address and connects through the provider. On Windows the `WindowsClient` runs a blocking `connect` on the thread pool and then hands the socket to a worker, which registers it with the completion port or the request queue. The connection is wrapped in a `KestrelConnectionContext`, and the `ConnectionContextStream` adapts its pipe to a `Stream`. The Epoll and IoUring providers throw `NotSupportedException` for a client connection.
+`SocketsHttpHandler.ConnectCallback` returns a `Stream`, and TLS and HTTP framing stay in the handler. `ConnectAsync` resolves a `DnsEndPoint` to the first IPv4 address and connects through the provider. On Windows the `WindowsClient` runs a blocking `connect` on the thread pool and then hands the socket to a worker, which registers it with the completion port or the request queue. The connection is wrapped in a `KestrelConnectionContext`, and the `ConnectionContextStream` adapts its pipe to a `Stream`. The Linux providers have their own client paths, described in the Linux section.
 
 ### Why the first client was slow at 64 KB
 
@@ -105,9 +109,9 @@ The runtime was not changed. A runtime change (concurrent write and read in `Htt
 
 ## Correctness checks
 
-`samples\Bedrock` has a `check` mode. Its last run passed all of these, for IOCP and RIO:
+The Windows runs passed all of these for IOCP and RIO, and the Linux runs (WSL2) passed the same list for epoll and io_uring, after the Linux client work:
 
-- The `CanBind` contract: IPv4 yes, DNS and Unix (and IPv6 on Windows) fall through.
+- The `CanBind` contract: IPv4 yes, DNS, Unix and IPv6 (and port 0 on Linux) fall through.
 - A 262,161-byte echo round trip through `IConnectionListenerFactory` and `IConnectionFactory`.
 - A connect to a closed port fails fast with a `SocketException`.
 - Kestrel plus `HttpClient`: GET keep-alive and POST echoes of 1 KiB to 1 MiB, through the default overload, which has no read-ahead for native connections.
@@ -116,9 +120,11 @@ The runtime was not changed. A runtime change (concurrent write and read in `Htt
 
 ## Benchmarks
 
-All runs use the `samples\Bedrock` app (`serve` and `bench` modes) driven by `samples\Bedrock\run-bench.ps1`. The machine is a Ryzen 9 7950X3D (16 cores, 32 logical) on Windows 11, with client and server on loopback and pinned to disjoint logical CPUs. Each cell is 64 connections, 2 s warmup and 8 s measured. HTTP/1.1, the request body is echoed, and the body size is the number in the first column. All cells had 0 errors. `registration` `bedrock` means `AddNetworkTransport`, `legacy` means `UseNetworkTransport` with the private factory. CPU is the process CPU time in ms per 1,000 requests. Raw CSV files are in a local results folder and are not committed.
+The first three subsections are Windows (IOCP and RIO). The Linux results follow in [Linux: epoll and io_uring under Bedrock](#linux-epoll-and-io_uring-under-bedrock).
 
-### Server: the Kestrel transport through the abstractions
+All Windows runs use the `samples\Bedrock` app (`serve` and `bench` modes) driven by `samples\Bedrock\run-bench.ps1`. The machine is a Ryzen 9 7950X3D (16 cores, 32 logical) on Windows 11, with client and server on loopback and pinned to disjoint logical CPUs. Each cell is 64 connections, 2 s warmup and 8 s measured. HTTP/1.1, the request body is echoed, and the body size is the number in the first column. All cells had 0 errors. `registration` `bedrock` means `AddNetworkTransport`, `legacy` means `UseNetworkTransport` with the private factory. CPU is the process CPU time in ms per 1,000 requests. Raw CSV files are in a local results folder and are not committed.
+
+### Windows server: the Kestrel transport through the abstractions
 
 A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-3 with 4 workers. Three repetitions per cell, rows are the average. Requests per second, then p99 latency in µs:
 
@@ -134,7 +140,7 @@ A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-3 with 4 wo
 - Sockets has a 14 ms p99 at 64 KB against 2-3 ms for the native providers. The cause was not investigated.
 - Server working set: 61-73 MB for Sockets, 64-72 MB for IOCP and 96-113 MB for RIO. The RIO figure is registered slabs ([MemoryFootprint.md](MemoryFootprint.md)).
 
-### Client: `SocketsHttpHandler` against the Bedrock connection factory
+### Windows client: `SocketsHttpHandler` against the Bedrock connection factory
 
 A Kestrel server on the Sockets transport (CPUs 16-31). The client is on CPUs 0-7, with 8 client workers for the Bedrock providers, through the default `UseConnectionFactory` overload. Three repetitions, rows are the average, "wins" is the number of repetitions in which the provider beat Sockets in the same repetition:
 
@@ -165,7 +171,7 @@ Before and after, as a share of Sockets measured in the same run (the before num
 
 The 1 KB row did not improve and RIO's slightly lower value is within noise. The 64 KB row is where the receive-path work paid off.
 
-### Client: worker count
+### Windows client: worker count
 
 A Bedrock client does not use the thread pool for I/O. It has a fixed number of engine workers, each owning its connections. Throughput at 1 KB and 64 connections, from one run per cell. This sweep was run with the earlier client code and was not repeated:
 
@@ -179,27 +185,105 @@ A Bedrock client does not use the thread pool for I/O. It has a fixed number of 
 
 Throughput scales about linearly with workers, at about 27k requests per second per IOCP worker and about 30k per RIO worker, and reaches parity with `SocketsHttpHandler` at 6-8 workers. A Bedrock client has to size its workers (about the CPU count that the client may use) and place them on distinct cores, while `SocketsHttpHandler` scales with the thread pool. RIO client memory also grows with the worker count, because each worker registers its own slab (about 68 MB at 1 worker to about 140 MB at 8). A client that runs below the worker count it needs is far slower than Sockets, so the default matters.
 
+## Linux: epoll and io_uring under Bedrock
+
+The first pass covered only the Windows providers. The Linux providers could serve `IConnectionListenerFactory` already, but they had no client path, so `IConnectionFactory` threw `NotSupportedException`. This section adds the client paths and measures both providers as a Kestrel transport and as an `HttpClient` connection factory. **The result is less favorable than on Windows, and it should be read as such.**
+
+### What was added
+
+- **Epoll client** (`src\Epoll\EpollClient.cs`, `ep_connect` in `native.c`). `ConnectAsync` runs a blocking `connect` on the thread pool, like the Windows client, then hands the socket to a worker in client mode.
+- **io_uring client** (`src\IoUringTcp\RingClient.cs`, `ur_connect` in `native.c`). The same shape: blocking `connect` on the thread pool, then the socket joins the engine's ring. IPv4 only.
+- **Connect errors** (`src\Shared\ConnectFailure.cs`). `ECONNREFUSED`, `ETIMEDOUT`, `ENETUNREACH` and `EHOSTUNREACH` become a `SocketException` with the matching `SocketError`, so callers see what `Socket.ConnectAsync` would throw. Other errors become an `IOException`.
+- **Client-specific receive sizing**, gated on client mode so the server path is unchanged. Client pages are 64 KB (`NETWORKPROTO_CLIENT_PAGE_KB`). The receive window is a 1 MiB byte budget (`NETWORKPROTO_CLIENT_LEASE_BYTES`), which is what prevents the HTTP/1.1 echo stall described above. Coalescing of writes is on by default for clients and off for servers (`NETWORKPROTO_COALESCE`). An io_uring client engine pins 128 x 64 KB = 8 MB (`NETWORKPROTO_CLIENT_PAGES`) instead of the 2048 x 16 KB = 32 MB of a server engine.
+- **A `CanBind` fix** (see [The server side](#the-server-side)).
+- **`samples\Bedrock\run-bench.sh`**, the bash counterpart of `run-bench.ps1`, for the same `client`, `server` and `both` plans.
+
+### Environment
+
+WSL2 (kernel 6.18, Ubuntu) on the same Ryzen 9 7950X3D, 32 logical CPUs, loopback. In the client plan the Sockets Kestrel server runs on CPUs 16-31 and the client on CPUs 0-7. In the server plan Kestrel runs on CPUs 0-7 and the client (`SocketsHttpHandler`) on CPUs 16-31. 64 connections, 2 s warmup, 8 s measured, 2 repetitions per cell, HTTP/1.1 echo, no TLS. All cells had 0 errors. Rows are the average of two repetitions. The Linux runs are noisier than the Windows runs: the Sockets baseline moved by 10-20% between batches, and WSL2 adds virtualization overhead on top. Results are from one machine and were not independently reproduced. Raw CSVs are in the local results folder and are not committed.
+
+### Linux client: `SocketsHttpHandler` against the Bedrock connection factory
+
+The two providers were measured in separate batches, each with its own Sockets rows from the same batch. 8 client workers, through the default `UseConnectionFactory` overload.
+
+| Body | Client | Requests per second | vs Sockets | p50 µs | p99 µs | CPU ms/1k | Working set |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 KB | SocketsHttpHandler | 320.9k | 100% | 162 | 768 | 19.8 | 100 MB |
+| 1 KB | epoll | 322.0k | 100% | 114 | 1801 | 22.9 | 114 MB |
+| 8 KB | SocketsHttpHandler | 274.3k | 100% | 187 | 916 | 22.4 | 94 MB |
+| 8 KB | epoll | 280.2k | 102% | 124 | 2223 | 26.7 | 114 MB |
+| 64 KB | SocketsHttpHandler | 126.4k | 100% | 429 | 1654 | 47.3 | 78 MB |
+| 64 KB | epoll | 108.2k | 86% | 380 | 3776 | 66.2 | 96 MB |
+| 1 KB | SocketsHttpHandler | 327.1k | 100% | 159 | 738 | 19.4 | 96 MB |
+| 1 KB | io_uring | 311.7k | 95% | 136 | 1526 | 23.0 | 128 MB |
+| 8 KB | SocketsHttpHandler | 270.3k | 100% | 190 | 929 | 22.7 | 90 MB |
+| 8 KB | io_uring | 260.8k | 96% | 164 | 1675 | 27.1 | 120 MB |
+| 64 KB | SocketsHttpHandler | 124.1k | 100% | 438 | 1673 | 48.1 | 78 MB |
+| 64 KB | io_uring | 94.8k | 76% | 530 | 2646 | 70.9 | 152 MB |
+
+- **There is no throughput win on Linux.** Epoll is at parity at 1-8 KB (per repetition 99-106% of Sockets) and about 14% behind at 64 KB. io_uring is 90-100% at 1 KB, 89-105% at 8 KB (noisy), and about 24% behind at 64 KB.
+- **The native clients use more CPU per request**: about 16-20% more at 1-8 KB and 40-47% more at 64 KB. p50 is lower at 1-8 KB, but p99 is higher at every size (about 2.3-2.4 times for epoll, 1.6-2.1 times for io_uring).
+- **The 64 KB gap has a structural cause that was not removed.** Each receive is a worker `recv` into a page, a publish to the pipe, a copy by the consumer into the `Stream` buffer, and a command that returns the page to the worker. That is an extra copy and a cross-thread handoff per page that the kernel socket path of `SocketsHttpHandler` does not have. Removing it needs the zero-copy hook listed under [What a real runtime integration would still need](#what-a-real-runtime-integration-would-still-need). This is the reasoning from reading the receive path, and it was not confirmed with a profile.
+- **Knobs that did not close the io_uring 64 KB gap**, two repetitions each (requests per second at 64 KB, against about 94k for the default): 4 client workers 80k and 91k, a 2 MiB receive window 93k and 92k, 128 KB client pages 96k and 99k (working set 164-171 MB). Epoll was swept the same way (64 KB body, two repetitions each): 32 KB pages 108.1k, 64 KB pages 108.2k, 128 KB pages 111.3k, 4 workers 106.4k and 16 workers 105.2k. None of these is distinguishable from the default. Epoll at 64 KB measured between 83% and 95% of Sockets in different batches (the Sockets baseline moved from 119k to 127k), so the 86% in the table is one point in a noisy range. The remainder was accepted and is documented here rather than hidden.
+
+### Linux server: the Kestrel transport through the abstractions
+
+A plain `SocketsHttpHandler` client on CPUs 16-31, Kestrel on CPUs 0-7, 4 workers for the native providers. Requests per second, then p99 in µs:
+
+| Body | Sockets | epoll (Bedrock) | epoll (legacy) | io_uring (Bedrock) | io_uring (legacy) |
+| --- | --- | --- | --- | --- | --- |
+| 1 KB | 348.2k, 764 | 287.1k, 958 | 293.6k, 954 | 254.8k, 962 | 278.3k, 847 |
+| 8 KB | 261.9k, 1003 | 245.5k, 954 | 244.3k, 970 | 212.1k, 1038 | 212.6k, 1110 |
+| 64 KB | 110.5k, 1649 | 111.7k, 1735 | 107.8k, 1796 | 102.1k, 1648 | 106.3k, 1622 |
+
+- **Bedrock against the former private-factory registration.** Epoll: -2%, +0.5% and +3.7% at 1, 8 and 64 KB. io_uring: -8.4%, -0.2% and -4.0%. Five of the six cells are inside the noise of two repetitions. **The exception is io_uring at 1 KB, where Bedrock was lower in both repetitions** (254.5k and 255.0k against 280.7k and 275.8k). It was not investigated, so "on par" holds for epoll and for io_uring at 8-64 KB, and not for io_uring at 1 KB.
+- **Against Sockets.** Epoll is at 82% at 1 KB, 94% at 8 KB and 101% at 64 KB. io_uring is at 73%, 81% and 92%. The native Linux servers do not beat the Sockets transport at small bodies in this setup. This differs from Windows, where RIO and IOCP lead at every size.
+- CPU per 1,000 requests is about equal across servers: 28-32 at 1 KB, 33-38 at 8 KB, 58-64 at 64 KB. p50 is higher for the native servers (epoll 177 µs, io_uring 202 µs, Sockets 150 µs at 1 KB).
+- Server resident memory (`VmRSS`): Sockets 71-82 MB, epoll 78-90 MB, io_uring 110-123 MB.
+
+### Linux server: worker count
+
+A native Linux server owns its workers, and the worker count decides the result. Sockets uses the thread pool, so it does not depend on this setting (its numbers differ between batches because of the baseline noise, not because of the setting). Requests per second, two repetitions, Bedrock registration, server on 8 CPUs:
+
+| Workers | Body | Sockets | epoll | io_uring | io_uring RSS |
+| --- | --- | --- | --- | --- | --- |
+| 2 | 1 KB | 229.2k | 161.0k | 165.0k | 94 MB |
+| 2 | 8 KB | 205.8k | 130.8k | 106.8k | 96 MB |
+| 4 | 1 KB | 348.2k | 287.1k | 254.8k | 112 MB |
+| 4 | 8 KB | 261.9k | 245.5k | 212.1k | 114 MB |
+| 8 | 1 KB | 338.3k | 298.8k | 268.1k | 148 MB |
+| 8 | 8 KB | 246.3k | 232.6k | 268.9k | 149 MB |
+
+- With 2 workers the native servers are clearly behind. The io_uring 8 KB cell includes one outlier repetition (72.8k, p99 6.5 ms), so treat that cell as unreliable.
+- With 8 workers on 8 CPUs, io_uring is ahead of Sockets at 8 KB in both repetitions (264.0k and 273.7k against 259.2k and 233.5k, so the first is within noise), and Sockets still leads at 1 KB. Epoll at 8 KB is at 89% and 100% of Sockets in the two repetitions.
+- io_uring server memory grows with the worker count (94, 112 and 148 MB at 2, 4 and 8 workers, against about 70 MB for Sockets), about 9 MB per worker in these runs.
+
+### What the Linux results say
+
+- **The Bedrock adapter costs about nothing for epoll, and for io_uring at 8-64 KB.** The one open item is io_uring at 1 KB.
+- **"Native is faster than Sockets" is a Windows result.** On Linux/WSL2 the server needs enough workers to match Sockets at 8 KB and does not match it at 1 KB, and the clients have lower p50 but higher CPU and p99. An earlier result in this repository that favored the Linux providers came from a different harness (crank across machines, with TLS) and is not comparable with these plain-HTTP loopback runs.
+- **WSL2 is not a production Linux.** Loopback inside a virtual machine, with 10-20% batch noise and only two repetitions. A bare-metal run, more repetitions and a profile of the io_uring 1 KB server and the 64 KB client would be needed before drawing a conclusion about the providers themselves.
+
 ## What this shows
 
-- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and it matches the private factory within noise.
-- **The client side fits mechanically and can be faster.** `IConnectionFactory` plus `ConnectCallback` carries real HTTP/1.1 traffic including 1 MiB uploads. RIO beats `SocketsHttpHandler` at 8 KB and 64 KB, and IOCP at 8 KB, on this machine. It does not beat it at 1 KB.
-- **The price is memory and tuning.** RIO uses about two to three times the memory of `SocketsHttpHandler` on the client, IOCP has the worse p99, and both need the worker count chosen by the application.
-- **The zero-copy path still needs a new contract.** The gains above came from the transport's own receive window and block sizing, not from removing the `Stream` copy. A runtime hook that passes a `ConnectionContext` would remove that copy, and it would require a `System.Net.Http` API proposal.
+- **The server side fits, at no measurable cost.** One factory class that implements the existing interfaces is enough, and it matches the private factory within noise on Windows, and for epoll and for io_uring at 8-64 KB on Linux.
+- **The client side fits mechanically and can be faster on Windows.** `IConnectionFactory` plus `ConnectCallback` carries real HTTP/1.1 traffic including 1 MiB uploads, on all four providers. RIO beats `SocketsHttpHandler` at 8 KB and 64 KB, and IOCP at 8 KB, on this machine. It does not beat it at 1 KB. On Linux the clients reach parity at 1-8 KB and are slower at 64 KB.
+- **The price is memory and tuning.** RIO uses about two to three times the memory of `SocketsHttpHandler` on the client, IOCP has the worse p99, and the Linux clients have the worse p99 and CPU. All of them need the worker count chosen by the application.
+- **The zero-copy path still needs a new contract.** The Windows gains came from the transport's own receive window and block sizing, not from removing the `Stream` copy. The Linux 64 KB gap is consistent with that copy being the remaining cost. A runtime hook that passes a `ConnectionContext` would remove it, and it would require a `System.Net.Http` API proposal.
 
 ## What a real runtime integration would still need
 
 - A handler hook that accepts an `IConnectionFactory` or `ConnectionContext`, instead of a `ConnectCallback` that returns a `Stream`. The runtime was not changed for this experiment.
-- `ConnectEx` instead of a blocking `connect` on the thread pool, which also keeps connect off the thread pool under load.
+- `ConnectEx` on Windows and a non-blocking connect on Linux instead of a blocking `connect` on the thread pool, which also keeps connect off the thread pool under load.
 - IPv6, and a DNS-aware connect, with a fallback to the sockets factory.
-- A client path for the Linux providers.
 - A decision about worker ownership: a process-wide client engine with a few workers, with the sizing treated as an application concern.
-- Measurements on more than one machine, with more than three repetitions, against the runtime's own `SocketsHttpHandler` on the same runtime build. A runtime fork was not used for this experiment.
+- Measurements on more than one machine, on bare-metal Linux, with more than two or three repetitions, against the runtime's own `SocketsHttpHandler` on the same runtime build. A runtime fork was not used for this experiment.
 
 ## Limits of these measurements
 
-- One machine, loopback, three repetitions per cell (one for the worker sweep). Differences of a few percent are noise, and the Sockets baseline varies by 10-20% between batches.
-- The server in the client plan is the Sockets transport. The Bedrock client was not measured against a Bedrock server (`run-bench.ps1 -Plan both` was not run).
-- The client is Windows-only and IPv4-only. The Linux providers were not measured, and a WSL `check` run was not done.
+- One machine, loopback, three repetitions per Windows cell and two per Linux cell (one for the Windows worker sweep). Differences of a few percent are noise, and the Sockets baseline varies by 10-20% between batches.
+- The server in the client plan is the Sockets transport. The Bedrock client was not measured against a Bedrock server (the `both` plan of `run-bench.ps1` and `run-bench.sh` was not run).
+- The clients are IPv4-only. The Linux numbers are from WSL2, not bare metal, and the io_uring 1 KB server and the Linux 64 KB client gaps were not profiled.
 - No TLS runs: TLS stays in `SocketsHttpHandler` for the client and in Kestrel or the native providers for the server, and the numbers above are plain HTTP.
-- The client wins depend on the receive window (1 MiB) and the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
+- The client wins depend on the receive window (1 MiB) and, on Windows, the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
 - Latency percentiles are from one load generator at a fixed 64 connections. They are not a latency-focused benchmark.

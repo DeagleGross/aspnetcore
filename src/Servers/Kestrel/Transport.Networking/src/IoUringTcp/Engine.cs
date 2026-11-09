@@ -19,25 +19,30 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
 internal sealed class Engine
 {
-    internal const int PageCount = 2048, PageSize = 16384;
+    private const int ServerPageCount = 2048, ServerPageSize = 16384;
+    private static readonly int ClientPageBytes = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_PAGE_KB") ?? "64", CultureInfo.InvariantCulture) * 1024;
+    private static readonly int ClientPageCount = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_PAGES") ?? "128", CultureInfo.InvariantCulture);
     private const ulong AcceptId = 1, WakeId = 2, CancelAcceptId = 3, CancelWakeId = 4;
     private readonly ConcurrentQueue<Native.Command> _commands = new();
     private readonly Dictionary<ulong, RingConnection> _connections = new();
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ChannelWriter<IProviderConnection> _accepted;
-    private readonly IPEndPoint _endpoint;
+    private readonly IPEndPoint? _endpoint;
+    private readonly ConcurrentQueue<(int Fd, IPEndPoint Remote, TaskCompletionSource<IProviderConnection> Completion)> _connects = new();
     private readonly int _cpu;
     private readonly Lock _wakeGate = new();
-    private readonly bool _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") == "1";
+    private readonly bool _coalesced;
+    private readonly int _pageCount;
+    internal readonly int PageBytes;
     private nint _ring, _pages, _cipherPages, _wakeBuffer;
     private byte[] _pageStorage = [], _cipherStorage = [];
     private int _listener = -1, _wakeFd = -1, _pumpThread, _wakeScheduled, _pendingRejections;
     private bool _stop, _unbound, _disposed, _acceptActive, _wakeActive, _cancelAccept, _cancelWake, _resumePages;
     private ulong _nextId;
-    private readonly Stack<int> _freePages = new(Enumerable.Range(0, PageCount));
-    private readonly bool[] _leasedPages = new bool[PageCount];
-    private readonly bool[] _cipherLeases = new bool[PageCount];
+    private readonly Stack<int> _freePages;
+    private readonly bool[] _leasedPages;
+    private readonly bool[] _cipherLeases;
     private long _wakes, _iterations, _commandsProcessed, _pagesRead, _bytesRead, _sendCommands, _finalCommands;
     private long _rejected, _rejectedDisposed;
     internal readonly bool Tls, Layered, RequireKtls, GuardPageReads;
@@ -64,12 +69,21 @@ internal sealed class Engine
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
 
-    internal Engine(IPEndPoint endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<IProviderConnection> accepted, bool layered, bool shared = false,
+    // A null endpoint makes this a client engine: it never accepts and only adopts sockets connected by RingClient.
+    internal Engine(IPEndPoint? endpoint, int cpu, bool tls, string cert, string key, ILogger logger, ChannelWriter<IProviderConnection> accepted, bool layered, bool shared = false,
         Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         _endpoint = endpoint;
         _cpu = cpu;
         Tls = tls;
+        var client = endpoint is null;
+        PageBytes = client ? ClientPageBytes : ServerPageSize;
+        _pageCount = client ? ClientPageCount : ServerPageCount;
+        _freePages = new Stack<int>(Enumerable.Range(0, _pageCount));
+        _leasedPages = new bool[_pageCount];
+        _cipherLeases = new bool[_pageCount];
+        // Client engines coalesce wakes by default: their page returns and sends arrive from many consumer threads.
+        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is { } coalesce ? coalesce == "1" : client;
         // The runtime's fd-bound TlsSession owns the ciphertext, so the ring-owned BIO layer never applies.
         Layered = layered && !(tls && SessionTlsContext.IsSelected);
         Logger = logger;
@@ -120,13 +134,16 @@ internal sealed class Engine
         try
         {
             _pumpThread = Environment.CurrentManagedThreadId;
-            Native.Check(Native.SetCpu(_cpu), "affinity");
+            if (_cpu >= 0)
+            {
+                Native.Check(Native.SetCpu(_cpu), "affinity");
+            }
             ArgumentOutOfRangeException.ThrowIfNegative(SendBufferSize);
             if (RequireKtls && !Tls)
             {
                 throw new NotSupportedException("kTLS requires TLS.");
             }
-            _pageStorage = GC.AllocateUninitializedArray<byte>(PageCount * PageSize, pinned: true);
+            _pageStorage = GC.AllocateUninitializedArray<byte>(_pageCount * PageBytes, pinned: true);
             fixed (byte* pointer = _pageStorage)
             {
                 _pages = (nint)pointer;
@@ -134,7 +151,7 @@ internal sealed class Engine
             _wakeBuffer = (nint)NativeMemory.AllocZeroed(8);
             if (BioTls)
             {
-                _cipherStorage = GC.AllocateUninitializedArray<byte>(PageCount * PageSize, pinned: true);
+                _cipherStorage = GC.AllocateUninitializedArray<byte>(_pageCount * PageBytes, pinned: true);
                 fixed (byte* pointer = _cipherStorage)
                 {
                     _cipherPages = (nint)pointer;
@@ -147,9 +164,9 @@ internal sealed class Engine
             }
             if (!Tls || BioTls)
             {
-                for (var page = 0; page < PageCount; page++)
+                for (var page = 0; page < _pageCount; page++)
                 {
-                    Native.Offer(_ring, Buffer(page, BioTls), PageSize, page);
+                    Native.Offer(_ring, Buffer(page, BioTls), PageBytes, page);
                 }
             }
             if (Tls && SessionTlsContext.IsSelected)
@@ -178,9 +195,12 @@ internal sealed class Engine
                 }
                 Console.WriteLine($"TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" managed=true cpu={_cpu}");
             }
-            _listener = Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
             _wakeFd = Native.Check(Native.EventFd(), "eventfd");
-            StartAccept();
+            if (_endpoint is not null)
+            {
+                _listener = Native.Check(Native.Listen(BinaryPrimitives.ReadUInt32BigEndian(_endpoint.Address.GetAddressBytes()), _endpoint.Port), "listen");
+                StartAccept();
+            }
             StartWake();
             _started.SetResult();
             var completions = new Native.Completion[1024];
@@ -390,6 +410,14 @@ internal sealed class Engine
             }
             return;
         }
+        if (command.Kind == 8)
+        {
+            if (_connects.TryDequeue(out var connect))
+            {
+                AdoptConnected(connect.Fd, connect.Remote, connect.Completion);
+            }
+            return;
+        }
         if (!_connections.TryGetValue(command.Connection, out var state))
         {
             if (command.Kind == 3)
@@ -428,9 +456,40 @@ internal sealed class Engine
         }
     }
 
+    internal void Connected(int fd, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    {
+        _connects.Enqueue((fd, remote, completion));
+        Enqueue(new Native.Command { Kind = 8 });
+    }
+
+    private void AdoptConnected(int fd, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    {
+        if (_stop)
+        {
+            CloseFd(ref fd);
+            completion.TrySetException(new ObjectDisposedException(nameof(Engine)));
+            return;
+        }
+        var state = new RingConnection(this, ++_nextId, fd, remote, completion);
+        _connections.Add(state.Id, state);
+        state.Start();
+    }
+
+    internal IProviderConnection PublishClient(RingConnection state, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    {
+        var connection = ProviderNetworkConnection.ForRing(this, state, new IPEndPoint(IPAddress.Loopback, 0), remote);
+        if (!completion.TrySetResult(connection))
+        {
+            connection.Abort(new ConnectionAbortedException("Connect was abandoned."));
+            Interlocked.Increment(ref _pendingRejections);
+            _ = DisposeRejectedAsync(connection);
+        }
+        return connection;
+    }
+
     internal IProviderConnection Publish(RingConnection state)
     {
-        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForRing(this, state, _endpoint) : new Connection(this, state.Id, _endpoint, Tls);
+        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForRing(this, state, _endpoint!) : new Connection(this, state.Id, _endpoint!, Tls);
         if (!_accepted.TryWrite(connection))
         {
             _rejected++;
@@ -455,7 +514,7 @@ internal sealed class Engine
         finally { Interlocked.Decrement(ref _pendingRejections); }
     }
     internal void ForgetUnpublished(ulong id) => Enqueue(new Native.Command { Kind = 4, Connection = id });
-    internal nint Buffer(int page, bool cipher = false) => (cipher ? _cipherPages : _pages) + page * PageSize;
+    internal nint Buffer(int page, bool cipher = false) => (cipher ? _cipherPages : _pages) + page * PageBytes;
     internal int RentPage()
     {
         if (!_freePages.TryPop(out var page))
@@ -469,7 +528,7 @@ internal sealed class Engine
     internal void ClaimPage(int page, bool cipher)
     {
         var leases = cipher ? _cipherLeases : _leasedPages;
-        if ((uint)page >= PageCount || leases[page])
+        if ((uint)page >= _pageCount || leases[page])
         {
             throw new InvalidOperationException("Receive page was already leased.");
         }
@@ -483,7 +542,7 @@ internal sealed class Engine
     internal void OfferPage(int page, bool cipher = false)
     {
         var leases = cipher ? _cipherLeases : _leasedPages;
-        if ((uint)page >= PageCount || !leases[page])
+        if ((uint)page >= _pageCount || !leases[page])
         {
             throw new InvalidOperationException("Receive page returned twice.");
         }
@@ -496,7 +555,7 @@ internal sealed class Engine
         }
         else
         {
-            Native.Offer(_ring, Buffer(page, cipher), PageSize, page);
+            Native.Offer(_ring, Buffer(page, cipher), PageBytes, page);
         }
         if (cipher)
         {

@@ -4,6 +4,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/tcp.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -53,6 +54,25 @@ int ep_accept(int listener)
 {
     int fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     return fd < 0 ? -errno : fd;
+}
+
+// Outbound: a blocking connect() that the caller runs off the worker thread, then the descriptor is switched to the nonblocking, no-delay mode accepted sockets use.
+int ep_connect(uint32_t ipv4, int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -errno;
+    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(ipv4) };
+    int one = 1;
+    int flags;
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address))
+        || setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one))
+        || (flags = fcntl(fd, F_GETFL, 0)) < 0
+        || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        int error = errno;
+        close(fd);
+        return -error;
+    }
+    return fd;
 }
 
 int ep_socket_option(int fd, int option, int value)

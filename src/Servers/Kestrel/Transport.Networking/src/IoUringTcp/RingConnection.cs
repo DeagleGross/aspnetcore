@@ -1,5 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
+using System.Globalization;
+using System.Net;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringBio.Native;
@@ -7,8 +9,13 @@ using BioNative = Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUri
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 
 // Pump-owned state. Multishot terminal CQEs and cancellation acknowledgments own separate references.
-internal sealed class RingConnection(Engine engine, ulong id, int fd)
+// A non-null connect makes this an outbound connection: it publishes through that completion instead of the accept channel and may hold more receive pages
+// because an HTTP/1.1 client keeps reading while it is still writing a large request body.
+internal sealed class RingConnection(Engine engine, ulong id, int fd, IPEndPoint? remote = null, TaskCompletionSource<IProviderConnection>? connect = null)
 {
+    private static readonly int ClientLeaseBytes = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_LEASE_BYTES") ?? "1048576", CultureInfo.InvariantCulture);
+    private readonly int _maxLeased = connect is null ? 4 : Math.Max(2, ClientLeaseBytes / engine.PageBytes);
+
     internal enum Operation
     {
         Read = 1, Write, CancelRead, CancelWrite, FinalShutdown
@@ -68,7 +75,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
         }
         else
         {
-            Application = engine.Publish(this);
+            Application = connect is null ? engine.Publish(this) : engine.PublishClient(this, remote!, connect);
             StartRead();
         }
     }
@@ -106,12 +113,12 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
 
     private void StartRead()
     {
-        if (engine.Tls && _leased >= 4)
+        if (engine.Tls && _leased >= _maxLeased)
         {
             _readBackpressured = true;
         }
 
-        if (_closing || _readActive || _cancelRead || _leased >= 4
+        if (_closing || _readActive || _cancelRead || _leased >= _maxLeased
             || (engine.BioTls && (_closeRequested || _peerEof || _cipherBytes >= 65536)))
         {
             return;
@@ -195,7 +202,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                 {
                     var page = (int)(flags >> 16);
                     engine.ClaimPage(page, engine.BioTls);
-                    if (result > Engine.PageSize)
+                    if (result > engine.PageBytes)
                     {
                         throw new InvalidOperationException("Invalid receive length.");
                     }
@@ -245,7 +252,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                         StartRead();
                     }
 
-                    if ((!engine.Tls || engine.BioTls) && (_leased >= 4 || _cipherBytes >= 65536) && _readActive && !_cancelRead)
+                    if ((!engine.Tls || engine.BioTls) && (_leased >= _maxLeased || _cipherBytes >= 65536) && _readActive && !_cancelRead)
                     {
                         _cancelRead = true;
                         Cancel(Operation.Read, Operation.CancelRead);
@@ -613,7 +620,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             }
         }
         _readBackpressured = false;
-        while (!_closing && _leased < 4)
+        while (!_closing && _leased < _maxLeased)
         {
             if (engine.BioTls && _cipherBytes == 0 && !_pending && !_peerEof)
             {
@@ -633,7 +640,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
             do
             {
                 engine.Metrics.SslReads++;
-                result = CallTls(Native.TlsOperation.Read, engine.Buffer(_readPage), Engine.PageSize);
+                result = CallTls(Native.TlsOperation.Read, engine.Buffer(_readPage), engine.PageBytes);
             } while (MoreBioInput(result));
             if (!TlsResult(result))
             {
@@ -656,7 +663,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
                 return;
             }
         }
-        if (!_closing && _leased >= 4)
+        if (!_closing && _leased >= _maxLeased)
         {
             _readBackpressured = true;
         }
@@ -692,7 +699,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd)
     }
     internal void ResumeReader()
     {
-        if (!_closing && _readBackpressured && _leased < 4)
+        if (!_closing && _readBackpressured && _leased < _maxLeased)
         {
             DriveTls();
         }

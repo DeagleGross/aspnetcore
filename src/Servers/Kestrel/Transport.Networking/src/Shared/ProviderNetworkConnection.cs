@@ -35,14 +35,14 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
         }
     }
 
-    internal static ProviderNetworkConnection ForEpoll(EpollWorker worker, EpollState state, IPEndPoint endpoint)
+    internal static ProviderNetworkConnection ForEpoll(EpollWorker worker, EpollState state, IPEndPoint endpoint, IPEndPoint? remote = null)
     {
-        return new ProviderNetworkConnection($"owned-shared-epoll-{state.Id:x}", endpoint, worker.Tls, new EpollDriver(worker, state));
+        return new ProviderNetworkConnection($"owned-shared-epoll-{state.Id:x}", endpoint, worker.Tls, new EpollDriver(worker, state), remote);
     }
 
-    internal static ProviderNetworkConnection ForRing(RingEngine engine, RingState state, IPEndPoint endpoint)
+    internal static ProviderNetworkConnection ForRing(RingEngine engine, RingState state, IPEndPoint endpoint, IPEndPoint? remote = null)
     {
-        return new ProviderNetworkConnection($"owned-shared-uring-{state.Id:x}", endpoint, engine.Tls, new RingDriver(engine, state));
+        return new ProviderNetworkConnection($"owned-shared-uring-{state.Id:x}", endpoint, engine.Tls, new RingDriver(engine, state), remote);
     }
 
     internal static ProviderNetworkConnection ForWindows(WindowsWorker worker, WindowsState state)
