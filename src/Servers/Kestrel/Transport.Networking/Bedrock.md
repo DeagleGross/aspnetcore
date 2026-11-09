@@ -321,7 +321,7 @@ Pre-Bedrock crank numbers for the same cells (from `LINUX-RESULTS.md`, mean of 3
 | TLS | 8 KB | 24.9k | 35.6k (+42.6%) | 37.2k (+49.2%) |
 | TLS | 64 KB | 6.6k | 9.2k (+39.7%) | 8.7k (+31.9%) |
 
-Two points about reading that table. The "+20% to +40%" for epoll is the TLS rows against `SslStream`. The TCP rows are +9%, +17% and +22% for epoll, and +23%, +30% and +24% for io_uring. Against those, the Bedrock server on this machine agrees at TCP 8 KB (epoll +30%, io_uring +35%), TLS 8 KB (+40% and +59%) and TLS 1 KB for io_uring (+47%). It is lower only for epoll at TCP 1 KB and TLS 1 KB, and that is addressed next. Io_uring at TLS 64 KB is below Sockets here and above it in the crank run; 64 KB is the noisy cell.
+Two points about reading that table. The TCP rows involve no `SslStream`: epoll is +8.9%, +17.4% and +22.3% over plain Sockets at 1, 8 and 64 KB, and io_uring is +23.2%, +29.7% and +23.8%. Only the TLS rows (epoll +40% to +43%, io_uring +32% to +54%) compare against `SslStream`. Against those, the Bedrock server on this machine agrees at TCP 8 KB (epoll +30%, io_uring +35%), TLS 8 KB (+40% and +59%) and TLS 1 KB for io_uring (+47%). It is lower only for epoll at TCP 1 KB and TLS 1 KB in the 3-repetition batch, and that is addressed next. The TCP 64 KB cell does not reproduce crank's +22.3% for epoll here (+11% in the 3-repetition batch, -15% in the 5-repetition batch), and io_uring at TLS 64 KB is below Sockets here and above it in the crank run; 64 KB is the noisy cell.
 
 #### Is the gap to the earlier numbers caused by Bedrock?
 
