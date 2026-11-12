@@ -16,7 +16,7 @@ It is an experiment and not an API proposal. Everything is non-shipping. All num
 
 - **Fit.** One class, `NetworkTransportFactory`, implements `IConnectionListenerFactory`, `IConnectionListenerFactorySelector` and `IConnectionFactory`. Nothing in `Microsoft.AspNetCore.Connections.Abstractions`, Kestrel Core or `System.Net.Http` was changed.
 - **Server, 56 cores (gold machines, 1 KB TCP keep-alive, `wrk`).** After the 2026-11-12 fixes epoll, io_uring and RIO are at or above Sockets at every measured worker count, and IOCP is at or below parity: **epoll 123%, 100%, 104% and io_uring 126%, 111%, 102% of Sockets at 4, 8 and 28 workers, RIO 115% and 121% and IOCP 94% and 100% at 4 and 28 workers**. Before the fixes the Linux providers were at 78% (epoll) and 63% (io_uring) of Sockets at 28 workers.
-- **The Linux loss was scheduling, not I/O.** Two worker wake-ups per request and a thread-pool hop per receive. Joining wake-ups is now the default. Completing receives on the worker is the opt-in `CompleteReceivesInline`, and with it the same machine gives **epoll 136% and io_uring 146% of Sockets at 28 workers**, and 122% and 131% of a Sockets transport that is also run in its inline mode ([Scheduling](#scheduling-is-the-performance-contract)).
+- **The Linux loss was scheduling, not I/O.** Two worker wake-ups per request and a thread-pool hop per receive. Joining wake-ups is now the default. Completing receives on the worker is the opt-in `CompleteReceivesInline`, and with it the same machine gives **epoll 136% and io_uring 146% of Sockets at 28 workers**, and 122% and 131% of a Sockets transport that is also run in its inline mode ([Scheduling](#scheduling-is-the-performance-contract)). Default mode has a ceiling at many cores: about 8 µs of the 14-15 µs per request is kernel TCP work that Sockets pays too, and moving work between threads (three attempts) was slower ([Default mode has a ceiling](#default-mode-has-a-ceiling-and-three-ways-of-raising-it-that-did-not-work)).
 - **Windows has the same lever.** `CompleteReceivesInline` takes RIO from 121% to 154% and IOCP from 100% to 122% of Sockets at 28 workers. It also raises p99 on Windows ([Windows server](#windows-server-56-cores)), which Linux does not show.
 - **Client.** `SocketsHttpHandler.ConnectCallback` carries real HTTP/1.1 traffic through all four providers. On small client machines the Bedrock client is ahead of `SocketsHttpHandler` when the client is the limit (epoll 114%, io_uring 119%, RIO 142% of Sockets at 2 cores). At 4 cores, where the server is nearly saturated, the Linux providers converge on parity (101-103%), RIO stays ahead (119%) and IOCP is behind (91%). The `Stream` the handler requires costs one copy; see [`ConnectionContextStream`](#why-connectioncontextstream-exists).
 - **What it costs.** Memory (RIO registers its slabs), the loss of the zero-copy lease at the `Stream` boundary, and a scheduling choice that the abstractions have no place for.
@@ -118,7 +118,7 @@ The 2026-11-12 investigation ([below](#why-linux-lost-at-28-workers-and-what-fix
 
 Inline completion has one rule: the continuation shares the worker with every other connection assigned to it, so a consumer that blocks (synchronous I/O, `.Result`) stalls those connections. That is the same trade-off as `SocketTransportOptions.UnsafePreferInlineScheduling`, which is why it is opt-in. `NetworkInputReader` also completes the pending read outside its internal lock now, so an inline continuation does not run while the lock is held.
 
-Not done: sending directly from the thread that flushes (skipping the `OutputReady` command) in the safe, non-inline mode. It would remove one hand-off without the blocking risk and is the next candidate.
+Tried and dropped: sending directly from the thread that flushes (skipping the `OutputReady` command), and running `recv` on a thread-pool thread instead of the worker. Both were slower, not faster ([Default mode has a ceiling](#default-mode-has-a-ceiling-and-three-ways-of-raising-it-that-did-not-work)).
 
 ## Results
 
@@ -167,6 +167,8 @@ On 2026-11-09 the same machine gave epoll 78% and io_uring 63% of Sockets at 28 
 | epoll, wake-ups not joined (the 2026-11-09 build) | 1.41M | 17.7 µs | 0.97 | 2.00 | 18.4 |
 | epoll, wake-ups joined (the new default) | 1.83M | 14.6 µs | 0.97 | 0.07 | 17.2 |
 | epoll, joined and `CompleteReceivesInline` | 2.41M | 11.2 µs | 0 | 0 | 0.5 |
+| io_uring, default | 1.82M | 14.5 µs | 0.97 | n/a | 21.6 |
+| io_uring, `CompleteReceivesInline` | 2.64M | 10.3 µs | 0 | n/a | 0.2 |
 
 What the table says:
 
@@ -174,6 +176,35 @@ What the table says:
 - **Un-joined wake-ups cost about 3 µs per request.** Two `eventfd` writes from thread-pool threads per request, plus `epoll_wait` waking per request, moved epoll from 17.7 to 14.6 µs per request once they were joined. Against the Sockets run of the same day that is 79% to 103%.
 - **The thread-pool hop is the rest.** In default mode 28 epoll threads and about 40 thread-pool threads share 28 cores, and run-queue wait stays at about 17 cores. Completing on the worker removes the second set of threads and the wait (0.5 cores), and takes CPU per request to 11.2 µs.
 - Each row is one run. The default and inline rows are reproduced by the 2-repetition matrix above.
+- The io_uring rows were measured with the sampler fixed to count `iowait` as idle. The idle time before and after the load shows up as `iowait` for io_uring (its threads wait in the kernel for completions), and counting it as busy had inflated the steady window and diluted the per-request CPU. In default mode io_uring uses 14.5 µs per request against 14.7 µs for epoll.
+
+#### Default mode has a ceiling, and three ways of raising it that did not work
+
+Every transport in default mode is CPU-bound at 14-15 µs per request on this machine. Per request, from the sampler (single runs, 28 workers, steady window):
+
+| | Sockets default | epoll default | epoll inline |
+| --- | --- | --- | --- |
+| System time (`recv`, `send`, `epoll_wait`) | 8.4 µs | 8.1 µs | 7.6 µs |
+| User time | 6.9 µs | 6.6 µs | 3.6 µs |
+| Soft-interrupt share of the cores | 17% | 19% | 23% |
+
+- **About 8 µs per request is kernel TCP work, and it is the same for all three.** It moves into soft interrupts as the core count grows (3% of the cores at 4 workers, 17-23% at 28), which is why the native margin shrinks from 123-126% at 4 workers to 102-104% at 28.
+- **The consumer's thread-pool hop costs Bedrock about 3.5 µs per request** (14.7 µs in default mode against 11.2 µs inline, almost all of it user time) and Sockets about 1.5 µs (15.3 against 13.8 µs). The likely cause is cache locality: with the hop, the connection's state is touched by a different core on each request. This was not profiled.
+- **Keep-alive is already the best case.** A transport saves nothing on connect and accept in these runs. A `Connection: close` run was attempted and is not measurable with this load generator: Sockets reached 10.6K requests per second with all 896 connections reporting socket errors and the load machine at 95% CPU (probably the client running out of ephemeral ports; not verified).
+- **io_uring is tuned already**: one ring per worker, `SINGLE_ISSUER` and `DEFER_TASKRUN` (on by default), multishot receive from a provided buffer ring. At one event per `epoll_wait` (1.07 events and 0.14 waits per request for epoll) there is no batching left to win in a request/response workload.
+
+Three attempts to cut the hop without the blocking risk of inline completion, each measured on the gold-lin machine (`aspnet-gold-lin-relay`) against a Sockets run from the same evening (1.77M requests per second; one run per cell; see [`default-mode-experiments.txt`](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/scaling-2026-11-12/default-mode-experiments.txt)):
+
+| Change (epoll, 28 workers) | Requests/s | % of Sockets | CPU per request | What happened |
+| --- | --- | --- | --- | --- |
+| Baseline (default) | 1.81M | 102% | 14.7 µs | 2 commands and 0.08 wake-ups per request |
+| The thread that flushes the response also sends it, and the thread that releases a page also returns it (no commands, no wake-ups) | 1.70M | 96% | 15.4 µs | System time per request rose by 0.7 µs (probably `send` on a core other than the `recv` core), and the epoll threads waited 16 cores' worth in the run queue |
+| The worker only reports readiness (edge-triggered); a thread-pool thread runs `recv`, the application and `send` | 1.45M | 82% | 16.2 µs | The per-core epoll threads sleep and wake (0.35 voluntary context switches per request) and 12% of the cores idle; 1.93 thread-pool items per request, like Sockets |
+| The same direct send, but inside inline completion on the worker | 2.23M | 93% of inline (2.40M) | 12.0 µs | Probably the batching of the deferred pass is lost: inline handles about 16 requests per loop iteration (0.06 `epoll_wait` per request), and the sends of that pass run back to back |
+
+The baseline row ran with an allocation-free command queue in place of `ConcurrentQueue`; that made no measurable difference (258 B per request either way), so the tree keeps `ConcurrentQueue`. Fewer workers (14 and 20 of 28 cores) and `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` were also tried: 14 workers lose (1.66M epoll, 1.58M io_uring, with 12-17% of the cores idle), 20 workers equal 28 (1.85M epoll, 1.78M io_uring), and spin 0 changes nothing beyond noise (1.75M epoll, 1.72M io_uring, against 1.77M for Sockets with spin 0). The experimental code is not in the tree; the patch is kept next to the raw numbers ([`default-mode-experiments.patch`](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/scaling-2026-11-12/default-mode-experiments.patch)).
+
+What remains: Bedrock allocates about 258 B per request in every row (Sockets default: 2 B), and the GC pauses cost 2.4-2.8% of the time at 28 workers. Pooling the three per-receive objects (the page lease, the buffer storage and the input segment) would recover part of that, probably 1-2%, and was not done. In default mode the Linux providers are 3-5% cheaper per request than Sockets, which matches 102-104% of its throughput at 28 workers. The 136-146% figures need the consumer to run on the worker.
 
 #### The option equals the environment switch
 
@@ -237,7 +268,7 @@ The original private-factory registration measured +9% to +30% over Sockets on 4
 
 - **The abstractions fit.** The server and client sides both fit behind existing interfaces with one class. The Bedrock adapter is not measurably slower than the private factory it replaced.
 - **With scheduling fixed, the native providers beat Sockets on a 56-core machine, but the margin depends on one opt-in.** Default: 100-126% (Linux) and 94-121% (Windows) of Sockets. Inline: 136-191% (Linux) and 113-157% (Windows). Against a Sockets run that also uses inline scheduling the Linux margin is 114-136% and the Windows margin 111-156%.
-- **Most of what native I/O buys here is the scheduling model, not cheaper syscalls.** The kernel work per request is the same as for Sockets on Linux.
+- **Most of what native I/O buys here is the scheduling model, not cheaper syscalls.** The kernel work per request is the same as for Sockets on Linux, and three attempts to improve default mode by moving work between threads were all slower than leaving it alone.
 - **The cost is a contract the abstractions lack.** `IConnectionListenerFactory` has no place to say where continuations run, so it lives on the engine options. A public design would have to say it explicitly.
 - **The `Stream` boundary is the remaining client cost.** Closing it needs a runtime hook.
 
@@ -256,5 +287,5 @@ The original private-factory registration measured +9% to +30% over Sockets on 4
 - One workload: 1 KB responses, keep-alive TCP, `wrk` on a separate machine. The 56-core results do not cover TLS, larger bodies, or connection churn. TLS was measured earlier only on the Linux server on a development machine ([Bedrock-History.md](Bedrock-History.md)).
 - The application is pinned to `W` cores of a 56-core machine; that is not the same as a `W`-core machine (the NIC, the other cores' caches and interrupts are shared).
 - The Sockets baseline is the stock runtime on the same build; the inline Sockets baseline relies on `UnsafePreferInlineScheduling` and, on Linux, `DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS`.
-- The Windows inline p99 increase is measured but unexplained. CPU per request is not reported for io_uring, because the sampler counts threads that wait in the kernel for completions as busy.
+- The Windows inline p99 increase is measured but unexplained. The CPU-per-request figures come from single sampler runs (`NETWORKPROTO_DIAG=1`) and are not reported for Windows.
 - The memory cost is unchanged from [MemoryFootprint.md](MemoryFootprint.md): RIO registers its slabs and uses 2-3 times the memory of Sockets on a client.
