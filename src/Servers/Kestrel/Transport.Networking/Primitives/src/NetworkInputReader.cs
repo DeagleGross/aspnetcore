@@ -19,6 +19,26 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
 
     internal int Version => _version;
 
+    // Inline: a pending read is completed on the thread that published the bytes (the provider worker), so the consumer continuation runs there too.
+    // Otherwise the continuation is queued to the thread pool.
+    internal bool CompleteInline
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return !_source.RunContinuationsAsynchronously;
+            }
+        }
+        set
+        {
+            lock (_gate)
+            {
+                _source.RunContinuationsAsynchronously = !value;
+            }
+        }
+    }
+
     internal void HandoffConsumer()
     {
         lock (_gate)
@@ -33,6 +53,7 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
 
     internal void Append(NetworkBuffer.Storage owner, int length)
     {
+        PendingCompletion pending;
         lock (_gate)
         {
             if (_completed)
@@ -51,18 +72,21 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
                 _tail.Link(page);
                 _tail = page;
             }
-            Signal();
+            pending = PrepareSignal();
         }
+        SetPending(pending);
     }
 
     internal void End(Exception? error)
     {
+        PendingCompletion pending;
         lock (_gate)
         {
             _ended = true;
             _error ??= error;
-            Signal();
+            pending = PrepareSignal();
         }
+        SetPending(pending);
     }
 
     private ReadOnlySequence<byte> Buffer => _head is null
@@ -83,20 +107,47 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
         return new ReadResult(_readBuffer, cancelled, _ended || _completed);
     }
 
-    private void Signal()
+    // Called under the gate: decides what the waiting read observes. The source is completed by SetPending after the gate is
+    // released, because an inline continuation (NETWORKPROTO_INLINE_INPUT) runs consumer code on the completing thread.
+    private PendingCompletion PrepareSignal()
     {
-        if (_waiting)
+        if (!_waiting)
         {
-            _waiting = false;
-            if (_error is not null)
-            {
-                _source.SetException(_error);
-            }
-            else
-            {
-                _source.SetResult(Result());
-            }
+            return default;
         }
+        _waiting = false;
+        return _error is not null ? new PendingCompletion(_error) : new PendingCompletion(Result());
+    }
+
+    private void SetPending(PendingCompletion pending)
+    {
+        if (pending.Error is not null)
+        {
+            _source.SetException(pending.Error);
+        }
+        else if (pending.IsPending)
+        {
+            _source.SetResult(pending.Result);
+        }
+    }
+
+    private readonly struct PendingCompletion
+    {
+        internal PendingCompletion(ReadResult result)
+        {
+            Result = result;
+            IsPending = true;
+        }
+
+        internal PendingCompletion(Exception error)
+        {
+            Error = error;
+            IsPending = true;
+        }
+
+        internal ReadResult Result { get; }
+        internal Exception? Error { get; }
+        internal bool IsPending { get; }
     }
 
     public override ValueTask<ReadResult> ReadAsync(CancellationToken cancellationToken = default)
@@ -238,15 +289,18 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
 
     public override void CancelPendingRead()
     {
+        PendingCompletion pending;
         lock (_gate)
         {
             _cancelled = true;
-            Signal();
+            pending = PrepareSignal();
         }
+        SetPending(pending);
     }
 
     public override void Complete(Exception? exception = null)
     {
+        PendingCompletion pending;
         lock (_gate)
         {
             if (_completed)
@@ -259,8 +313,9 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
             {
                 ReleaseHead();
             }
-            Signal();
+            pending = PrepareSignal();
         }
+        SetPending(pending);
     }
 
     ReadResult IValueTaskSource<ReadResult>.GetResult(short token) => _source.GetResult(token);

@@ -24,6 +24,13 @@ public abstract class NetworkEngineOptions
 
     /// <summary>Gets or sets optional logical processor IDs, one per worker.</summary>
     public IReadOnlyList<int>? WorkerProcessors { get; set; }
+
+    /// <summary>
+    /// Gets or sets whether connections published by the engine complete pending receives on the owning worker thread instead of the thread pool
+    /// (see <see cref="NetworkConnection.CompleteReceivesInline"/>). The default is false. Enable it for a server whose request handling never blocks,
+    /// for example Kestrel serving non-blocking endpoints, in the way <c>SocketTransportOptions.UnsafePreferInlineScheduling</c> does for the Sockets transport.
+    /// </summary>
+    public bool CompleteReceivesInline { get; set; }
 }
 
 /// <summary>Configures the epoll provider.</summary>

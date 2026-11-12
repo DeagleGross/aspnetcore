@@ -54,10 +54,10 @@ public static class NetworkEngineFactory
             defaultPlacement = true;
         }
         var pool = options is WindowsEngineOptions windows ? WindowsPoolSettings.From(windows) : null;
-        return new ProviderEngine(kind, options.WorkerCount, processors, defaultPlacement, loggerFactory ?? NullLoggerFactory.Instance, pool);
+        return new ProviderEngine(kind, options.WorkerCount, processors, defaultPlacement, loggerFactory ?? NullLoggerFactory.Instance, pool, options.CompleteReceivesInline);
     }
 
-    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, bool defaultPlacement, ILoggerFactory logging, WindowsPoolSettings? pool) : NetworkEngine, IConnectableEngine
+    private sealed class ProviderEngine(NetworkEngineKind kind, int workers, int[]? processors, bool defaultPlacement, ILoggerFactory logging, WindowsPoolSettings? pool, bool completeReceivesInline) : NetworkEngine, IConnectableEngine
     {
         private readonly List<NetworkListener> _listeners = new();
         private readonly SemaphoreSlim _binding = new(1, 1);
@@ -83,7 +83,9 @@ public static class NetworkEngineFactory
                 _binding.Release();
             }
             var connection = await (await client.WaitAsync(cancellationToken).ConfigureAwait(false)).ConnectAsync(endpoint, cancellationToken).ConfigureAwait(false);
-            return connection as NetworkConnection ?? throw new InvalidOperationException("The provider returned a raw connection through the shared engine.");
+            var network = connection as NetworkConnection ?? throw new InvalidOperationException("The provider returned a raw connection through the shared engine.");
+            network.CompleteReceivesInline = completeReceivesInline;
+            return network;
         }
 
         // The client host is created once per engine and shares the engine's worker count, processors and pool limits.
@@ -134,7 +136,7 @@ public static class NetworkEngineFactory
                         shared: true, processors, tls, pool),
                     _ => throw new NotSupportedException("Unknown network engine.")
                 };
-                var listener = new ProviderListener(await factory.BindAsync(endpoint, cancellationToken).ConfigureAwait(false));
+                var listener = new ProviderListener(await factory.BindAsync(endpoint, cancellationToken).ConfigureAwait(false), completeReceivesInline);
                 _listeners.Add(listener);
                 return listener;
             }
@@ -180,7 +182,7 @@ public static class NetworkEngineFactory
         }
     }
 
-    private sealed class ProviderListener(IProviderListener listener) : NetworkListener
+    private sealed class ProviderListener(IProviderListener listener, bool completeReceivesInline) : NetworkListener
     {
         private readonly Lock _gate = new();
         private Task? _disposing;
@@ -188,12 +190,17 @@ public static class NetworkEngineFactory
         public override async ValueTask<NetworkConnection?> AcceptAsync(CancellationToken cancellationToken = default)
         {
             var connection = await listener.AcceptAsync(cancellationToken).ConfigureAwait(false);
-            return connection switch
+            switch (connection)
             {
-                null => null,
-                NetworkConnection network => network,
-                _ => throw new InvalidOperationException("The provider published a raw connection through the shared engine.")
-            };
+                case null:
+                    return null;
+                case NetworkConnection network:
+                    // A receive can only be pending after the consumer has the connection, so setting the mode here is early enough.
+                    network.CompleteReceivesInline = completeReceivesInline;
+                    return network;
+                default:
+                    throw new InvalidOperationException("The provider published a raw connection through the shared engine.");
+            }
         }
         public override ValueTask UnbindAsync(CancellationToken cancellationToken = default) => listener.UnbindAsync(cancellationToken);
         public override ValueTask DisposeAsync()

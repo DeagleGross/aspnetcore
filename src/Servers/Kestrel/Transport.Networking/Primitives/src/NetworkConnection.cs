@@ -78,6 +78,19 @@ public abstract class NetworkConnection : IAsyncDisposable
     public bool CompleteSendsInline { get; set; }
 
     /// <summary>
+    /// Gets or sets whether a pending receive (<see cref="ReceiveAsync(CancellationToken)"/>, or a read of the <see cref="AsDuplexPipe"/> input) is completed on the provider worker
+    /// thread that received the bytes, so its continuation runs there. The default (false) resumes the consumer on the thread pool.
+    /// Inline completion removes a thread hop and a wake-up per receive and lets one worker run a connection from receive to send without a context switch,
+    /// but the continuation then shares the worker with every other connection assigned to it, so enable it only when the consumer never blocks.
+    /// The engine option <see cref="NetworkEngineOptions.CompleteReceivesInline"/> sets the default for the connections an engine publishes.
+    /// </summary>
+    public bool CompleteReceivesInline
+    {
+        get => _input.CompleteInline;
+        set => _input.CompleteInline = value;
+    }
+
+    /// <summary>
     /// Gets the pipe output mode. Do not mix pipe output and direct SendAsync/EnqueueSend on one connection.
     /// </summary>
     public PipeWriter Output

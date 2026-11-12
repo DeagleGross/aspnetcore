@@ -39,6 +39,8 @@ System.Net.Transport.NetworkConnection.AllocateBuffer(int minimumSize = 0) -> Sy
 System.Net.Transport.NetworkConnection.AsDuplexPipe() -> System.IO.Pipelines.IDuplexPipe!
 System.Net.Transport.NetworkConnection.AsStream() -> System.IO.Stream!
 System.Net.Transport.NetworkConnection.CompleteCloseCore(System.Exception? error = null) -> void
+System.Net.Transport.NetworkConnection.CompleteReceivesInline.get -> bool
+System.Net.Transport.NetworkConnection.CompleteReceivesInline.set -> void
 System.Net.Transport.NetworkConnection.CompleteSendCore(int count, System.Exception? error = null) -> void
 System.Net.Transport.NetworkConnection.CompleteSendsInline.get -> bool
 System.Net.Transport.NetworkConnection.CompleteSendsInline.set -> void
@@ -76,6 +78,8 @@ System.Net.Transport.NetworkEngineKind.Iocp = 2 -> System.Net.Transport.NetworkE
 System.Net.Transport.NetworkEngineKind.IoUring = 1 -> System.Net.Transport.NetworkEngineKind
 System.Net.Transport.NetworkEngineKind.Rio = 3 -> System.Net.Transport.NetworkEngineKind
 System.Net.Transport.NetworkEngineOptions
+System.Net.Transport.NetworkEngineOptions.CompleteReceivesInline.get -> bool
+System.Net.Transport.NetworkEngineOptions.CompleteReceivesInline.set -> void
 System.Net.Transport.NetworkEngineOptions.NetworkEngineOptions() -> void
 System.Net.Transport.NetworkEngineOptions.WorkerCount.get -> int
 System.Net.Transport.NetworkEngineOptions.WorkerCount.set -> void

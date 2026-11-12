@@ -60,6 +60,10 @@ internal sealed class EpollWorker
 
     internal Task Started => _started.Task;
     internal Task Stopped => _stopped.Task;
+    internal long WakeWrites => Volatile.Read(ref _wakes);
+    internal long CommandsProcessed => Volatile.Read(ref _commandsProcessed);
+    internal long Iterations => Volatile.Read(ref _iterations);
+    internal int ConnectionCount => _connections.Count;
 
     // A null endpoint makes this a client worker: it never listens and only adopts sockets connected by EpollClient.
     internal EpollWorker(IPEndPoint? endpoint, int cpu, bool tls, string certificate, string key, ChannelWriter<IProviderConnection> accepted, ILogger logger, bool shared = false,
@@ -73,8 +77,8 @@ internal sealed class EpollWorker
         _pages = GC.AllocateUninitializedArray<byte>(_pageCount * PageBytes, pinned: true);
         _pageOwners = new ulong[_pageCount];
         _freePages = new Stack<int>(Enumerable.Range(0, _pageCount));
-        // A client worker is woken by every page its consumer returns, so it joins pending wakes unless told otherwise.
-        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is { } coalesce ? coalesce == "1" : client;
+        // Joining a pending wake is a pure saving (one eventfd write per command instead of one per request), so it is the default for servers and clients; NETWORKPROTO_COALESCE=0 restores a wake per command.
+        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is not "0";
         Tls = tls;
         Shared = shared;
         if (shared && AdaptiveOutputPool.Enabled)
@@ -84,6 +88,10 @@ internal sealed class EpollWorker
         HandshakePrefixCallback = handshakePrefixCallback;
         _accepted = accepted;
         Logger = logger;
+        if (!client)
+        {
+            EpollDiagnostics.RegisterIfRequested(this);
+        }
         using (ExecutionContext.SuppressFlow())
         {
             new Thread(() => Run(certificate, key)) { IsBackground = true, Name = $"Epoll {(tls ? "TLS" : "TCP")} CPU {cpu}" }.Start();

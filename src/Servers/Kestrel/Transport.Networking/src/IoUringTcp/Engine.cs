@@ -82,8 +82,8 @@ internal sealed class Engine
         _freePages = new Stack<int>(Enumerable.Range(0, _pageCount));
         _leasedPages = new bool[_pageCount];
         _cipherLeases = new bool[_pageCount];
-        // Client engines coalesce wakes by default: their page returns and sends arrive from many consumer threads.
-        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is { } coalesce ? coalesce == "1" : client;
+        // Joining a pending wake is a pure saving, so it is the default; NETWORKPROTO_COALESCE=0 restores a wake per command.
+        _coalesced = Environment.GetEnvironmentVariable("NETWORKPROTO_COALESCE") is not "0";
         // The runtime's fd-bound TlsSession owns the ciphertext, so the ring-owned BIO layer never applies.
         Layered = layered && !(tls && SessionTlsContext.IsSelected);
         Logger = logger;

@@ -84,8 +84,14 @@ internal sealed class ConnectionContextStream : Stream
                 _input.AdvanceTo(sequence.GetPosition(count));
                 return count;
             }
+            if (buffer.IsEmpty)
+            {
+                // A zero-length read only waits for data. Leave the bytes unexamined so the read that follows returns them instead of waiting for more.
+                _input.AdvanceTo(sequence.Start);
+                return 0;
+            }
             _input.AdvanceTo(sequence.Start, sequence.End);
-            if (result.IsCompleted || result.IsCanceled || buffer.IsEmpty)
+            if (result.IsCompleted || result.IsCanceled)
             {
                 return 0;
             }

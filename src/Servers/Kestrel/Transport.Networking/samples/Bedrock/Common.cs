@@ -9,14 +9,20 @@ internal static class Backends
 {
     public static string[] ForCurrentOs { get; } = OperatingSystem.IsWindows() ? ["iocp", "rio"] : ["epoll", "iouring"];
 
-    public static NetworkEngineOptions Create(string name, int workers) => name switch
+    // BEDROCK_INLINE=1 completes receives on the provider worker (NetworkEngineOptions.CompleteReceivesInline) in every mode of the sample.
+    public static NetworkEngineOptions Create(string name, int workers)
     {
-        "iocp" => new IocpEngineOptions { WorkerCount = workers },
-        "rio" => new RioEngineOptions { WorkerCount = workers },
-        "epoll" => new EpollEngineOptions { WorkerCount = workers },
-        "iouring" => new IoUringEngineOptions { WorkerCount = workers },
-        _ => throw new ArgumentException($"Unknown backend '{name}'. Use iocp, rio, epoll or iouring.")
-    };
+        NetworkEngineOptions options = name switch
+        {
+            "iocp" => new IocpEngineOptions { WorkerCount = workers },
+            "rio" => new RioEngineOptions { WorkerCount = workers },
+            "epoll" => new EpollEngineOptions { WorkerCount = workers },
+            "iouring" => new IoUringEngineOptions { WorkerCount = workers },
+            _ => throw new ArgumentException($"Unknown backend '{name}'. Use iocp, rio, epoll or iouring.")
+        };
+        options.CompleteReceivesInline = Environment.GetEnvironmentVariable("BEDROCK_INLINE") == "1";
+        return options;
+    }
 }
 
 internal static class TlsFixture
