@@ -10,7 +10,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
-internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd, IPEndPoint? remote = null, TaskCompletionSource<IProviderConnection>? connect = null) : ConnectionState(id)
+internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd, IPEndPoint local, IPEndPoint remote, TaskCompletionSource<IProviderConnection>? connect = null) : ConnectionState(id, local, remote)
 {
     private const int WriteBudget = 256 * 1024;
     // A client may write a whole request before reading the response, so it needs a receive window far larger than a server's to keep an echoing peer unblocked.
@@ -27,7 +27,7 @@ internal sealed class TcpConnection(EpollWorker engine, ulong id, int fd, IPEndP
         {
             return;
         }
-        Application ??= connect is null ? engine.Publish(this) : engine.PublishClient(this, remote!, connect);
+        Application ??= connect is null ? engine.Publish(this) : engine.PublishClient(this, connect);
         if (_sendData != 0 && (ready & Native.Writable) != 0)
         {
             Write();

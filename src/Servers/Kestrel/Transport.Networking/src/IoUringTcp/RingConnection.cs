@@ -11,7 +11,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.IoUringTcp;
 // Pump-owned state. Multishot terminal CQEs and cancellation acknowledgments own separate references.
 // A non-null connect makes this an outbound connection: it publishes through that completion instead of the accept channel and may hold more receive pages
 // because an HTTP/1.1 client keeps reading while it is still writing a large request body.
-internal sealed class RingConnection(Engine engine, ulong id, int fd, IPEndPoint? remote = null, TaskCompletionSource<IProviderConnection>? connect = null)
+internal sealed class RingConnection(Engine engine, ulong id, int fd, IPEndPoint local, IPEndPoint remote, TaskCompletionSource<IProviderConnection>? connect = null)
 {
     private static readonly int ClientLeaseBytes = int.Parse(Environment.GetEnvironmentVariable("NETWORKPROTO_CLIENT_LEASE_BYTES") ?? "1048576", CultureInfo.InvariantCulture);
     private readonly int _maxLeased = connect is null ? 4 : Math.Max(2, ClientLeaseBytes / engine.PageBytes);
@@ -21,6 +21,8 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd, IPEndPoint
         Read = 1, Write, CancelRead, CancelWrite, FinalShutdown
     }
     internal ulong Id { get; } = id;
+    internal IPEndPoint LocalEndPoint { get; } = local;
+    internal IPEndPoint RemoteEndPoint { get; } = remote;
     internal IProviderConnection? Application
     {
         get; private set;
@@ -75,7 +77,7 @@ internal sealed class RingConnection(Engine engine, ulong id, int fd, IPEndPoint
         }
         else
         {
-            Application = connect is null ? engine.Publish(this) : engine.PublishClient(this, remote!, connect);
+            Application = connect is null ? engine.Publish(this) : engine.PublishClient(this, connect);
             StartRead();
         }
     }

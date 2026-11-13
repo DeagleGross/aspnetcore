@@ -29,6 +29,9 @@ internal static unsafe partial class Native
     }
     internal const uint Buffer = 1, More = 2;
     internal const int Canceled = -125, NoBuffers = -105, NotConnected = -107;
+
+    // EMFILE, ENFILE, ENOMEM, EPROTO and ENOBUFS: the system is short of descriptors or memory for the moment, which is not a reason to stop serving.
+    internal static bool IsTransientAcceptFailure(int result) => result is -24 or -23 or -12 or -71 or -105;
     [StructLayout(LayoutKind.Sequential)]
     internal struct Completion
     {

@@ -10,6 +10,9 @@ internal static unsafe partial class Native
 {
     internal const int Again = -11, Interrupted = -4, ConnectionAborted = -103, NotConnected = -107;
     internal const int ConnectionReset = -104, BrokenPipe = -32;
+
+    // EMFILE, ENFILE, ENOMEM, EPROTO and ENOBUFS: the system is short of descriptors or memory for the moment, which is not a reason to stop serving.
+    internal static bool IsTransientAcceptFailure(int result) => result is -24 or -23 or -12 or -71 or -105;
     internal const int Add = 1, Delete = 2, Modify = 3;
     internal const uint Readable = 1, Writable = 4, Error = 8, Hangup = 16;
     internal enum SocketOption { NoDelay, Cork, SendBuffer }

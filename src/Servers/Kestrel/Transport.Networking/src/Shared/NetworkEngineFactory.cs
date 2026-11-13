@@ -50,7 +50,10 @@ public static class NetworkEngineFactory
         var defaultPlacement = false;
         if (processors is null && kind == NetworkEngineKind.IoUring)
         {
-            processors = Enumerable.Range(0, options.WorkerCount).Select(cpu => 2 * cpu).ToArray();
+            // Worker i goes to processor 2 * i, one worker per physical core when SMT siblings are numbered next to each other. Pinning to a processor the process may not use
+            // (a container cpuset, taskset) fails the bind, so the workers are left unpinned unless every preferred processor is allowed.
+            var preferred = Enumerable.Range(0, options.WorkerCount).Select(worker => 2 * worker).ToArray();
+            processors = AllowedProcessors.TryReadLinux() is { } allowed && preferred.All(allowed.Contains) ? preferred : Enumerable.Repeat(-1, options.WorkerCount).ToArray();
             defaultPlacement = true;
         }
         var pool = options is WindowsEngineOptions windows ? WindowsPoolSettings.From(windows) : null;

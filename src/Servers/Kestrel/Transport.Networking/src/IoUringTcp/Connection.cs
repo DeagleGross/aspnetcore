@@ -48,12 +48,12 @@ internal sealed class Connection : DefaultConnectionContext, IProviderConnection
         get;
     }
 
-    internal Connection(Engine engine, ulong id, IPEndPoint endpoint, bool tls) : base($"owned-{id:x}")
+    internal Connection(Engine engine, ulong id, IPEndPoint local, IPEndPoint remote, bool tls) : base($"owned-{id:x}")
     {
         _engine = engine;
         _id = id;
-        LocalEndPoint = endpoint;
-        RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 0);
+        LocalEndPoint = local;
+        RemoteEndPoint = remote;
         Input = new OwnedPipeReader(page => engine.Enqueue(new Native.Command { Kind = 2, Connection = id, Page = page }));
         Transport = new DuplexPipe(Input, _output.Writer);
         ConnectionClosed = _closed.Token;

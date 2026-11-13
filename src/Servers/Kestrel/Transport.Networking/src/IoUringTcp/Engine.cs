@@ -40,6 +40,9 @@ internal sealed class Engine
     private int _listener = -1, _wakeFd = -1, _pumpThread, _wakeScheduled, _pendingRejections;
     private bool _stop, _unbound, _disposed, _acceptActive, _wakeActive, _cancelAccept, _cancelWake, _resumePages;
     private ulong _nextId;
+    private long _acceptRetryAt;
+    private bool _acceptFailing;
+    private const int AcceptRetryMilliseconds = 50;
     private readonly Stack<int> _freePages;
     private readonly bool[] _leasedPages;
     private readonly bool[] _cipherLeases;
@@ -176,7 +179,10 @@ internal sealed class Engine
                     throw new NotSupportedException("kTLS is not available through the runtime TlsSession.");
                 }
                 SessionContext = new SessionTlsContext(cert, key);
-                Console.WriteLine($"TLS_LIBRARY impl=session managed=true cpu={_cpu}");
+                if (TransportDiagnostics.Enabled)
+                {
+                    Console.WriteLine($"TLS_LIBRARY impl=session managed=true cpu={_cpu}");
+                }
             }
             else if (Tls)
             {
@@ -193,7 +199,10 @@ internal sealed class Engine
                         throw new IOException("OpenSSL BIO method creation failed.");
                     }
                 }
-                Console.WriteLine($"TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" managed=true cpu={_cpu}");
+                if (TransportDiagnostics.Enabled)
+                {
+                    Console.WriteLine($"TLS_LIBRARY version=\"{Marshal.PtrToStringUTF8(Native.Version())}\" managed=true cpu={_cpu}");
+                }
             }
             _wakeFd = Native.Check(Native.EventFd(), "eventfd");
             if (_endpoint is not null)
@@ -208,6 +217,14 @@ internal sealed class Engine
                 || _cancelAccept || _cancelWake || Volatile.Read(ref _pendingRejections) != 0)
             {
                 Volatile.Write(ref _wakeScheduled, 0);
+                if (_acceptRetryAt != 0 && Environment.TickCount64 >= _acceptRetryAt)
+                {
+                    _acceptRetryAt = 0;
+                    if (!_acceptActive && !_unbound && !_stop)
+                    {
+                        StartAccept();
+                    }
+                }
                 for (var i = 0; i < 1024 && _commands.TryDequeue(out var command); i++)
                 {
                     _commandsProcessed++;
@@ -323,6 +340,7 @@ internal sealed class Engine
     private void Unbind()
     {
         _unbound = true;
+        _acceptRetryAt = 0;
         if (_acceptActive && !_cancelAccept)
         {
             Prepare(Native.Operation.Cancel, 0, 0, 0, CancelAcceptId, AcceptId);
@@ -342,23 +360,38 @@ internal sealed class Engine
 
                 if (completion.Result >= 0)
                 {
-                    if (_unbound)
+                    _acceptFailing = false;
+                    var fd = completion.Result;
+                    var local = _unbound ? null : SocketEndpoints.TryGet(fd, peer: false);
+                    var remote = local is null ? null : SocketEndpoints.TryGet(fd, peer: true);
+                    if (local is null || remote is null)
                     {
-                        var fd = completion.Result;
+                        // The listener is unbound, or the peer reset before the worker adopted the socket.
                         CloseFd(ref fd);
                     }
                     else
                     {
-                        var state = new RingConnection(this, ++_nextId, completion.Result);
+                        var state = new RingConnection(this, ++_nextId, fd, local, remote);
                         _connections.Add(state.Id, state);
                         state.Start();
                     }
                 }
                 else if (completion.Result != Native.Canceled)
                 {
-                    Native.Check(completion.Result, "accept");
+                    // Running out of descriptors or memory ends the multishot accept but is transient: the connection waits in the kernel backlog until accepting is armed again.
+                    if (!Native.IsTransientAcceptFailure(completion.Result))
+                    {
+                        Native.Check(completion.Result, "accept");
+                    }
+                    Metrics.AcceptFailures++;
+                    if (!_acceptFailing)
+                    {
+                        _acceptFailing = true;
+                        Logger.LogWarning("io_uring accept failed with errno {Error}; accepting pauses for {Delay} ms and retries.", -completion.Result, AcceptRetryMilliseconds);
+                    }
+                    _acceptRetryAt = Environment.TickCount64 + AcceptRetryMilliseconds;
                 }
-                if (!_acceptActive && !_unbound)
+                if (!_acceptActive && !_unbound && _acceptRetryAt == 0)
                 {
                     StartAccept();
                 }
@@ -470,14 +503,21 @@ internal sealed class Engine
             completion.TrySetException(new ObjectDisposedException(nameof(Engine)));
             return;
         }
-        var state = new RingConnection(this, ++_nextId, fd, remote, completion);
+        var local = SocketEndpoints.TryGet(fd, peer: false);
+        if (local is null)
+        {
+            CloseFd(ref fd);
+            completion.TrySetException(new IOException("The connected socket has no local endpoint."));
+            return;
+        }
+        var state = new RingConnection(this, ++_nextId, fd, local, remote, completion);
         _connections.Add(state.Id, state);
         state.Start();
     }
 
-    internal IProviderConnection PublishClient(RingConnection state, IPEndPoint remote, TaskCompletionSource<IProviderConnection> completion)
+    internal IProviderConnection PublishClient(RingConnection state, TaskCompletionSource<IProviderConnection> completion)
     {
-        var connection = ProviderNetworkConnection.ForRing(this, state, new IPEndPoint(IPAddress.Loopback, 0), remote);
+        var connection = ProviderNetworkConnection.ForRing(this, state);
         if (!completion.TrySetResult(connection))
         {
             connection.Abort(new ConnectionAbortedException("Connect was abandoned."));
@@ -489,7 +529,7 @@ internal sealed class Engine
 
     internal IProviderConnection Publish(RingConnection state)
     {
-        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForRing(this, state, _endpoint!) : new Connection(this, state.Id, _endpoint!, Tls);
+        IProviderConnection connection = Shared ? ProviderNetworkConnection.ForRing(this, state) : new Connection(this, state.Id, state.LocalEndPoint, state.RemoteEndPoint, Tls);
         if (!_accepted.TryWrite(connection))
         {
             _rejected++;
@@ -591,6 +631,10 @@ internal sealed class Engine
     }
     private void Report()
     {
+        if (!TransportDiagnostics.Enabled)
+        {
+            return;
+        }
         Console.WriteLine("OWNED_METRICS " + JsonSerializer.Serialize(new
         {
             cpu = _cpu,
@@ -686,7 +730,7 @@ internal sealed class Engine
     }
     internal sealed class Counters
     {
-        internal long AcceptSqes, ReceiveSqes, SendSqes, PollSqes, Cqes, ReturnedPages, SslReads, ReadSuccess, WantRead;
+        internal long AcceptSqes, AcceptFailures, ReceiveSqes, SendSqes, PollSqes, Cqes, ReturnedPages, SslReads, ReadSuccess, WantRead;
         internal long Handshakes, KtlsRx, KtlsTx, KtlsRejected, PageDrives, PageSkips, TlsWriteRetries;
         internal long FinalShutdowns, PartialSends, Links, CanceledLinks, ShutdownErrors, ShutdownAfterClose, NotConnected;
         internal long TlsFinalShutdowns, CloseNotify, TlsShutdownFailures, Corks;

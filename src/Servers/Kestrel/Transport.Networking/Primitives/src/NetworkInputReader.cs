@@ -108,7 +108,7 @@ internal sealed class NetworkInputReader : PipeReader, IValueTaskSource<ReadResu
     }
 
     // Called under the gate: decides what the waiting read observes. The source is completed by SetPending after the gate is
-    // released, because an inline continuation (NETWORKPROTO_INLINE_INPUT) runs consumer code on the completing thread.
+    // released, because an inline continuation (NetworkEngineOptions.CompleteReceivesInline) runs consumer code on the completing thread.
     private PendingCompletion PrepareSignal()
     {
         if (!_waiting)

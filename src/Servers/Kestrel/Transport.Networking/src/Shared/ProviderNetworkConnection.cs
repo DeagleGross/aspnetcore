@@ -24,8 +24,8 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
     private readonly Driver _driver;
     private bool _completingSend;
 
-    private ProviderNetworkConnection(string id, IPEndPoint endpoint, bool tls, Driver driver, IPEndPoint? remote = null)
-        : base(id, endpoint, remote ?? new IPEndPoint(IPAddress.Loopback, 0), driver.OutputPool, driver.OutputKind, tls)
+    private ProviderNetworkConnection(string id, IPEndPoint local, IPEndPoint remote, bool tls, Driver driver)
+        : base(id, local, remote, driver.OutputPool, driver.OutputKind, tls)
     {
         _driver = driver;
         if (tls && driver is not WindowsDriver)
@@ -35,20 +35,20 @@ internal sealed class ProviderNetworkConnection : NetworkConnection, IProviderCo
         }
     }
 
-    internal static ProviderNetworkConnection ForEpoll(EpollWorker worker, EpollState state, IPEndPoint endpoint, IPEndPoint? remote = null)
+    internal static ProviderNetworkConnection ForEpoll(EpollWorker worker, EpollState state)
     {
-        return new ProviderNetworkConnection($"owned-shared-epoll-{state.Id:x}", endpoint, worker.Tls, new EpollDriver(worker, state), remote);
+        return new ProviderNetworkConnection($"owned-shared-epoll-{state.Id:x}", state.LocalEndPoint, state.RemoteEndPoint, worker.Tls, new EpollDriver(worker, state));
     }
 
-    internal static ProviderNetworkConnection ForRing(RingEngine engine, RingState state, IPEndPoint endpoint, IPEndPoint? remote = null)
+    internal static ProviderNetworkConnection ForRing(RingEngine engine, RingState state)
     {
-        return new ProviderNetworkConnection($"owned-shared-uring-{state.Id:x}", endpoint, engine.Tls, new RingDriver(engine, state), remote);
+        return new ProviderNetworkConnection($"owned-shared-uring-{state.Id:x}", state.LocalEndPoint, state.RemoteEndPoint, engine.Tls, new RingDriver(engine, state));
     }
 
     internal static ProviderNetworkConnection ForWindows(WindowsWorker worker, WindowsState state)
     {
         return new ProviderNetworkConnection($"owned-shared-{worker.Backend}-{worker.Index}-{state.Id:x}",
-            state.LocalEndPoint, state.HasTls, new WindowsDriver(worker, state), state.RemoteEndPoint);
+            state.LocalEndPoint, state.RemoteEndPoint, state.HasTls, new WindowsDriver(worker, state));
     }
 
     internal void Receive(Memory<byte> memory, int length, int page)

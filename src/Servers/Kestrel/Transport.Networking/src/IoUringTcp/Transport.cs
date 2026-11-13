@@ -35,7 +35,7 @@ internal sealed class Listener : IProviderListener
         Action<ReadOnlySpan<byte>>? handshakePrefixCallback = null)
     {
         EndPoint = endpoint;
-        var cpus = processors ?? (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") ?? "0,2,4,6")
+        var cpus = processors ?? (Environment.GetEnvironmentVariable("NETWORKPROTO_CPUS") ?? "-1,-1,-1,-1")
             .Split(',').Select(value => int.Parse(value, CultureInfo.InvariantCulture)).ToArray();
         _engines = cpus.Select(cpu => new Engine(endpoint, cpu, tls, cert, key, logger, _accepted.Writer, layered, shared, handshakePrefixCallback)).ToArray();
     }

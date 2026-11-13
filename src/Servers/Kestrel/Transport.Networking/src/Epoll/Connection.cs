@@ -3,7 +3,6 @@
 
 using System.Buffers;
 using System.IO.Pipelines;
-using System.Net;
 using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
@@ -45,13 +44,13 @@ internal sealed class Connection : DefaultConnectionContext, IProviderConnection
     private Exception? _sendError;
     internal OwnedPipeReader Input { get; }
 
-    internal Connection(EpollWorker worker, ConnectionState state, IPEndPoint endpoint) : base($"owned-epoll-{state.Id:x}")
+    internal Connection(EpollWorker worker, ConnectionState state) : base($"owned-epoll-{state.Id:x}")
     {
         _worker = worker;
         _state = state;
         _outputReady = QueueOutput;
-        LocalEndPoint = endpoint;
-        RemoteEndPoint = new IPEndPoint(IPAddress.Loopback, 0);
+        LocalEndPoint = state.LocalEndPoint;
+        RemoteEndPoint = state.RemoteEndPoint;
         Input = new OwnedPipeReader(page => worker.Enqueue(new(EpollWorker.CommandKind.ReturnPage, state, Page: page)));
         Transport = new DuplexPipe(Input, _output.Writer);
         ConnectionClosed = _closed.Token;

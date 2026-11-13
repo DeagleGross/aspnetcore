@@ -311,14 +311,20 @@ internal sealed class WindowsListener : IProviderListener
             if (Handshakes is not null)
             {
                 await Handshakes.DrainAsync().ConfigureAwait(false);
-                Console.WriteLine("WINDOWS_HANDSHAKES " + JsonSerializer.Serialize(Handshakes.Snapshot()));
+                if (TransportDiagnostics.Enabled)
+                {
+                    Console.WriteLine("WINDOWS_HANDSHAKES " + JsonSerializer.Serialize(Handshakes.Snapshot()));
+                }
             }
         }
         finally
         {
             if (_acceptor is { Drained.IsCompleted: true } acceptor)
             {
-                Console.WriteLine("WINDOWS_ACCEPTOR " + JsonSerializer.Serialize(new { accepted = acceptor.Accepted, rejected = acceptor.Rejected }));
+                if (TransportDiagnostics.Enabled)
+                {
+                    Console.WriteLine("WINDOWS_ACCEPTOR " + JsonSerializer.Serialize(new { accepted = acceptor.Accepted, rejected = acceptor.Rejected }));
+                }
                 acceptor.Dispose();
             }
             Socket.Dispose();

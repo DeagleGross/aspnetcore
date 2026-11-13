@@ -245,6 +245,22 @@ internal sealed class WindowsWorker
                 Logger.LogError(cleanupError, "{Backend} ownership cleanup failed.", Backend);
             }
             _unbound.TrySetResult();
+            Report();
+            if (_failure is null)
+            {
+                _stopped.TrySetResult();
+            }
+            else
+            {
+                _stopped.TrySetException(_failure);
+            }
+        }
+    }
+
+    private void Report()
+    {
+        if (TransportDiagnostics.Enabled)
+        {
             Console.WriteLine("WINDOWS_TRANSPORT " + JsonSerializer.Serialize(new
             {
                 backend = Backend, shared = Shared, nativeTls = TlsCredential is not null || TlsSession is not null, tlsImpl = TlsSession is not null ? "session" : TlsCredential is not null ? "schannel" : "none", worker = Index, cpu = _cpu,
@@ -286,14 +302,6 @@ internal sealed class WindowsWorker
                 inputPoolTrimmedBytes = InputPool?.TrimmedBytes ?? 0, outputPoolTrimmedBytes = OutputPool?.TrimmedBytes ?? 0,
                 inputPoolPeakBytes = InputPool?.PeakBytes ?? 0, outputPoolPeakBytes = OutputPool?.PeakBytes ?? 0
             }));
-            if (_failure is null)
-            {
-                _stopped.TrySetResult();
-            }
-            else
-            {
-                _stopped.TrySetException(_failure);
-            }
         }
     }
 

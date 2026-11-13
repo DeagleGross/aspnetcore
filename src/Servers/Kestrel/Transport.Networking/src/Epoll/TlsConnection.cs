@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Net;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
@@ -8,7 +9,7 @@ using Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Shared;
 namespace Microsoft.AspNetCore.Server.Kestrel.Transport.Networking.Epoll;
 
 // Only the owning epoll thread mutates TLS and readiness state.
-internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, nint session, SessionTls? managed = null) : ConnectionState(id)
+internal sealed class TlsConnection(EpollWorker engine, ulong id, int fd, IPEndPoint local, IPEndPoint remote, nint session, SessionTls? managed = null) : ConnectionState(id, local, remote)
 {
     private int _fd = fd;
     private nint _session = session;
