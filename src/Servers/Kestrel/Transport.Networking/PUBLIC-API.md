@@ -1,4 +1,4 @@
-The provider API of the prototype (the `System.Net.Transport` surface that every provider implements and that [PROTOTYPE.md](PROTOTYPE.md) explains). The types that Project Bedrock adds on top (`NetworkTransportFactory`, `INetworkConnectionFeature`, `UseConnectionFactory`, `AddNetworkTransport`) are listed in [Bedrock-API.md](Bedrock-API.md).
+The provider API of the prototype (the `System.Net.Transport` surface that every provider implements and that [PROTOTYPE.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PROTOTYPE.md) explains). The types that Project Bedrock adds on top (`NetworkTransportFactory`, `INetworkConnectionFeature`, `UseConnectionFactory`, `AddNetworkTransport`) are listed in [Bedrock-API.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-API.md).
 
 ```csharp
 using System;

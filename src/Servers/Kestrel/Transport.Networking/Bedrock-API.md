@@ -1,6 +1,6 @@
 # Bedrock: the public API it needs
 
-This file lists only the **public API surface** that the Bedrock fit adds or depends on, in the same style as [PUBLIC-API.md](PUBLIC-API.md). It does not explain behaviour or results: see [Bedrock.md](Bedrock.md) for how Bedrock works and what it measured, and [Bedrock-History.md](Bedrock-History.md) for how it got there.
+This file lists only the **public API surface** that the Bedrock fit adds or depends on, in the same style as [PUBLIC-API.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PUBLIC-API.md). It does not explain behaviour or results: see [Bedrock.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock.md) for how Bedrock works and what it measured, [Bedrock-Deep-Dive.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-Deep-Dive.md) for where each provider does its I/O in the code, and [Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md) for how it got there.
 
 Everything here is **experimental and non-shipping**. The types are public only because the projects require a `PublicAPI.Unshipped.txt`. Nothing is proposed for the BCL by this file; it answers the narrower question "what would have to exist for a native transport to sit behind the existing `Microsoft.AspNetCore.Connections` abstractions?".
 
@@ -14,7 +14,7 @@ Everything here is **experimental and non-shipping**. The types are public only 
 | Optional: one-line registration | `AddNetworkTransport(this IServiceCollection, ...)` | New. Convenience. |
 | Optional: use the transport for `HttpClient` | `SocketsHttpHandler.UseConnectionFactory(...)` (two overloads) | New. Convenience around the only runtime hook, `ConnectCallback`. |
 | Optional: transport-owned TLS on Linux/Windows | `NetworkNativeTlsOptions` | Prototype type, reused. |
-| Optional, **measured to matter**: where receive and send continuations run | `NetworkEngineOptions.CompleteReceivesInline`, `NetworkConnection.CompleteReceivesInline`, `NetworkConnection.CompleteSendsInline` | Options on the prototype types. See [Bedrock.md](Bedrock.md#scheduling-is-the-performance-contract). |
+| Optional, **measured to matter**: where receive and send continuations run | `NetworkEngineOptions.CompleteReceivesInline`, `NetworkConnection.CompleteReceivesInline`, `NetworkConnection.CompleteSendsInline` | Options on the prototype types. See [Bedrock.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock.md#scheduling-is-the-performance-contract). |
 
 Nothing in `Microsoft.AspNetCore.Connections.Abstractions`, Kestrel Core or `System.Net.Http` was changed.
 
@@ -99,7 +99,7 @@ Not part of Bedrock: the prototype also ships `IWebHostBuilder` conveniences in 
 
 ## Prototype API that Bedrock depends on
 
-These are defined in [PUBLIC-API.md](PUBLIC-API.md). Only the members Bedrock uses are repeated here.
+These are defined in [PUBLIC-API.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PUBLIC-API.md). Only the members Bedrock uses are repeated here.
 
 ```csharp
 namespace System.Net.Transport
@@ -144,7 +144,7 @@ namespace System.Net.Transport
 | --- | --- |
 | Meaning | `true`: a pending receive (a `ReceiveAsync`, or a read of the `Transport.Input` pipe that Kestrel uses) is completed on the provider worker that received the bytes, so the consumer's continuation runs on that worker. `false` (default): the continuation is queued to the thread pool. |
 | Where | `NetworkEngineOptions.CompleteReceivesInline` is the default for every connection an engine publishes (accepted and connected). `NetworkConnection.CompleteReceivesInline` overrides it per connection. |
-| Why it exists | On a 56-core server at 28 workers it moved epoll from 104% to 136% and io_uring from 102% to 146% of the Sockets transport on Linux, and RIO from 121% to 154% and IOCP from 100% to 122% on Windows (against a Sockets transport that is also run with inline scheduling: 122% and 131% on Linux, 123% and 156% on Windows). See [Bedrock.md](Bedrock.md#scheduling-is-the-performance-contract) and [Windows p99](Bedrock.md#windows-server-56-cores) for the latency trade-off. |
+| Why it exists | On a 56-core server at 28 workers it moved epoll from 104% to 136% and io_uring from 102% to 146% of the Sockets transport on Linux, and RIO from 121% to 154% and IOCP from 100% to 122% on Windows (against a Sockets transport that is also run with inline scheduling: 122% and 131% on Linux, 123% and 156% on Windows). See [Bedrock.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock.md#scheduling-is-the-performance-contract) and [Windows p99](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock.md#windows-server-56-cores) for the latency trade-off. |
 | Cost | The continuation shares the worker with every other connection assigned to it. Blocking in it (synchronous I/O, `.Result`) stalls those connections. It is the analogue of `SocketTransportOptions.UnsafePreferInlineScheduling` for the Sockets transport, and it is off by default for the same reason. |
 | Closest existing API | `SocketTransportOptions.UnsafePreferInlineScheduling`, and the `CompleteSendsInline` property that already exists on `NetworkConnection`. |
 
@@ -166,6 +166,6 @@ Environment variables of the experiment. Each is a switch for a measurement, not
 These are the places where the existing contracts cannot express something Bedrock needed. None is solved by API in this experiment.
 
 1. **A receive window.** A client that writes a whole request before it reads needs the transport to keep bytes in flight. Nothing on `ConnectionContext` carries that, so it is a transport-internal byte budget. If it had to be public, it belongs on the factory or engine options, not on `ConnectionContext`.
-2. **A zero-copy `Stream`.** `ConnectCallback` returns a `Stream`, so a leased page is copied once into the handler's buffer (see [why `ConnectionContextStream` exists](Bedrock.md#why-connectioncontextstream-exists)). Removing the copy needs a `System.Net.Http` hook that accepts an `IConnectionFactory` or a `ConnectionContext`. That is a runtime API proposal and is out of scope here.
+2. **A zero-copy `Stream`.** `ConnectCallback` returns a `Stream`, so a leased page is copied once into the handler's buffer (see [why `ConnectionContextStream` exists](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock.md#why-connectioncontextstream-exists)). Removing the copy needs a `System.Net.Http` hook that accepts an `IConnectionFactory` or a `ConnectionContext`. That is a runtime API proposal and is out of scope here.
 3. **Client-side selection.** There is a `CanBind` for servers and no `CanConnect`. A factory that connects only over IPv4 cannot say so before `ConnectAsync`, and there is no fallback to a sockets factory.
 4. **Scheduling policy.** Where a receive or send continuation runs is a first-class performance decision (see `CompleteReceivesInline`, `CompleteSendsInline`). `IConnectionListenerFactory` has no place for it, so it lives on the engine options.

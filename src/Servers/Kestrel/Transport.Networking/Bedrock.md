@@ -7,9 +7,10 @@ It is an experiment and not an API proposal. Everything is non-shipping. All num
 | Document | What it holds |
 | --- | --- |
 | This file | Architecture, how it works, the latest results and the final comparison. |
-| [Bedrock-API.md](Bedrock-API.md) | Only the public API that Bedrock adds or depends on. |
-| [Bedrock-History.md](Bedrock-History.md) | The earlier write-ups kept as a record: harness artefacts, pre-allocation findings, dropped experiments, the Linux scaling investigation, WSL2 and 7950X3D tables. Superseded where it disagrees with this file. |
-| [PROTOTYPE.md](PROTOTYPE.md), [PUBLIC-API.md](PUBLIC-API.md) | The provider model and the provider API that Bedrock sits on. |
+| [Bedrock-API.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-API.md) | Only the public API that Bedrock adds or depends on. |
+| [Bedrock-Deep-Dive.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-Deep-Dive.md) | Where each provider does its I/O (the io_uring and RIO queues, the epoll and IOCP reads and writes), how completions return to the thread pool, and what the implementation sweep found, with links into the code. |
+| [Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md) | The earlier write-ups kept as a record: harness artefacts, pre-allocation findings, dropped experiments, the Linux scaling investigation, WSL2 and 7950X3D tables. Superseded where it disagrees with this file. |
+| [PROTOTYPE.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PROTOTYPE.md), [PUBLIC-API.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PUBLIC-API.md) | The provider model and the provider API that Bedrock sits on. |
 | [GOLD-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/GOLD-RESULTS.md), [SCALING-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/SCALING-RESULTS.md) | The 56-core server and client tables with raw rows, and the CPU-per-request and NIC measurements behind the explanations here (Benchmarks repo). |
 | [LINUX-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/LINUX-RESULTS.md), [WINDOWS-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/WINDOWS-RESULTS.md) | The small-machine results (4-vCPU Intel), including TLS (Benchmarks repo). |
 
@@ -47,11 +48,11 @@ flowchart LR
 builder.Services.AddNetworkTransport(new EpollEngineOptions { WorkerCount = 8 });
 ```
 
-Kestrel selects a factory per endpoint. `CanBind` accepts an IPv4 `IPEndPoint` (on Linux also only with a non-zero port); IPv6, DNS and Unix endpoints fall through to the next registered factory, normally the default Sockets one. `KestrelServerImpl` reverses the registered factories and `TransportManager.BindAsync` takes the first one whose `CanBind` is true, so the last registration wins. Source: [`NetworkTransportFactory.cs`](src/Bedrock/NetworkTransportFactory.cs).
+Kestrel selects a factory per endpoint. `CanBind` accepts an IPv4 `IPEndPoint` (on Linux also only with a non-zero port); IPv6, DNS and Unix endpoints fall through to the next registered factory, normally the default Sockets one. `KestrelServerImpl` reverses the registered factories and `TransportManager.BindAsync` takes the first one whose `CanBind` is true, so the last registration wins. Source: [`NetworkTransportFactory.cs`](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/src/Bedrock/NetworkTransportFactory.cs).
 
 ### Providers
 
-A worker is a dedicated thread that owns a set of connections. All state of a connection is touched only by its worker, and other threads talk to it through a command queue plus a wake-up (an `eventfd` write on Linux, `PostQueuedCompletionStatus` on Windows). [PROTOTYPE.md](PROTOTYPE.md) has the full description; this is the part that matters here.
+A worker is a dedicated thread that owns a set of connections. All state of a connection is touched only by its worker, and other threads talk to it through a command queue plus a wake-up (an `eventfd` write on Linux, `PostQueuedCompletionStatus` on Windows). [PROTOTYPE.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/PROTOTYPE.md) has the full description, and [Bedrock-Deep-Dive.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-Deep-Dive.md) links the main pieces of each provider in the code; this is the part that matters here.
 
 | Provider | I/O model | How a request flows through the worker |
 | --- | --- | --- |
@@ -62,7 +63,7 @@ A worker is a dedicated thread that owns a set of connections. All state of a co
 
 ### Server path
 
-Kestrel sees a `ConnectionContext` whose `Transport` is a `IDuplexPipe` adapter over the native connection ([`KestrelConnectionContext`](src/Shared/KestrelAdapters.cs)):
+Kestrel sees a `ConnectionContext` whose `Transport` is a `IDuplexPipe` adapter over the native connection ([`KestrelConnectionContext`](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/src/Shared/KestrelAdapters.cs)):
 
 - **Input.** A worker receives into a pooled page and appends it to the connection's `NetworkInputReader`, which Kestrel reads as a `PipeReader`. The page is leased, not copied. Kestrel advances over it and the page goes back to the worker.
 - **Output.** Kestrel writes to a `PipeWriter`. Flushing queues an output-ready command to the worker, which sends the bytes from the pipe's buffers.
@@ -79,12 +80,12 @@ Two client-only behaviours exist because a client is not a server:
 
 #### Why `ConnectionContextStream` exists
 
-`SocketsHttpHandler.ConnectCallback` must return a `Stream`, and that is the only hook `System.Net.Http` offers. [`ConnectionContextStream`](src/Bedrock/ConnectionContextStream.cs) is the internal adapter between the pipe that every `IConnectionFactory` produces and that `Stream`. It is **client-only**: Kestrel reads `ConnectionContext.Transport` directly and never sees it.
+`SocketsHttpHandler.ConnectCallback` must return a `Stream`, and that is the only hook `System.Net.Http` offers. [`ConnectionContextStream`](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/src/Bedrock/ConnectionContextStream.cs) is the internal adapter between the pipe that every `IConnectionFactory` produces and that `Stream`. It is **client-only**: Kestrel reads `ConnectionContext.Transport` directly and never sees it.
 
 The `Stream` shape is a cost, but the cost is one copy and not the abstraction:
 
 - A native provider fills its own pages (RIO and io_uring have to, because the memory is registered or chosen by the kernel). `Stream.ReadAsync(Memory<byte>)` has the caller supply the destination, so the bytes are copied from the leased page into the handler's buffer. `Socket` copies once as well, from the kernel into the caller's buffer, so the extra cost is the lease-then-copy model and the pipe hop, not a second full copy.
-- Measured on a raw TCP client (WSL2, [Bedrock-History.md](Bedrock-History.md#the-stream-adapter-at-8-kb-and-64-kb)): the stream is within noise of the pipe at 64 B and 1 KB and 4-9 points lower at 8 KB and 64 KB.
+- Measured on a raw TCP client (WSL2, [Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md#the-stream-adapter-at-8-kb-and-64-kb)): the stream is within noise of the pipe at 64 B and 1 KB and 4-9 points lower at 8 KB and 64 KB.
 - A stream that skipped the pipe (`NetworkConnectionStream`) was tried on the Windows HTTP client and was not better than the pipe adapter without read-ahead, so removing the pipe hop does not remove the cost. It was dropped.
 
 It cannot be avoided without a runtime change: a `System.Net.Http` hook that accepts an `IConnectionFactory` or a `ConnectionContext`, or a receive that fills a caller-supplied buffer. Both are runtime API proposals and are outside this experiment. Until then the non-native fallback in `UseConnectionFactory` also adds a 1 MiB read-ahead, which a native connection skips. A zero-length read, which the handler uses to wait for data, leaves the received bytes unexamined (`AdvanceTo(Start)`), so the read that follows returns them instead of waiting for more.
@@ -119,7 +120,7 @@ Three costs are on this path:
 
 Inline completion has one rule: the continuation shares the worker with every other connection assigned to it, so a consumer that blocks (synchronous I/O, `.Result`) stalls those connections. That is the same trade-off as `SocketTransportOptions.UnsafePreferInlineScheduling`, which is why it is opt-in. `NetworkInputReader` completes the pending read outside its internal lock, so an inline continuation does not run while the lock is held.
 
-Moving the send or the receive to another thread instead (the thread that flushes also sends; `recv` on a thread-pool thread) was slower than leaving the worker in charge ([Bedrock-History.md](Bedrock-History.md#three-attempts-to-raise-default-mode-that-did-not-work)).
+Moving the send or the receive to another thread instead (the thread that flushes also sends; `recv` on a thread-pool thread) was slower than leaving the worker in charge ([Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md#three-attempts-to-raise-default-mode-that-did-not-work)).
 
 ## Results
 
@@ -262,7 +263,7 @@ Reading it: when the client is the limiting side (2 cores) the native clients ar
 
 These are single runs against Sockets cells that moved by 5-10% between runs, so only the direction is reliable. They were measured before the zero-length-read handling described under [`ConnectionContextStream`](#why-connectioncontextstream-exists) and were not repeated.
 
-**Below HTTP, local runs** (WSL2 and Windows on a 7950X3D, 2 client CPUs, a C echo server, 64 connections, 5 repetitions). With HTTP and Kestrel removed, io_uring was ahead of a plain `Socket` by about 7-16% at 64 B to 8 KB, epoll was at parity (97-107%), RIO was ahead by 6-17% at 64 B and 1 KB, and IOCP was at parity. Nothing beat `Socket` at 64 KB on Windows. The `Stream` adapter cost 4-9 points at 8 KB and 64 KB. An awaited `SendAsync` on a CPU-limited epoll client cost 30% until `CompleteSendsInline` or the queued send path was used. Details are in [Bedrock-History.md](Bedrock-History.md#raw-tcp-client-removing-http-and-kestrel-from-the-picture). These runs are local, not crank.
+**Below HTTP, local runs** (WSL2 and Windows on a 7950X3D, 2 client CPUs, a C echo server, 64 connections, 5 repetitions). With HTTP and Kestrel removed, io_uring was ahead of a plain `Socket` by about 7-16% at 64 B to 8 KB, epoll was at parity (97-107%), RIO was ahead by 6-17% at 64 B and 1 KB, and IOCP was at parity. Nothing beat `Socket` at 64 KB on Windows. The `Stream` adapter cost 4-9 points at 8 KB and 64 KB. An awaited `SendAsync` on a CPU-limited epoll client cost 30% until `CompleteSendsInline` or the queued send path was used. Details are in [Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md#raw-tcp-client-removing-http-and-kestrel-from-the-picture). These runs are local, not crank.
 
 ## What this shows
 
@@ -281,14 +282,14 @@ These are single runs against Sockets cells that moved by 5-10% between runs, so
 - A decision about the inline default. It is the largest measured lever and carries a blocking risk, so it is off.
 - Measurement on more than one machine type, with more than two repetitions, on bare-metal Linux, and a latency-focused run that explains the Windows inline p99.
 
-Optimizations that were not tried, none of which changes the contract: pooling the per-receive allocations (about 1-2%), one thread-pool item per batch of completions instead of one per read, and steering each connection to the worker whose CPU receives its queue's interrupt (`SO_INCOMING_CPU`). An io_uring engine inside the runtime thread pool, instead of in a transport, exists in a fork of the runtime ([Bedrock-History.md](Bedrock-History.md#other-io_uring-work-looked-at)).
+Optimizations that were not tried, none of which changes the contract: pooling the per-receive allocations (about 1-2%), one thread-pool item per batch of completions instead of one per read, and steering each connection to the worker whose CPU receives its queue's interrupt (`SO_INCOMING_CPU`). An io_uring engine inside the runtime thread pool, instead of in a transport, exists in a fork of the runtime ([Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md#other-io_uring-work-looked-at)).
 
 ## Limits of these measurements
 
 - Crank runs: 2 repetitions per cell for the 4, 8 and 28 worker Linux server cells and the Windows server matrix (single-run ranges 0.4-5%), 1 for the 16 and 56 worker Linux cells, 2 per cell for the idna server and client matrices, 1 for the 56-core client matrices, and 1 for each CPU-per-request row. Differences under about 5% are not findings.
-- One workload: 1 KB responses, keep-alive TCP, `wrk` on a separate machine. The 56-core results do not cover TLS, larger bodies, or connection churn. TLS was measured on the small crank machines with the original registration ([LINUX-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/LINUX-RESULTS.md), [WINDOWS-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/WINDOWS-RESULTS.md)) and on a development machine through Bedrock ([Bedrock-History.md](Bedrock-History.md)).
+- One workload: 1 KB responses, keep-alive TCP, `wrk` on a separate machine. The 56-core results do not cover TLS, larger bodies, or connection churn. TLS was measured on the small crank machines with the original registration ([LINUX-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/LINUX-RESULTS.md), [WINDOWS-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/WINDOWS-RESULTS.md)) and on a development machine through Bedrock ([Bedrock-History.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/Bedrock-History.md)).
 - The application is pinned to `W` cores of a 56-core machine; that is not the same as a `W`-core machine. The NIC's 56 receive interrupts are spread over every CPU, so a cpuset leaves part of the receive work on other CPUs ([The cpuset is not a smaller machine](#the-cpuset-is-not-a-smaller-machine)).
 - The Sockets baseline is the stock runtime on the same build; the inline Sockets baseline relies on `UnsafePreferInlineScheduling` and, on Linux, `DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS`.
 - The load machine of the 56-core Linux runs has SMT, so its logical CPU use understates its physical limit. Inline rows at 28 workers and above may be partly client-limited.
 - The Windows inline p99 increase is measured but unexplained. The CPU-per-request figures come from single sampler runs (`NETWORKPROTO_DIAG=1`) and are not reported for Windows.
-- The memory cost is unchanged from [MemoryFootprint.md](MemoryFootprint.md): RIO registers its slabs and uses 2-3 times the memory of Sockets on a client.
+- The memory cost is unchanged from [MemoryFootprint.md](https://github.com/DeagleGross/aspnetcore/blob/dmkorolev/project-bedrock/src/Servers/Kestrel/Transport.Networking/MemoryFootprint.md): RIO registers its slabs and uses 2-3 times the memory of Sockets on a client.
