@@ -23,12 +23,14 @@ NetworkEngineOptions options = OperatingSystem.IsWindows()
 
 ### Engine options
 
-All four options types derive from `NetworkEngineOptions`. They add no provider-specific members yet, so the base members are the whole option surface today.
+All four options types derive from `NetworkEngineOptions`. The Windows providers add pool settings through `WindowsEngineOptions`; epoll and io_uring add nothing.
 
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `WorkerCount` | `int` | `4` | Number of worker threads started for each bound listener. A worker is a dedicated thread that drives the native I/O model and the connections assigned to it. Must be greater than zero. |
-| `WorkerProcessors` | `IReadOnlyList<int>?` | `null` | Optional logical processor ID for each worker. The list length must equal `WorkerCount` and every ID must be nonnegative. When `null`, epoll, IOCP and RIO workers are not pinned, and io_uring worker `i` is pinned to processor `2 * i`. |
+| `WorkerProcessors` | `IReadOnlyList<int>?` | `null` | Optional logical processor ID for each worker. The list length must equal `WorkerCount` and every ID must be nonnegative. When `null`, epoll, IOCP and RIO workers are not pinned, and the workers of an io_uring listener are pinned: worker `i` to processor `2 * i`. An io_uring client engine is not pinned unless processors are given. |
+| `CompleteReceivesInline` | `bool` | `false` | Where the continuation of a pending receive runs. `false`: it is queued to the thread pool, so application code never runs on a provider worker. `true`: it runs on the worker that received the bytes, which saves a thread hand-off per request and lets a consumer that blocks stall every connection assigned to that worker. [Scheduling](#scheduling) explains the trade-off. |
+| `InputPoolMaximumBytes`, `OutputPoolMaximumBytes`, `PoolIdleTrimDelay` | `int`, `int`, `TimeSpan` | 256 MiB, 512 MiB, 10 s | `WindowsEngineOptions` only (IOCP and RIO). Maximum size of each worker's receive and output pools (4 MiB to 1 GiB), and how long an idle pool waits before it is trimmed (`Timeout.InfiniteTimeSpan` disables trimming). |
 
 Invalid values are rejected by `NetworkEngineFactory.Create` with `ArgumentOutOfRangeException` for `WorkerCount` and `ArgumentException` for `WorkerProcessors`. The Windows providers additionally accept only processors 0 through 63, and that is checked later, when the listener is bound.
 
@@ -109,7 +111,7 @@ Rules:
 - There is one outstanding receive at a time. Calling `ReceiveAsync` again before `AdvanceReceiveTo` throws `InvalidOperationException`.
 - `Buffer` is only valid until `AdvanceReceiveTo`. To keep bytes longer, use `NetworkReceiveResult.Retain`, which is covered separately.
 - A token that is already cancelled when `ReceiveAsync` is called throws `OperationCanceledException`. A token cancelled while the receive is waiting completes it with `IsCanceled` set instead of throwing, and the connection stays usable.
-- The continuation of an awaited receive is queued asynchronously, so application code does not run inline on the provider's worker thread.
+- The continuation of an awaited receive is queued to the thread pool by default, so application code does not run on the provider's worker thread. With `CompleteReceivesInline = true` (an engine option, or a per-connection property) it runs on the worker instead.
 
 #### Sending
 
@@ -232,9 +234,21 @@ Rules for buffers:
 - Dispose each `NetworkBuffer` exactly once. With `EnqueueSend` that can be right after the call. With `SendAsync` it must be after the task completes.
 - A buffer that is never disposed keeps its block out of the pool.
 
+### How epoll works (Linux)
+
+epoll is readiness based: the kernel reports that a socket can be read or written, and the worker then does the non-blocking `recv` or `send` itself. It is the only provider that does the I/O call on the worker instead of having the OS finish it.
+
+- **Setup.** Each worker owns an epoll instance, an `eventfd` for wake-ups and its own listening socket with `SO_REUSEPORT`, so the kernel spreads new connections across the workers. Registrations are level-triggered and carry a monotonic id, so an event for a closed and reused descriptor cannot be mistaken for the new one.
+- **Memory.** A server worker owns 2048 pages of 16 KiB in one pinned managed array. A client worker uses 64 KiB pages from a pool of the same total size, because a client reads whole responses per call.
+- **Accept.** The listener becomes readable, and the worker calls `accept4` with `SOCK_NONBLOCK`.
+- **Receive.** When a connection is readable the worker rents a free page, calls `recv` once and publishes the page. A read shorter than a page ends the pass without a second `recv`, because level-triggered epoll reports any remaining input. A connection that holds four unreleased pages loses its read interest, and gets it back when a page is returned, so TCP flow control pushes back on the peer.
+- **Send.** The worker calls `send` with `MSG_NOSIGNAL` on the bytes that the output pipe or a borrowed send provides. A partial send registers write interest and continues when the socket is writable again.
+- **Commands and wake-ups.** Other threads enqueue a command (`OutputReady`, `ReturnPage`, `Close`, `Connected`, `Unbind`, `Stop`) and wake the worker with an `eventfd` write. A command joins a wake that is already pending instead of writing again (`NETWORKPROTO_COALESCE=0` turns that off), so a busy worker is woken once per drain and not once per request. The loop drains up to 1024 commands, then calls `epoll_wait` for up to 128 events, with a 10 ms timeout when no command is pending.
+- **TLS.** After the readiness event, OpenSSL (or the runtime's socket-based session, `NETWORKPROTO_LINUX_TLS_IMPL=session`) reads and writes the socket itself, so the worker never sees ciphertext pages. The TLS table below has the other providers.
+
 ### How RIO and io_uring work
 
-This section describes what the two completion-based providers do under the hood. It is read from the prototype source and was not measured, and it is a high-level map, not a specification. Both providers follow the same pattern. A worker thread starts an operation (accept, receive or send), the OS finishes it later and reports a completion, and the worker turns that completion into a published receive page or a finished send. All state of a connection is touched only by its worker. Other threads put a command on the worker's queue and wake it, with `PostQueuedCompletionStatus` on Windows or a write to an `eventfd` on Linux. Each connection has at most one receive and one send in flight.
+This section describes what the two completion-based providers do under the hood. It is read from the prototype source, and it is a high-level map, not a specification. Both providers follow the same pattern. A worker thread starts an operation (accept, receive or send), the OS finishes it later and reports a completion, and the worker turns that completion into a published receive page or a finished send. All state of a connection is touched only by its worker. Other threads put a command on the worker's queue and wake it, with `PostQueuedCompletionStatus` on Windows or a write to an `eventfd` on Linux. Each connection has at most one receive and one send in flight.
 
 #### RIO (Windows)
 
@@ -255,7 +269,7 @@ IOCP uses the same worker, the same completion port and the same TLS code. It ca
 - **Memory.** Each ring owns a pinned 32 MiB array cut into 16 KiB pages. The pages are registered as a provided-buffer ring (`io_uring_setup_buf_ring`), which is a pool the kernel takes buffers from. The prototype does not use `io_uring_register_buffers`.
 - **Receive.** One multishot receive (`IORING_OP_RECV` with `IOSQE_BUFFER_SELECT`) stays armed per connection. The kernel picks a free page from the provided-buffer ring only when data arrives, so an idle connection holds no page. A completion carries the byte count, the id of the page the kernel chose, and a flag that says whether the receive is still armed. Zero bytes means the peer closed. When a page is released it is added back to the provided-buffer ring. When a connection holds four unreleased pages, the worker cancels the multishot receive and starts it again after a page comes back. An empty buffer ring (`-ENOBUFS`) is not an error.
 - **Send.** `IORING_OP_SEND` reads from pinned or native memory. A partial send is submitted again with the remainder.
-- **Submission and completion.** The worker drains its command queue, prepares the entries, and then calls into C once. That call submits everything that was prepared, waits for a completion (10 ms at most) and copies up to 1024 completions to managed memory. The `user_data` of every entry holds the connection id and the kind of operation. The `eventfd` that wakes the worker is a read that is armed on the ring.
+- **Submission and completion.** The worker drains its command queue, prepares the entries, and then calls into C once. That call submits everything that was prepared, waits for a completion (10 ms at most) and copies up to 1024 completions to managed memory. The `user_data` of every entry holds the connection id and the kind of operation. The `eventfd` that wakes the worker is a read that is armed on the ring, and a command joins a wake that is already pending (`NETWORKPROTO_COALESCE=0` turns that off).
 - **Cancel and close.** Cancels use `IORING_OP_ASYNC_CANCEL`. A connection keeps its state and its memory until every operation it started has produced its final completion, even a cancelled one.
 - **Not used.** The prototype does not use `IORING_SETUP_SQPOLL`, registered buffers, registered files or zero-copy send.
 
@@ -267,6 +281,7 @@ With TLS the completion only reports ciphertext, and the plaintext is produced a
 
 | Provider and TLS implementation | What the OS completion reports | How plaintext is produced |
 | --- | --- | --- |
+| epoll with OpenSSL on the socket (default) or the runtime session | The socket is readable or writable (readiness, not a completion) | After the readiness the worker lets OpenSSL read and write the non-blocking socket, and a read decrypts straight into a free page. |
 | RIO and IOCP with Schannel (default) | N bytes of ciphertext are in the receive page | The worker calls `DecryptMessage` on the page and publishes the plaintext as a slice of the same page, so nothing is copied. A send calls `EncryptMessage` into an output block, and that block is sent. |
 | RIO and IOCP with the runtime session (`NETWORKPROTO_WINDOWS_TLS_IMPL=session`) | N bytes of ciphertext are in the receive page | The worker calls the runtime's buffer-based TLS session, which decrypts into a separate page. |
 | io_uring with OpenSSL over a custom BIO (default) | A ciphertext page has arrived, or a ciphertext send has finished | The worker hands the page to OpenSSL through a memory-style BIO and calls `SSL_do_handshake`, `SSL_read_ex` and `SSL_write_ex`. The plaintext is copied into a free page. The ciphertext that OpenSSL produces is sent by the ring. |
@@ -280,14 +295,54 @@ A few more details:
 - **Backpressure.** The limit of four unreleased plaintext pages applies to decrypted pages too. At the limit the provider stops decrypting buffered ciphertext and stops reading, and both resume when a page is returned.
 - **Page kinds.** Plaintext pages are `Registered` on RIO, `Native` on IOCP and `Pinned` on io_uring, as in the table in the Pages section.
 
-#### Other Windows I/O APIs
+### Scheduling
+
+Where the application's continuation runs decides most of the throughput of a native provider. The workers make the system calls cheap, and what is left is hand-offs between threads. Per request, the default path is:
+
+1. The worker receives into a pooled page and publishes it to the connection.
+2. Completing the pending `ReceiveAsync` (or a read of the pipe from `AsDuplexPipe()`) queues the application's continuation to the thread pool.
+3. The application runs on a thread-pool thread and writes its response. Flushing enqueues an `OutputReady` command to the worker, and releasing the page enqueues a `ReturnPage` command. Both wake the worker only if it is parked, and a wake that is already pending is joined.
+4. The worker sends the response and returns the page to its pool.
+
+`CompleteReceivesInline = true` removes step 2: the continuation runs on the worker that received the bytes, and the two commands land on the worker's own queue without a wake. That is the largest lever the providers have (see Results), and it comes with one rule. The continuation shares the worker with every other connection assigned to it, so a consumer that blocks (synchronous I/O, `.Result`) stalls those connections. It is the analogue of `SocketTransportOptions.UnsafePreferInlineScheduling` for the Sockets transport, and it is off by default for the same reason. `NetworkConnection.CompleteReceivesInline` overrides the engine setting for one connection, and `NetworkConnection.CompleteSendsInline` does the same for the continuation of an awaited `SendAsync`, which otherwise also resumes on the thread pool.
+
+The scheduling model, the cost per request and the limits of default mode are measured and explained in [Bedrock.md](Bedrock.md#scheduling-is-the-performance-contract).
+
+### Results
+
+Measured on crank with Kestrel serving a 1 KB response over HTTP/1.1 keep-alive, `wrk` on a separate machine, through the Bedrock registration ([Bedrock.md](Bedrock.md) describes the registration; the providers are the ones described here). Each cell is the mean of 2 runs unless it says "1 run" and is **measured, not independently reproduced**. "% of Sockets" is throughput as a fraction of the stock Kestrel Sockets transport in the same table (100% is parity, 120% is 20% more requests per second than Sockets). The application is limited to `W` cores of a 56-core machine (`W` workers), so "4 workers" is four cores of a larger machine. Inline Sockets, where it is shown, is Sockets with `UnsafePreferInlineScheduling` (and `DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1` on Linux).
+
+Linux (`aspnet-gold-lin-relay`), % of Sockets default. "inline" is `CompleteReceivesInline = true`.
+
+| Workers | epoll default | epoll inline | io_uring default | io_uring inline |
+| --- | --- | --- | --- | --- |
+| 4 | 123% | 172% | 126% | 191% |
+| 8 | 100% | 161% | 111% | 183% |
+| 16 (1 run) | 118% | not run | 117% | 174% |
+| 28 | 104% | 136% | 102% | 146% |
+| 56, the whole machine (1 run) | 108% | not run | 108% | not run |
+
+Windows (`aspnet-gold-win-relay`), % of Sockets default.
+
+| Workers | IOCP default | IOCP inline | RIO default | RIO inline |
+| --- | --- | --- | --- | --- |
+| 4 | 94% | 113% | 115% | 157% |
+| 28 | 100% | 122% | 121% | 154% |
+
+- On a 2-CPU Intel server (`idna-intel-lin-relay`, 256 connections, 2 runs, default mode) epoll is 128% and io_uring 148% of Sockets. Small machines show the largest margins.
+- Against a Sockets transport that is also run inline, the Linux inline margin is 114-136% and the Windows margin 111-156%.
+- With TLS owned by the transport (2026-10 builds, 4-vCPU Intel machines, before `CompleteReceivesInline` existed; not re-run) keep-alive 1 KB was +42% (epoll) and +54% (io_uring) over Sockets with `SslStream` on Linux, and +15% (IOCP) and +46% (RIO) on Windows. The full TCP and TLS matrices are in [LINUX-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/LINUX-RESULTS.md) and [WINDOWS-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/WINDOWS-RESULTS.md).
+- Default mode has a ceiling at many cores: about 8 µs of the 14-15 µs of CPU per request is kernel TCP work that Sockets also pays. The margin shrinks with the core count in a cpuset partly because the NIC's receive work lands on other CPUs ([Bedrock.md](Bedrock.md#the-cpuset-is-not-a-smaller-machine)).
+- Raw rows, the 56-core and small-machine tables and the CPU-per-request breakdown are in [GOLD-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/GOLD-RESULTS.md) and [SCALING-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/SCALING-RESULTS.md).
+
+### Other Windows I/O APIs
 
 The prototype does not use `ProcessSocketNotifications` or Windows I/O rings. What the public documentation says about them is in [Windows I/O options](Windows%20IO%20options.md).
 
-#### Scaling and memory
+### Scaling and memory
 
 How the providers behave when CPUs or memory are added after start is in [ScalingCapabilities.md](ScalingCapabilities.md). What they cost in memory, per connection and after a burst, is in [MemoryFootprint.md](MemoryFootprint.md).
 
-#### Project Bedrock
+### Project Bedrock
 
-An experiment that reaches the providers through `IConnectionListenerFactory` and `IConnectionFactory`, and uses them as the connect side of `SocketsHttpHandler`, is in [Bedrock.md](Bedrock.md).
+An experiment that reaches the providers through `IConnectionListenerFactory` and `IConnectionFactory`, and uses them as the connect side of `SocketsHttpHandler`, is in [Bedrock.md](Bedrock.md), and the API it adds is in [Bedrock-API.md](Bedrock-API.md).

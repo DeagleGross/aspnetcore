@@ -1,3 +1,5 @@
+The provider API of the prototype (the `System.Net.Transport` surface that every provider implements and that [PROTOTYPE.md](PROTOTYPE.md) explains). The types that Project Bedrock adds on top (`NetworkTransportFactory`, `INetworkConnectionFeature`, `UseConnectionFactory`, `AddNetworkTransport`) are listed in [Bedrock-API.md](Bedrock-API.md).
+
 ```csharp
 using System;
 using System.Buffers;
@@ -24,6 +26,7 @@ namespace System.Net.Transport
     {
         public int WorkerCount { get; set; }
         public IReadOnlyList<int>? WorkerProcessors { get; set; }
+        public bool CompleteReceivesInline { get; set; }  // default false: a pending receive resumes on the thread pool; true: on the worker that received the bytes
     }
 
     public sealed class EpollEngineOptions : NetworkEngineOptions
@@ -96,6 +99,8 @@ namespace System.Net.Transport
         public NetworkTlsInfo? TlsInfo { get; }
         public CancellationToken ConnectionClosed { get; }
         public long MaxQueuedSendBytes { get; set; }
+        public bool CompleteReceivesInline { get; set; }  // per-connection override of NetworkEngineOptions.CompleteReceivesInline
+        public bool CompleteSendsInline { get; set; }     // default false: an awaited SendAsync resumes on the thread pool; true: on the worker
         public PipeWriter Output { get; }
 
         public ValueTask<NetworkReceiveResult> ReceiveAsync(CancellationToken cancellationToken = default);

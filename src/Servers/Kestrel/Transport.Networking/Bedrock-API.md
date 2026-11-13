@@ -14,7 +14,7 @@ Everything here is **experimental and non-shipping**. The types are public only 
 | Optional: one-line registration | `AddNetworkTransport(this IServiceCollection, ...)` | New. Convenience. |
 | Optional: use the transport for `HttpClient` | `SocketsHttpHandler.UseConnectionFactory(...)` (two overloads) | New. Convenience around the only runtime hook, `ConnectCallback`. |
 | Optional: transport-owned TLS on Linux/Windows | `NetworkNativeTlsOptions` | Prototype type, reused. |
-| Optional, **measured to matter**: where receive and send continuations run | `NetworkEngineOptions.CompleteReceivesInline`, `NetworkConnection.CompleteReceivesInline`, `NetworkConnection.CompleteSendsInline` | New / prototype. See [Bedrock.md](Bedrock.md#scheduling-is-the-performance-contract). |
+| Optional, **measured to matter**: where receive and send continuations run | `NetworkEngineOptions.CompleteReceivesInline`, `NetworkConnection.CompleteReceivesInline`, `NetworkConnection.CompleteSendsInline` | Options on the prototype types. See [Bedrock.md](Bedrock.md#scheduling-is-the-performance-contract). |
 
 Nothing in `Microsoft.AspNetCore.Connections.Abstractions`, Kestrel Core or `System.Net.Http` was changed.
 
@@ -95,11 +95,11 @@ await using var factory = new NetworkTransportFactory(new RioEngineOptions { Wor
 using var client = new HttpClient(new SocketsHttpHandler().UseConnectionFactory(factory));
 ```
 
-Not part of Bedrock: the prototype also ships `IWebHostBuilder` conveniences in the same assembly (`UseNetworkTransport`, `UseEpollTcp`, `UseEpollTls`, `UseIocp`, `UseRio`). They register the private `KestrelFactory` of the earlier prototype and are listed in `src\PublicAPI.Unshipped.txt`; `AddNetworkTransport` above would replace them.
+Not part of Bedrock: the prototype also ships `IWebHostBuilder` conveniences in the same assembly (`UseNetworkTransport`, `UseEpollTcp`, `UseEpollTls`, `UseIocp`, `UseRio`). They register the private `KestrelFactory` of the original prototype and are listed in `src\PublicAPI.Unshipped.txt`; `AddNetworkTransport` above would replace them.
 
 ## Prototype API that Bedrock depends on
 
-These already existed in [PUBLIC-API.md](PUBLIC-API.md). Only the members Bedrock uses are repeated, plus the ones this investigation added (marked **new**).
+These are defined in [PUBLIC-API.md](PUBLIC-API.md). Only the members Bedrock uses are repeated here.
 
 ```csharp
 namespace System.Net.Transport
@@ -108,7 +108,7 @@ namespace System.Net.Transport
     {
         public int WorkerCount { get; set; }                       // owning worker threads
         public IReadOnlyList<int>? WorkerProcessors { get; set; }  // optional logical processor per worker
-        public bool CompleteReceivesInline { get; set; }           // NEW. Default false. See below.
+        public bool CompleteReceivesInline { get; set; }           // default false. See below.
     }
 
     public sealed class EpollEngineOptions : NetworkEngineOptions { }
@@ -132,13 +132,13 @@ namespace System.Net.Transport
     public abstract class NetworkConnection                        // reached through INetworkConnectionFeature
     {
         public bool CompleteSendsInline { get; set; }              // default false: an awaited SendAsync resumes on the thread pool
-        public bool CompleteReceivesInline { get; set; }           // NEW. Default false: a pending receive resumes on the thread pool
+        public bool CompleteReceivesInline { get; set; }           // default false: a pending receive resumes on the thread pool
         // plus the members listed in PUBLIC-API.md: ReceiveAsync, AdvanceReceiveTo, SendAsync, EnqueueSend, AllocateBuffer, AsDuplexPipe, AsStream, Abort, ...
     }
 }
 ```
 
-### `CompleteReceivesInline` (new)
+### `CompleteReceivesInline`
 
 | | |
 | --- | --- |
@@ -157,7 +157,7 @@ Environment variables of the experiment. Each is a switch for a measurement, not
 | `NETWORKPROTO_CLIENT_LEASE_BYTES` | all | Client receive window in bytes (default 1 MiB). Plays the part of a kernel receive buffer. |
 | `NETWORKPROTO_CLIENT_PAGE_KB`, `NETWORKPROTO_CLIENT_PAGES` | Linux client | Receive page size (default 64 KB) and, for io_uring, pinned pages per client engine (default 128). |
 | `NETWORKPROTO_CLIENT_MAX_RECEIVE_BLOCK`, `NETWORKPROTO_IOCP_ZERO_BYTE` | Windows client | Receive block cap (default 256 KB) and an override of the IOCP zero-byte probe. |
-| `NETWORKPROTO_COALESCE` | Linux | `0` restores one worker wake-up per command. The default is now to join a pending wake (it was off for servers before 2026-11-12). |
+| `NETWORKPROTO_COALESCE` | Linux | `0` restores one worker wake-up per command. By default a command joins a wake that is already pending. |
 | `NETWORKPROTO_CPUS` | Linux | Explicit worker processors. Equivalent to `WorkerProcessors`. |
 | `NETWORKPROTO_DIAG=1` | Linux | Prints per-second counters (benchmark apps and `EpollDiagnostics`). Diagnostics only. |
 

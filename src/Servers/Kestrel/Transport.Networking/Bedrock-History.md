@@ -1,6 +1,6 @@
 # Project Bedrock: the history of the experiment
 
-> **This is the historical record, not the current state.** It is the Bedrock write-up as it stood at commit `9eab55c648` (before the Linux scaling investigation of 2026-11-12), kept unchanged except for this note. It includes intermediate findings that were later superseded or explained: harness artefacts, the pre-allocation and GC-count findings, dropped experiments, the first Windows tables that were biased by the thread-pool sizing artefact, and the local WSL2 results.
+> **This is the historical record, not the current state.** It is the Bedrock write-up as it stood at commit `9eab55c648` (before the Linux scaling investigation of 2026-11-12), kept unchanged except for this note and the last chapter. It includes intermediate findings that were later superseded or explained: harness artefacts, the pre-allocation and GC-count findings, dropped experiments, the first Windows tables that were biased by the thread-pool sizing artefact, and the local WSL2 results. [The Linux scaling investigation](#the-linux-scaling-investigation-2026-11-09-to-2026-11-13) at the end was moved here from `Bedrock.md`: the first gold-machine numbers, the wake-up and thread-pool findings, and the experiments that did not help.
 >
 > Read [Bedrock.md](Bedrock.md) for the current architecture and the figures to rely on, and [Bedrock-API.md](Bedrock-API.md) for the public API. Where this file and `Bedrock.md` disagree, `Bedrock.md` wins.
 
@@ -630,3 +630,68 @@ Same plans as the Windows server and client sections above (`run-bench.ps1`, 64 
 - The client wins depend on the receive window (1 MiB) and, on Windows, the 256 KB receive block cap. The RIO block cap experiment showed that 64 KB blocks gave no consistent win and 256 KB blocks gave RIO +8% at 64 KB, at about +30 MB of working set.
 - Latency percentiles are from one load generator at a fixed 64 connections. They are not a latency-focused benchmark.
 - The raw TCP client runs used a C echo-style server on 16 threads (CPUs 8-31), a client pinned to 2 CPUs with 2 provider workers, 64 connections and 5 repetitions of 6 s on Linux (4 on Windows, with `DOTNET_PROCESSOR_COUNT=2`). The 2-CPU client is deliberate, to make the client the limiting side, and with 4 CPUs the arms converge. Per-arm repetition counts are small (n=5), so differences under about 5% are noise. The Linux run is on WSL2. The Windows C server polls with `WSAPoll` and a 1 ms timeout, so its latency is quantised and its absolute throughput is far below Linux.
+
+# The Linux scaling investigation, 2026-11-09 to 2026-11-13
+
+These sections were moved out of [Bedrock.md](Bedrock.md) when it was reduced to the current architecture and the latest figures. They record how the Linux server numbers were found to be wrong, what fixed them, which experiments did not help, and the numbers that were superseded. All single runs unless stated, measured on crank and not independently reproduced. Raw files are in the Benchmarks repo under [`results/gold-2026-11-09`](https://github.com/aspnet/Benchmarks/tree/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/gold-2026-11-09) and [`results/scaling-2026-11-12`](https://github.com/aspnet/Benchmarks/tree/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/scaling-2026-11-12).
+
+## The first gold-machine results (2026-11-09)
+
+Kestrel with the Bedrock registration on the 56-core gold machines, 1 KB TCP keep-alive, mean of 2 runs. The Linux providers fell behind Sockets as the worker count grew:
+
+| Workers | Linux Sockets | Linux epoll | Linux io_uring | epoll % of Sockets | io_uring % of Sockets |
+| --- | --- | --- | --- | --- | --- |
+| 4 | 316,934 | 341,704 | 343,226 | 107.8% | 108.3% |
+| 8 | 552,043 | 511,905 | 481,136 | 92.7% | 87.2% |
+| 28 | 1,821,788 | 1,422,328 | 1,145,692 | 78.1% | 62.9% |
+
+The Bedrock adapter was not the cause (the legacy registration gave epoll 1,437,679 and io_uring 1,132,181 at 28 workers), and pinning the workers explicitly did not help (epoll 1,216,721 and io_uring 1,145,123 at 28 workers). The Windows numbers of the same day were within noise of the later ones (at 8 workers RIO was 109.8% and IOCP 93.1% of Sockets). The first gold client matrices stopped after 7 of 18 planned runs per OS because non-Sockets handlers sometimes stalled (see [the receive stall](#the-zero-length-read-stall-in-the-56-core-client-matrices)).
+
+## Why Linux lost at 28 workers, and what fixed it
+
+A per-second sampler (`NETWORKPROTO_DIAG=1`: per-thread-group CPU, context switches, run-queue wait, thread-pool items and epoll syscall counters) gave this single-run picture at 28 workers:
+
+| Configuration (28 workers) | Requests/s | CPU per request | Thread-pool items per request | Worker wake-ups per request | Run-queue wait (cores) |
+| --- | --- | --- | --- | --- | --- |
+| Sockets default | 1.78M | 15.1 µs | 1.96 | n/a | 2.3 |
+| Sockets inline | 1.99M | 13.6 µs | 0 | n/a | 0.2 |
+| epoll, wake-ups not joined (the 2026-11-09 build) | 1.41M | 17.7 µs | 0.97 | 2.00 | 18.4 |
+| epoll, wake-ups joined (the current default) | 1.83M | 14.6 µs | 0.97 | 0.07 | 17.2 |
+| epoll, joined and `CompleteReceivesInline` | 2.41M | 11.2 µs | 0 | 0 | 0.5 |
+| io_uring, default | 1.82M | 14.5 µs | 0.97 | n/a | 21.6 |
+| io_uring, `CompleteReceivesInline` | 2.64M | 10.3 µs | 0 | n/a | 0.2 |
+
+- **Un-joined wake-ups cost about 3 µs per request.** Each of the two commands per request wrote the worker's `eventfd` from a thread-pool thread, and `epoll_wait` woke per request. Joining them moved epoll from 17.7 to 14.6 µs per request, which against the Sockets run of the day is 79% to 103% of its throughput.
+- **The kernel work is similar.** The epoll threads spend 6.8-7.6 µs of system time per request on `recv` and `send`, and the Sockets thread-pool threads spend 7.9-8.0 µs.
+- **The thread-pool hop is the rest.** In default mode 28 epoll threads and about 40 thread-pool threads share 28 cores. Completing on the worker removes the second set of threads and the run-queue wait.
+- The io_uring rows were measured after the sampler was fixed to count `iowait` as idle. Idle time before and after the load shows up as `iowait` for io_uring, and counting it as busy had inflated the steady window. An earlier reading that io_uring used half the CPU of epoll was that artefact.
+- A figure of "one event per `epoll_wait`" in an earlier draft was wrong: 0.14 `epoll_wait` calls and 1.07 events per request is about 7.6 events per wait in default mode (about 17 inline).
+
+## Three attempts to raise default mode that did not work
+
+Each was measured on the gold-lin machine at 28 workers against a Sockets run of the same evening (1.77M requests per second, one run per cell; [default-mode-experiments.txt](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/scaling-2026-11-12/default-mode-experiments.txt)):
+
+| Change (epoll, 28 workers) | Requests/s | % of Sockets | CPU per request | What happened |
+| --- | --- | --- | --- | --- |
+| Baseline (default) | 1.81M | 102% | 14.7 µs | 2 commands and 0.08 wake-ups per request |
+| The thread that flushes the response also sends it, and the thread that releases a page also returns it (no commands, no wake-ups) | 1.70M | 96% | 15.4 µs | System time per request rose by 0.7 µs (probably `send` on a core other than the `recv` core), and the epoll threads waited 16 cores' worth in the run queue |
+| The worker only reports readiness (edge-triggered); a thread-pool thread runs `recv`, the application and `send` | 1.45M | 82% | 16.2 µs | The per-core epoll threads sleep and wake (0.35 voluntary context switches per request) and 12% of the cores idle; 1.93 thread-pool items per request, like Sockets |
+| The same direct send, but inside inline completion on the worker | 2.23M | 93% of inline (2.40M) | 12.0 µs | Probably the batching of the deferred pass is lost: inline handles about 16 requests per loop iteration (0.06 `epoll_wait` per request), and the sends of that pass run back to back |
+
+The baseline row ran with an allocation-free command queue in place of `ConcurrentQueue`; that made no measurable difference (258 B per request either way), so the tree keeps `ConcurrentQueue`. Fewer workers (14 and 20 of 28 cores) and `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` were also tried: 14 workers lose (1.66M epoll, 1.58M io_uring, with 12-17% of the cores idle), 20 workers equal 28 (1.85M epoll, 1.78M io_uring), and spin 0 changes nothing beyond noise (1.75M epoll, 1.72M io_uring, against 1.77M for Sockets with spin 0). A `Connection: close` run is not measurable with this load generator: Sockets reached 10.6K requests per second with all 896 connections reporting socket errors and the load machine at 95% CPU (probably the client running out of ephemeral ports; not verified). The experimental code is not in the tree; the patch is kept next to the raw numbers ([default-mode-experiments.patch](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/results/scaling-2026-11-12/default-mode-experiments.patch)).
+
+## The option equals the environment switch
+
+The inline cells of the 2026-11-12 matrix came from two builds: repetition 1 used an environment-variable switch inside the transport (`NETWORKPROTO_INLINE_INPUT`), and repetition 2 used the public `NetworkEngineOptions.CompleteReceivesInline` (the one exception is the Linux 4-worker epoll cell, whose second repetition still ran the environment-variable build). Repetition 2 is within 0.1-5% of repetition 1 in every inline cell, on Linux and on Windows, so the option behaves like the switch it replaced.
+
+## The zero-length read stall in the 56-core client matrices
+
+The first 56-core client matrices stopped because non-Sockets handlers sometimes stalled until `HttpClient.Timeout`. `ConnectionContextStream.ReadAsync` handled a zero-length read (which the handler uses to wait for data) by advancing the pipe with `AdvanceTo(Start, End)`, which marks the data examined and makes the following read wait for new data. It now calls `AdvanceTo(Start)`. A `System.IO.Pipelines` test confirmed the primitive, the end-to-end chain was not proven, and the 24 idna client runs after the change completed without a stall (supportive, not proof).
+
+## Earlier results on 4-vCPU crank machines
+
+The original private-factory registration measured +9% to +30% over Sockets on 4-vCPU Intel machines ([LINUX-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/LINUX-RESULTS.md), [WINDOWS-RESULTS.md](https://github.com/aspnet/Benchmarks/blob/dmkorolev/networking-proto/src/BenchmarksApps/Networking-Transports/WINDOWS-RESULTS.md)). Those runs used the registration and the wake-up default of that time. The 4-worker gold result moved in the same direction after the fixes (epoll 108% before, 123% after).
+
+## Other io_uring work looked at
+
+Two branches of Adam Sitnik's runtime fork (`io_uring_extensible_operations` and `io_uring_cancellation`, read only, nothing run) put an io_uring engine inside the runtime thread pool instead of in a transport: one ring per about 8 cores with a dedicated issuer thread (`SINGLE_ISSUER` and `DEFER_TASKRUN`), requests routed to a ring by descriptor, completions handed to the thread pool as one work item per batch, and a multishot receive from a ring-owned provided-buffer pool. Ordinary `Socket.ReceiveAsync` and `SendAsync` go through the ring, so an unchanged Kestrel Sockets transport benefits. The branches contain no benchmark numbers, and the structure matches the Bedrock io_uring provider (a ring thread does the kernel work and completions hop to the thread pool), so no technique that Bedrock lacks was identified. Ideas that were not tried, none of which changes the contract: pooling the per-receive allocations (about 258 B per request against 2 B for Sockets, GC pauses 2.4-2.8% at 28 workers, so perhaps 1-2%), one thread-pool item per batch of completions instead of one per read, fewer unpinned rings, and steering a connection to the worker whose CPU receives its queue's interrupt (`SO_INCOMING_CPU`).
