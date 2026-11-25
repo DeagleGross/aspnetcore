@@ -37,7 +37,7 @@ public class WebAssemblyConfigurationTest : ServerTestBase<BlazorWasmTestAppFixt
         // Verify values from the default 'appsettings.json' are read.
         Browser.Equal("Default key1-value", () => _appElement.FindElement(By.Id("key1")).Text);
 
-        if (_serverFixture.TestTrimmedOrMultithreadingApps)
+        if (_serverFixture.TestTrimmedApps)
         {
             // Verify that the environment gets detected as 'Production'.
             Browser.Equal("Production", () => _appElement.FindElement(By.Id("environment")).Text);
@@ -59,6 +59,16 @@ public class WebAssemblyConfigurationTest : ServerTestBase<BlazorWasmTestAppFixt
             // Lastly for sanity, make sure values specified in an environment specific 'appsettings.$(Environment).json are read
             Assert.Equal("Development key3-value", _appElement.FindElement(By.Id("key3")).Text);
         }
+    }
+
+    [Fact]
+    public void WebAssemblyConfiguration_DoesNotRequireAppSettingsInVfs()
+    {
+        var isMonoRuntime = (bool)((IJavaScriptExecutor)Browser).ExecuteScript(
+            "return typeof Blazor.runtime.INTERNAL.monoStringToStringUnsafe === 'function';");
+
+        Browser.Equal(isMonoRuntime ? "True" : "False", () => _appElement.FindElement(By.Id("appsettings-in-vfs")).Text);
+        Browser.Equal("Default key1-value", () => _appElement.FindElement(By.Id("key1")).Text);
     }
 
     [Fact]

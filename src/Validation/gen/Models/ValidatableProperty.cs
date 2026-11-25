@@ -2,14 +2,15 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Collections.Immutable;
-using Microsoft.CodeAnalysis;
 
 namespace Microsoft.Extensions.Validation;
 
 internal sealed record class ValidatableProperty(
-    ITypeSymbol ContainingType,
-    ITypeSymbol Type,
+    string ContainingTypeFQN,
+    string TypeFQN,
     string Name,
-    string DisplayName,
-    ImmutableArray<ValidationAttribute> Attributes
+    string? DisplayName,
+    bool HasResourceDisplayAttribute,
+    bool IsUnionValue = false,
+    ImmutableArray<string> SkippedUnionCaseTypes = default
 );

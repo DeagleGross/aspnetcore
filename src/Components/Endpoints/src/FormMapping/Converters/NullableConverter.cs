@@ -24,8 +24,15 @@ internal sealed class NullableConverter<T>(FormDataConverter<T> nonNullableConve
         }
 
         var converter = (ISingleValueConverter<T>)_nonNullableConverter;
-
-        if (converter.TryConvertValue(ref reader, value, out var converted))
+        var emptyValueReader = reader;
+        scoped ref var valueReader = ref reader;
+        if (string.IsNullOrEmpty(value))
+        {
+            // Preserve custom empty values without counting a rejected empty value as a mapping error.
+            emptyValueReader.ErrorHandler = static (_, _, _) => { };
+            valueReader = ref emptyValueReader;
+        }
+        if (converter.TryConvertValue(ref valueReader, value, out var converted))
         {
             result = converted;
             return true;
@@ -33,7 +40,7 @@ internal sealed class NullableConverter<T>(FormDataConverter<T> nonNullableConve
         else
         {
             result = null;
-            return false;
+            return string.IsNullOrEmpty(value);
         }
     }
 
@@ -63,6 +70,13 @@ internal sealed class NullableConverter<T>(FormDataConverter<T> nonNullableConve
 
     private static bool IsSupportedUnderlyingObjectType(Type type)
     {
-        return type == typeof(DateOnly) || type == typeof(TimeOnly) || type == typeof(DateTimeOffset);
+        return type == typeof(DateOnly) ||
+            type == typeof(TimeOnly) ||
+            type == typeof(DateTimeOffset) ||
+            type == typeof(TimeSpan) ||
+            type == typeof(Guid) ||
+            type == typeof(Int128) ||
+            type == typeof(UInt128) ||
+            type == typeof(Half);
     }
 }

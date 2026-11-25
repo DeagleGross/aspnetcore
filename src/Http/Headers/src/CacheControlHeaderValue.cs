@@ -328,7 +328,7 @@ public class CacheControlHeaderValue
     /// <inheritdoc />
     public override string ToString()
     {
-        var sb = new StringBuilder();
+        var sb = StringBuilderCache.Acquire();
 
         AppendValueIfRequired(sb, _noStore, NoStoreString);
         AppendValueIfRequired(sb, _noTransform, NoTransformString);
@@ -352,14 +352,14 @@ public class CacheControlHeaderValue
         {
             AppendValueWithSeparatorIfRequired(sb, MaxAgeString);
             sb.Append('=');
-            sb.Append(((int)_maxAge.GetValueOrDefault().TotalSeconds).ToString(NumberFormatInfo.InvariantInfo));
+            sb.Append(NumberFormatInfo.InvariantInfo, $"{(int)_maxAge.GetValueOrDefault().TotalSeconds}");
         }
 
         if (_sharedMaxAge.HasValue)
         {
             AppendValueWithSeparatorIfRequired(sb, SharedMaxAgeString);
             sb.Append('=');
-            sb.Append(((int)_sharedMaxAge.GetValueOrDefault().TotalSeconds).ToString(NumberFormatInfo.InvariantInfo));
+            sb.Append(NumberFormatInfo.InvariantInfo, $"{(int)_sharedMaxAge.GetValueOrDefault().TotalSeconds}");
         }
 
         if (_maxStale)
@@ -368,7 +368,7 @@ public class CacheControlHeaderValue
             if (_maxStaleLimit.HasValue)
             {
                 sb.Append('=');
-                sb.Append(((int)_maxStaleLimit.GetValueOrDefault().TotalSeconds).ToString(NumberFormatInfo.InvariantInfo));
+                sb.Append(NumberFormatInfo.InvariantInfo, $"{(int)_maxStaleLimit.GetValueOrDefault().TotalSeconds}");
             }
         }
 
@@ -376,7 +376,7 @@ public class CacheControlHeaderValue
         {
             AppendValueWithSeparatorIfRequired(sb, MinFreshString);
             sb.Append('=');
-            sb.Append(((int)_minFresh.GetValueOrDefault().TotalSeconds).ToString(NumberFormatInfo.InvariantInfo));
+            sb.Append(NumberFormatInfo.InvariantInfo, $"{(int)_minFresh.GetValueOrDefault().TotalSeconds}");
         }
 
         if (_private)
@@ -392,7 +392,7 @@ public class CacheControlHeaderValue
 
         NameValueHeaderValue.ToString(_extensions, ',', false, sb);
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     /// <inheritdoc />
@@ -507,7 +507,7 @@ public class CacheControlHeaderValue
     {
         var index = 0;
         // Cache-Control is unusual because there are no required values so the parser will succeed for an empty string, but still return null.
-        if (Parser.TryParseValue(input, ref index, out parsedValue) && parsedValue != null)
+        if (Parser.TryParseValue(input, index, out _, out parsedValue) && parsedValue != null)
         {
             return true;
         }
@@ -532,10 +532,12 @@ public class CacheControlHeaderValue
         var nameValueList = new List<NameValueHeaderValue>();
         while (current < input.Length)
         {
-            if (!NameValueHeaderValue.MultipleValueParser.TryParseValue(input, ref current, out var nameValue))
+            if (!NameValueHeaderValue.MultipleValueParser.TryParseValue(input, current, out var consumed, out var nameValue))
             {
                 return 0;
             }
+
+            current += consumed;
 
             if (nameValue != null)
             {

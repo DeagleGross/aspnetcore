@@ -42,6 +42,18 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
     private readonly IProtocolErrorCodeFeature _errorCodeFeature;
     private readonly Dictionary<long, WebTransportSession>? _webtransportSessions;
 
+    // Internal for testing.
+    internal int WebTransportSessionCount
+    {
+        get
+        {
+            lock (_webtransportSessions!)
+            {
+                return _webtransportSessions.Count;
+            }
+        }
+    }
+
     private long _highestOpenedRequestStreamId = DefaultHighestOpenedRequestStreamId;
     private bool _aborted;
     private int _gracefulCloseInitiator;
@@ -77,11 +89,11 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
     private void UpdateHighestOpenedRequestStreamId(long streamId)
     {
         // Only one thread will update the highest stream ID value at a time.
-        // Additional thread safty not required.
+        // Additional thread safety not required.
 
         if (_highestOpenedRequestStreamId >= streamId)
         {
-            // Double check here incase the streams are received out of order.
+            // Double check here in case the streams are received out of order.
             return;
         }
 
@@ -171,15 +183,15 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
 
         if (_webtransportSessions is not null)
         {
-            foreach (var session in _webtransportSessions)
+            foreach (var session in GetWebTransportSessions())
             {
                 if (ex.InnerException is not null)
                 {
-                    session.Value.Abort(new ConnectionAbortedException(ex.Message, ex.InnerException), errorCode);
+                    session.Abort(new ConnectionAbortedException(ex.Message, ex.InnerException), errorCode);
                 }
                 else
                 {
-                    session.Value.Abort(new ConnectionAbortedException(ex.Message), errorCode);
+                    session.Abort(new ConnectionAbortedException(ex.Message), errorCode);
                 }
             }
         }
@@ -281,7 +293,7 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
         {
             foreach (var stream in _streams.Values)
             {
-                if (stream.IsReceivingHeader)
+                if (stream.IsReceivingHeader || stream.IsReceivingTrailerHeaders)
                 {
                     if (stream.StreamTimeoutTimestamp == default)
                     {
@@ -339,21 +351,23 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
         // Don't create Encoder and Decoder as they aren't used now.
 
         Exception? error = null;
-        Http3ControlStream? outboundControlStream = null;
         ValueTask outboundControlStreamTask = default;
         bool clientAbort = false;
         ConnectionEndReason reason = ConnectionEndReason.Unset;
 
         try
         {
-            outboundControlStream = await CreateNewUnidirectionalStreamAsync(application);
-            lock (_sync)
-            {
-                OutboundControlStream = outboundControlStream;
-            }
+            // https://datatracker.ietf.org/doc/html/rfc9114#section-7.2.4.2
+            // All settings begin at an initial value. Each endpoint SHOULD use
+            // these initial values to send messages before the peer's SETTINGS
+            // frame has arrived, as packets carrying the settings can be lost or
+            // delayed. When the SETTINGS frame arrives, any settings are changed to
+            // their new values.
+            //
+            // Clients SHOULD NOT wait indefinitely for SETTINGS to arrive before sending requests
 
-            // Don't delay on waiting to send outbound control stream settings.
-            outboundControlStreamTask = ProcessOutboundControlStreamAsync(outboundControlStream);
+            // Which implies we shouldn't block on sending the SETTINGS frame before accepting and processing requests
+            outboundControlStreamTask = CreateNewUnidirectionalStreamAsync(application);
 
             // Close the connection if we don't receive any request streams
             TimeoutControl.SetTimeout(Limits.KeepAliveTimeout, TimeoutReason.KeepAlive);
@@ -468,6 +482,10 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
                     Log.RequestProcessingError(_context.ConnectionId, ex);
                     reason = ConnectionEndReason.ConnectionReset;
                 }
+                else
+                {
+                    reason = ConnectionEndReason.TransportCompleted;
+                }
             }
             error = ex;
             clientAbort = true;
@@ -529,19 +547,10 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
 
                 if (_webtransportSessions is not null)
                 {
-                    foreach (var session in _webtransportSessions.Values)
+                    foreach (var session in GetWebTransportSessions())
                     {
                         session.OnClientConnectionClosed();
                     }
-                }
-
-                if (outboundControlStream != null)
-                {
-                    // Don't gracefully close the outbound control stream. If the peer detects
-                    // the control stream closes it will close with a procotol error.
-                    // Instead, allow control stream to be automatically aborted when the
-                    // connection is aborted.
-                    await outboundControlStreamTask;
                 }
 
                 // Use graceful close reason if it has been set.
@@ -552,6 +561,23 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
 
                 // Complete
                 Abort(CreateConnectionAbortError(error, clientAbort), errorCode, reason);
+
+                // Don't gracefully close the outbound control stream. If the peer detects
+                // the control stream closes it will close with a protocol error.
+                // Instead, allow control stream to be automatically aborted when the
+                // connection is aborted.
+                //
+                // If the client never accepts the control stream or closes the connection
+                // abruptly, this task may throw. Ignore those errors since we're already
+                // in cleanup mode.
+                try
+                {
+                    await outboundControlStreamTask;
+                }
+                catch (Exception ex)
+                {
+                    Log.Http3OutboundControlStreamError(ConnectionId, ex);
+                }
 
                 // Wait for active requests to complete.
                 while (_activeRequestCount > 0)
@@ -633,7 +659,7 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
             if (!_webtransportSessions.TryGetValue(correspondingSession, out var session))
             {
                 stream.Abort(new ConnectionAbortedException(CoreStrings.ReceivedLooseWebTransportStream));
-                throw new Http3StreamErrorException(CoreStrings.ReceivedLooseWebTransportStream, Http3ErrorCode.StreamCreationError);
+                return;
             }
 
             stream.Context.WebTransportSession = session;
@@ -733,25 +759,21 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
         }
     }
 
-    private async ValueTask<Http3ControlStream> CreateNewUnidirectionalStreamAsync<TContext>(IHttpApplication<TContext> application) where TContext : notnull
+    private async ValueTask CreateNewUnidirectionalStreamAsync<TContext>(IHttpApplication<TContext> application) where TContext : notnull
     {
         var features = new FeatureCollection();
         features.Set<IStreamDirectionFeature>(new DefaultStreamDirectionFeature(canRead: false, canWrite: true));
         var streamContext = await _multiplexedContext.ConnectAsync(features);
         var httpConnectionContext = CreateHttpStreamContext(streamContext);
 
-        return new Http3ControlStream<TContext>(application, httpConnectionContext, 0L);
+        OutboundControlStream = new Http3ControlStream<TContext>(application, httpConnectionContext, 0L);
+
+        await ProcessOutboundControlStreamAsync(OutboundControlStream);
     }
 
     private async ValueTask<FlushResult> SendGoAwayAsync(long id)
     {
-        Http3ControlStream? stream;
-        lock (_sync)
-        {
-            stream = OutboundControlStream;
-        }
-
-        if (stream != null)
+        if (OutboundControlStream is Http3ControlStream stream)
         {
             try
             {
@@ -927,6 +949,28 @@ internal sealed class Http3Connection : IHttp3StreamLifetimeHandler, IRequestPro
             _webtransportSessions[http3Stream.StreamId] = session;
         }
         return session;
+    }
+
+    internal void RemoveWebTransportSession(WebTransportSession session)
+    {
+        lock (_webtransportSessions!)
+        {
+            if (_webtransportSessions.TryGetValue(session.SessionId, out var existingSession) &&
+                ReferenceEquals(existingSession, session))
+            {
+                _webtransportSessions.Remove(session.SessionId);
+            }
+        }
+    }
+
+    private WebTransportSession[] GetWebTransportSessions()
+    {
+        lock (_webtransportSessions!)
+        {
+            var sessions = new WebTransportSession[_webtransportSessions.Count];
+            _webtransportSessions.Values.CopyTo(sessions, 0);
+            return sessions;
+        }
     }
 
     private static class GracefulCloseInitiator

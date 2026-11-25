@@ -18,19 +18,26 @@ internal sealed class HttpLoggingMiddleware
     private readonly RequestDelegate _next;
     private readonly ILogger _logger;
     private readonly ObjectPool<HttpLoggingInterceptorContext> _contextPool;
+    private readonly ObjectPool<ResponseBufferingStream> _responseBufferingStreamPool;
     private readonly TimeProvider _timeProvider;
     private readonly IHttpLoggingInterceptor[] _interceptors;
     private readonly IOptionsMonitor<HttpLoggingOptions> _options;
     private const string Redacted = "[Redacted]";
+    // Protocol, Method, Scheme, PathBase, Path and QueryString.
+    private const int RequestParameterCount = 6;
+    // StatusCode.
+    private const int ResponseParameterCount = 1;
 
     public HttpLoggingMiddleware(RequestDelegate next, IOptionsMonitor<HttpLoggingOptions> options, ILogger<HttpLoggingMiddleware> logger,
-        IEnumerable<IHttpLoggingInterceptor> interceptors, ObjectPool<HttpLoggingInterceptorContext> contextPool, TimeProvider timeProvider)
+        IEnumerable<IHttpLoggingInterceptor> interceptors, ObjectPool<HttpLoggingInterceptorContext> contextPool,
+        ObjectPool<ResponseBufferingStream> responseBufferingStreamPool, TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(next);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(interceptors);
         ArgumentNullException.ThrowIfNull(contextPool);
+        ArgumentNullException.ThrowIfNull(responseBufferingStreamPool);
         ArgumentNullException.ThrowIfNull(timeProvider);
 
         _next = next;
@@ -38,6 +45,7 @@ internal sealed class HttpLoggingMiddleware
         _logger = logger;
         _interceptors = interceptors.ToArray();
         _contextPool = contextPool;
+        _responseBufferingStreamPool = responseBufferingStreamPool;
         _timeProvider = timeProvider;
     }
 
@@ -109,6 +117,11 @@ internal sealed class HttpLoggingMiddleware
         var request = context.Request;
         if (logContext.IsAnyEnabled(HttpLoggingFields.RequestPropertiesAndHeaders | HttpLoggingFields.RequestQuery))
         {
+            // Reserve space up front to avoid repeated growth while adding properties and headers.
+            var parameters = logContext.InternalParameters;
+            parameters.EnsureCapacity(parameters.Count + RequestParameterCount
+                + (loggingFields.HasFlag(HttpLoggingFields.RequestHeaders) ? request.Headers.Count : 0));
+
             if (loggingFields.HasFlag(HttpLoggingFields.RequestProtocol))
             {
                 logContext.AddParameter(nameof(request.Protocol), request.Protocol);
@@ -189,7 +202,7 @@ internal sealed class HttpLoggingMiddleware
             {
                 originalUpgradeFeature = context.Features.Get<IHttpUpgradeFeature>();
 
-                if (originalUpgradeFeature != null && originalUpgradeFeature.IsUpgradableRequest)
+                if (originalUpgradeFeature is not null && originalUpgradeFeature.IsUpgradableRequest)
                 {
                     loggableUpgradeFeature = new UpgradeFeatureLoggingDecorator(originalUpgradeFeature,
                         logContext, options, _interceptors, _logger);
@@ -203,9 +216,8 @@ internal sealed class HttpLoggingMiddleware
             {
                 originalBodyFeature = context.Features.Get<IHttpResponseBodyFeature>()!;
 
-                // TODO pool these.
-                responseBufferingStream = new ResponseBufferingStream(originalBodyFeature,
-                    _logger, logContext, options, _interceptors);
+                responseBufferingStream = _responseBufferingStreamPool.Get();
+                responseBufferingStream.Initialize(originalBodyFeature, _logger, logContext, options, _interceptors);
                 response.Body = responseBufferingStream;
                 context.Features.Set<IHttpResponseBodyFeature>(responseBufferingStream);
             }
@@ -265,21 +277,24 @@ internal sealed class HttpLoggingMiddleware
         }
         finally
         {
-            responseBufferingStream?.Dispose();
+            if (responseBufferingStream is not null)
+            {
+                _responseBufferingStreamPool.Return(responseBufferingStream);
+            }
 
-            if (originalBodyFeature != null)
+            if (originalBodyFeature is not null)
             {
                 context.Features.Set(originalBodyFeature);
             }
 
             requestBufferingStream?.Dispose();
 
-            if (originalBody != null)
+            if (originalBody is not null)
             {
                 context.Request.Body = originalBody;
             }
 
-            if (loggableUpgradeFeature != null)
+            if (loggableUpgradeFeature is not null)
             {
                 context.Features.Set(originalUpgradeFeature);
             }
@@ -296,12 +311,12 @@ internal sealed class HttpLoggingMiddleware
 
     private static bool BodyNotYetWritten(ResponseBufferingStream? responseBufferingStream)
     {
-        return responseBufferingStream == null || responseBufferingStream.HeadersWritten == false;
+        return responseBufferingStream is null || responseBufferingStream.HeadersWritten == false;
     }
 
     private static bool NotUpgradeableRequestOrRequestNotUpgraded(UpgradeFeatureLoggingDecorator? upgradeFeatureLogging)
     {
-        return upgradeFeatureLogging == null || !upgradeFeatureLogging.IsUpgraded;
+        return upgradeFeatureLogging is null || !upgradeFeatureLogging.IsUpgraded;
     }
 
     // Called from the response body stream sync Write and Flush APIs. These are disabled by the server by default, so we're not as worried about the sync-over-async code needed here.
@@ -329,6 +344,14 @@ internal sealed class HttpLoggingMiddleware
     {
         var loggingFields = logContext.LoggingFields;
         var response = logContext.HttpContext.Response;
+
+        if (logContext.IsAnyEnabled(HttpLoggingFields.ResponsePropertiesAndHeaders))
+        {
+            // Reserve space up front to avoid repeated growth while adding the status code and headers.
+            var parameters = logContext.InternalParameters;
+            parameters.EnsureCapacity(parameters.Count + ResponseParameterCount
+                + (loggingFields.HasFlag(HttpLoggingFields.ResponseHeaders) ? response.Headers.Count : 0));
+        }
 
         if (loggingFields.HasFlag(HttpLoggingFields.ResponseStatusCode))
         {

@@ -32,6 +32,10 @@ Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel
 Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel.Basic = 0 -> Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel
 Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel.Full = 2 -> Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel
 Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel.Limited = 1 -> Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel
+Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel
+Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel.Legacy = 0 -> Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel
+Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel.Medium = 1 -> Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel
+Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel.Strict = 2 -> Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel
 Microsoft.AspNetCore.Server.HttpSys.HttpSysDefaults
 Microsoft.AspNetCore.Server.HttpSys.HttpSysException
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions
@@ -46,6 +50,8 @@ Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.EnableResponseCaching.get -> 
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.EnableResponseCaching.set -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.Http503Verbosity.get -> Microsoft.AspNetCore.Server.HttpSys.Http503VerbosityLevel
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.Http503Verbosity.set -> void
+Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.HttpAuthenticationHardeningLevel.get -> Microsoft.AspNetCore.Server.HttpSys.HttpAuthenticationHardeningLevel
+Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.HttpAuthenticationHardeningLevel.set -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.HttpSysOptions() -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.MaxAccepts.get -> int
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.MaxAccepts.set -> void
@@ -59,6 +65,8 @@ Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueMode.get -> Micro
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueMode.set -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueName.get -> string?
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueName.set -> void
+Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueSecurityDescriptor.get -> System.Security.AccessControl.GenericSecurityDescriptor?
+Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.RequestQueueSecurityDescriptor.set -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.ThrowWriteExceptions.get -> bool
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.ThrowWriteExceptions.set -> void
 Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions.Timeouts.get -> Microsoft.AspNetCore.Server.HttpSys.TimeoutManager!
@@ -103,6 +111,9 @@ Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestDelegationFeature.CanDelegate
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestDelegationFeature.DelegateRequest(Microsoft.AspNetCore.Server.HttpSys.DelegationRule! destination) -> void
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestInfoFeature
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestInfoFeature.RequestInfo.get -> System.Collections.Generic.IReadOnlyDictionary<int, System.ReadOnlyMemory<byte>>!
+Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestPropertyFeature
+Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestPropertyFeature.TryGetRequestProperty(int propertyId, System.ReadOnlySpan<byte> qualifier, System.Span<byte> output, out int bytesReturned) -> bool
+Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestPropertyFeature.TryGetTlsClientHello(System.Span<byte> tlsClientHelloBytesDestination, out int bytesReturned) -> bool
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestTimingFeature
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestTimingFeature.Timestamps.get -> System.ReadOnlySpan<long>
 Microsoft.AspNetCore.Server.HttpSys.IHttpSysRequestTimingFeature.TryGetElapsedTime(Microsoft.AspNetCore.Server.HttpSys.HttpSysRequestTimingType startingTimestampType, Microsoft.AspNetCore.Server.HttpSys.HttpSysRequestTimingType endingTimestampType, out System.TimeSpan elapsed) -> bool
@@ -149,8 +160,8 @@ override Microsoft.AspNetCore.Server.HttpSys.HttpSysException.ErrorCode.get -> i
 override Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.Equals(object? obj) -> bool
 override Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.GetHashCode() -> int
 override Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.ToString() -> string!
-static Microsoft.AspNetCore.Hosting.WebHostBuilderHttpSysExtensions.UseHttpSys(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Hosting.WebHostBuilderHttpSysExtensions.UseHttpSys(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder, System.Action<Microsoft.AspNetCore.Server.HttpSys.HttpSysOptions!>! options) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
+static Microsoft.AspNetCore.Hosting.WebHostBuilderHttpSysExtensions.UseHttpSys(this Microsoft.AspNetCore.Hosting.IWebHostBuilder! hostBuilder) -> Microsoft.AspNetCore.Hosting.IWebHostBuilder!
 static Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.Create(string! prefix) -> Microsoft.AspNetCore.Server.HttpSys.UrlPrefix!
 static Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.Create(string! scheme, string! host, int? portValue, string! path) -> Microsoft.AspNetCore.Server.HttpSys.UrlPrefix!
 static Microsoft.AspNetCore.Server.HttpSys.UrlPrefix.Create(string! scheme, string! host, string! port, string! path) -> Microsoft.AspNetCore.Server.HttpSys.UrlPrefix!

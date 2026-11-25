@@ -44,6 +44,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             Array.Empty<IHttpLoggingInterceptor>(),
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             TimeProvider.System));
 
         Assert.Throws<ArgumentNullException>(() => new HttpLoggingMiddleware(c =>
@@ -54,6 +55,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             Array.Empty<IHttpLoggingInterceptor>(),
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             TimeProvider.System));
 
         Assert.Throws<ArgumentNullException>(() => new HttpLoggingMiddleware(c =>
@@ -64,6 +66,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             null,
             Array.Empty<IHttpLoggingInterceptor>(),
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             TimeProvider.System));
 
         Assert.Throws<ArgumentNullException>(() => new HttpLoggingMiddleware(c =>
@@ -74,6 +77,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             null,
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             TimeProvider.System));
 
         Assert.Throws<ArgumentNullException>(() => new HttpLoggingMiddleware(c =>
@@ -83,6 +87,18 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             CreateOptionsAccessor(),
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             Array.Empty<IHttpLoggingInterceptor>(),
+            null,
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
+            TimeProvider.System));
+
+        Assert.Throws<ArgumentNullException>(() => new HttpLoggingMiddleware(c =>
+        {
+            return Task.CompletedTask;
+        },
+            CreateOptionsAccessor(),
+            LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
+            Array.Empty<IHttpLoggingInterceptor>(),
+            ObjectPool.Create<HttpLoggingInterceptorContext>(),
             null,
             TimeProvider.System));
 
@@ -94,6 +110,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             Array.Empty<IHttpLoggingInterceptor>(),
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             null));
     }
 
@@ -1080,6 +1097,27 @@ public class HttpLoggingMiddlewareTests : LoggedTest
     }
 
     [Fact]
+    public async Task ResponseBodyWritingWorksWhenStreamIsReused()
+    {
+        var options = CreateOptionsAccessor();
+        options.CurrentValue.LoggingFields = HttpLoggingFields.ResponseBody;
+        var responseNumber = 0;
+        var middleware = CreateMiddleware(
+            c =>
+            {
+                c.Response.ContentType = "text/plain";
+                return c.Response.WriteAsync($"Response {++responseNumber}");
+            },
+            options);
+
+        await middleware.Invoke(new DefaultHttpContext());
+        await middleware.Invoke(new DefaultHttpContext());
+
+        Assert.Contains(TestSink.Writes, w => w.Message.Contains("Response 1"));
+        Assert.Contains(TestSink.Writes, w => w.Message.Contains("Response 2"));
+    }
+
+    [Fact]
     public async Task ResponseBodyNotLoggedIfEmpty()
     {
         var options = CreateOptionsAccessor();
@@ -1632,6 +1670,77 @@ public class HttpLoggingMiddlewareTests : LoggedTest
         Assert.Equal(lines.Length, i);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ManyHeadersAndInterceptorParameters_AllLoggedInOrder(bool combineLogs)
+    {
+        var options = CreateOptionsAccessor();
+        options.CurrentValue.LoggingFields = HttpLoggingFields.RequestPropertiesAndHeaders | HttpLoggingFields.RequestQuery | HttpLoggingFields.ResponsePropertiesAndHeaders;
+        options.CurrentValue.CombineLogs = combineLogs;
+        for (var h = 0; h < 20; h++)
+        {
+            options.CurrentValue.RequestHeaders.Add("x-req-" + h);
+            options.CurrentValue.ResponseHeaders.Add("x-res-" + h);
+        }
+
+        var middleware = CreateMiddleware(
+            c =>
+            {
+                for (var h = 0; h < 20; h++)
+                {
+                    c.Response.Headers["x-res-" + h] = "r" + h;
+                }
+                return Task.CompletedTask;
+            },
+            options,
+            new FakeInterceptor(
+                request => request.AddParameter("i-request", "a"),
+                response => response.AddParameter("i-response", "b")));
+
+        var httpContext = CreateRequest();
+        for (var h = 0; h < 20; h++)
+        {
+            httpContext.Request.Headers["x-req-" + h] = "q" + h;
+        }
+        await middleware.Invoke(httpContext);
+
+        var expectedRequest = new List<string>
+        {
+            "i-request: a",
+            "Protocol: HTTP/1.0",
+            "Method: GET",
+            "Scheme: http",
+            "PathBase: /foo",
+            "Path: /foo",
+            "QueryString: ?foo",
+            "Connection: keep-alive",
+            "Content-Type: text/plain",
+        };
+        for (var h = 0; h < 20; h++)
+        {
+            expectedRequest.Add($"x-req-{h}: q{h}");
+        }
+        var expectedResponse = new List<string> { "i-response: b", "StatusCode: 200" };
+        for (var h = 0; h < 20; h++)
+        {
+            expectedResponse.Add($"x-res-{h}: r{h}");
+        }
+
+        var messages = TestSink.Writes.Where(w => w.LogLevel >= LogLevel.Information).Select(w => w.Message).ToArray();
+        if (combineLogs)
+        {
+            var message = Assert.Single(messages);
+            Assert.Equal(["Request and Response:", .. expectedRequest, .. expectedResponse], message.Split(Environment.NewLine));
+        }
+        else
+        {
+            Assert.Equal(2, messages.Length);
+            Assert.Equal(["Request:", .. expectedRequest], messages[0].Split(Environment.NewLine));
+            Assert.Equal(["Response:", .. expectedResponse], messages[1].Split(Environment.NewLine));
+        }
+    }
+
     [Fact]
     public async Task CombineLogs_Exception_RequestLogged()
     {
@@ -2114,6 +2223,7 @@ public class HttpLoggingMiddlewareTests : LoggedTest
             LoggerFactory.CreateLogger<HttpLoggingMiddleware>(),
             interceptor == null ? Array.Empty<IHttpLoggingInterceptor>() : [interceptor],
             ObjectPool.Create<HttpLoggingInterceptorContext>(),
+            new DefaultObjectPoolProvider().Create(new ResponseBufferingStreamPooledObjectPolicy()),
             TimeProvider.System);
     }
 

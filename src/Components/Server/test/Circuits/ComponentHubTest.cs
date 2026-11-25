@@ -4,8 +4,11 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Claims;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.Components.Server.Circuits;
+using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections.Features;
@@ -14,6 +17,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Moq;
 
@@ -134,6 +138,117 @@ public class ComponentHubTest
     }
 
     [Fact]
+    public async Task UpdateRootComponents_OperationLimitRejectionDoesNotLogError()
+    {
+        var deserializer = new TestServerComponentDeserializer();
+        deserializer.OnTryDeserializeTestComponentOperations =
+            (serializedComponentOperations, out operationsWithDescriptors, deserializeDescriptors) =>
+            {
+                var key1 = new ComponentMarkerKey("1", "");
+                var key2 = new ComponentMarkerKey("2", "");
+                operationsWithDescriptors = new RootComponentOperationBatch
+                {
+                    BatchId = 1,
+                    Operations =
+                    [
+                        new RootComponentOperation
+                        {
+                            Type = RootComponentOperationType.Add,
+                            SsrComponentId = 1,
+                            Marker = ComponentMarker.Create(ComponentMarker.ServerMarkerType, prerendered: false, key1),
+                            Descriptor = new(typeof(TestComponent), WebRootComponentParameters.Empty),
+                        },
+                        new RootComponentOperation
+                        {
+                            Type = RootComponentOperationType.Add,
+                            SsrComponentId = 2,
+                            Marker = ComponentMarker.Create(ComponentMarker.ServerMarkerType, prerendered: false, key2),
+                            Descriptor = new(typeof(TestComponent), WebRootComponentParameters.Empty),
+                        },
+                    ],
+                };
+                return true;
+            };
+        var options = new CircuitOptions();
+        options.RootComponents.MaxJSRootComponents = 1;
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            logger: loggerFactory.CreateLogger<CircuitHost>(),
+            options: options);
+        var circuitFactory = new Mock<ICircuitFactory>();
+        circuitFactory
+            .Setup(factory => factory.CreateCircuitHostAsync(
+                It.IsAny<IReadOnlyList<ComponentDescriptor>>(),
+                It.IsAny<CircuitClientProxy>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ClaimsPrincipal>(),
+                It.IsAny<IPersistentComponentStateStore>(),
+                It.IsAny<ResourceAssetCollection>()))
+            .ReturnsAsync(circuitHost);
+        var exceptionSource = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        circuitHost.UnhandledException += (_, eventArgs) => exceptionSource.SetResult((Exception)eventArgs.ExceptionObject);
+        var (_, hub) = InitializeComponentHub(deserializer, circuitFactory: circuitFactory.Object);
+        await hub.StartCircuit("https://localhost:5000", "https://localhost:5000/subdir", "[]", null);
+
+        await hub.UpdateRootComponents("""{"batchId":1,"operations":[]}""", "");
+        var exception = await exceptionSource.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("Exceeded the maximum number of allowed server interactive root components.", exception.Message);
+        Assert.DoesNotContain(sink.Writes, write => write.LogLevel == LogLevel.Error);
+    }
+
+    [Fact]
+    public async Task UpdateRootComponents_ResumedCircuitMissingMarkerKeyDoesNotLogError()
+    {
+        var dataProtectionProvider = new EphemeralDataProtectionProvider();
+        var deserializer = new ServerComponentDeserializer(
+            dataProtectionProvider,
+            NullLogger<ServerComponentDeserializer>.Instance,
+            new RootTypeCache(),
+            new ComponentParameterDeserializer(
+                NullLogger<ComponentParameterDeserializer>.Instance,
+                new ComponentParametersTypeCache()));
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(logger: loggerFactory.CreateLogger<CircuitHost>());
+        circuitHost.AttachPersistedState(new ResumedPersistedCircuitState
+        {
+            ApplicationState = ReadOnlyDictionary<string, byte[]>.Empty,
+            RootComponentDescriptors = new Dictionary<int, WebRootComponentDescriptor>
+            {
+                [1] = new(typeof(TestComponent), WebRootComponentParameters.Empty),
+            },
+        });
+        var handleRegistry = new TestCircuitHandleRegistry();
+        handleRegistry.SetCircuit(new Dictionary<object, object>(), new object(), circuitHost);
+        var exceptionSource = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        circuitHost.UnhandledException += (_, eventArgs) => exceptionSource.SetResult((Exception)eventArgs.ExceptionObject);
+        var (_, hub) = InitializeComponentHub(deserializer, handleRegistry);
+        var operations = new RootComponentOperationBatch
+        {
+            BatchId = 1,
+            Operations =
+            [
+                new RootComponentOperation
+                {
+                    Type = RootComponentOperationType.Add,
+                    SsrComponentId = 1,
+                    Marker = ComponentMarker.Create(ComponentMarker.ServerMarkerType, prerendered: false, key: null),
+                },
+            ],
+        };
+        var serializedOperations = JsonSerializer.Serialize(operations, ServerComponentSerializationSettings.JsonSerializationOptions);
+
+        await hub.UpdateRootComponents(serializedOperations, "");
+        var exception = await exceptionSource.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("An invalid component marker key was provided.", exception.Message);
+        Assert.DoesNotContain(sink.Writes, write => write.LogLevel == LogLevel.Error);
+    }
+
+    [Fact]
     public async Task CanCallUpdateRootComponentsOnResumedCircuit()
     {
         var deserializer = new TestServerComponentDeserializer();
@@ -246,8 +361,6 @@ public class ComponentHubTest
         var circuitSecret = await hub.StartCircuit("https://localhost:5000", "https://localhost:5000/subdir", "{}", null);
         var result = await hub.ResumeCircuit(circuitSecret, "https://localhost:5000", "https://localhost:5000/subdir", "[]", "");
         Assert.Null(result);
-        var errorMessage = "The circuit state could not be retrieved. It may have been deleted or expired.";
-        mockClientProxy.Verify(m => m.SendCoreAsync("JS.Error", new[] { errorMessage }, It.IsAny<CancellationToken>()), Times.Once());
     }
 
     [Fact]
@@ -264,7 +377,7 @@ public class ComponentHubTest
         providerMock.Setup(m => m.RestoreCircuitAsync(It.IsAny<CircuitId>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new PersistedCircuitState
             {
-                RootComponents = [],
+                RootComponents = [.. """{}"""u8],
                 ApplicationState = ReadOnlyDictionary<string, byte[]>.Empty,
             });
 
@@ -276,10 +389,128 @@ public class ComponentHubTest
         Assert.True(lastCircuit.HasPendingPersistedCircuitState);
     }
 
+    [Fact]
+    public async Task StartCircuitFailsWithUnresolvedCircuitHandlerDependency_NotifiesClientToCheckServerLogs()
+    {
+        var circuitFactoryMock = new Mock<ICircuitFactory>();
+        circuitFactoryMock
+            .Setup(m => m.CreateCircuitHostAsync(
+                It.IsAny<IReadOnlyList<ComponentDescriptor>>(),
+                It.IsAny<CircuitClientProxy>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ClaimsPrincipal>(),
+                It.IsAny<IPersistentComponentStateStore>(),
+                It.IsAny<ResourceAssetCollection>()))
+            .ThrowsAsync(new InvalidOperationException("Unable to resolve service for type 'IMyUnresolvedDependency'."));
+
+        var (mockClientProxy, hub) = InitializeComponentHub(circuitFactory: circuitFactoryMock.Object);
+        var circuitSecret = await hub.StartCircuit("https://localhost:5000", "https://localhost:5000/subdir", "{}", null);
+
+        Assert.Null(circuitSecret);
+        var errorMessage = "The circuit failed to initialize. See the server logs for more information.";
+        mockClientProxy.Verify(m => m.SendCoreAsync("JS.Error", new[] { errorMessage }, It.IsAny<CancellationToken>()), Times.Once());
+    }
+
+    [Fact]
+    public async Task ResumeCircuitFailsWithUnresolvedCircuitHandlerDependency_NotifiesClientToCheckServerLogs()
+    {
+        var handleRegistryMock = new Mock<ICircuitHandleRegistry>();
+        var providerMock = new Mock<ICircuitPersistenceProvider>();
+        providerMock.Setup(m => m.RestoreCircuitAsync(It.IsAny<CircuitId>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PersistedCircuitState
+            {
+                RootComponents = [.. """{}"""u8],
+                ApplicationState = ReadOnlyDictionary<string, byte[]>.Empty,
+            });
+
+        var circuitFactoryMock = new Mock<ICircuitFactory>();
+        circuitFactoryMock
+            .Setup(m => m.CreateCircuitHostAsync(
+                It.IsAny<IReadOnlyList<ComponentDescriptor>>(),
+                It.IsAny<CircuitClientProxy>(),
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<ClaimsPrincipal>(),
+                It.IsAny<IPersistentComponentStateStore>(),
+                It.IsAny<ResourceAssetCollection>()))
+            .ThrowsAsync(new InvalidOperationException("Unable to resolve service for type 'IMyUnresolvedDependency'."));
+
+        var (mockClientProxy, hub) = InitializeComponentHub(
+            deserializer: null,
+            handleRegistry: handleRegistryMock.Object,
+            provider: providerMock.Object,
+            circuitFactory: circuitFactoryMock.Object);
+        var circuitSecret = await hub.StartCircuit("https://localhost:5000", "https://localhost:5000/subdir", "{}", null);
+        var result = await hub.ResumeCircuit(circuitSecret, "https://localhost:5000", "https://localhost:5000/subdir", "[]", "");
+
+        Assert.Null(result);
+        var errorMessage = "The circuit failed to initialize. See the server logs for more information.";
+        mockClientProxy.Verify(m => m.SendCoreAsync("JS.Error", new[] { errorMessage }, It.IsAny<CancellationToken>()), Times.Once());
+    }
+
+    [Fact]
+    public async Task OnConnectedAsyncReplacesSignalRUserRefreshPolicy()
+    {
+        var userRefreshFeature = new Mock<IConnectionAuthenticationRefreshFeature>();
+        userRefreshFeature.SetupAllProperties();
+        userRefreshFeature.Object.OnAuthenticationRefresh = static _ => Task.FromResult(false);
+        var (_, hub) = InitializeComponentHub(userRefreshFeature: userRefreshFeature.Object);
+
+        await hub.OnConnectedAsync();
+
+        var callback = userRefreshFeature.Object.OnAuthenticationRefresh;
+        Assert.NotNull(callback);
+        var context = new AuthenticationRefreshContext
+        {
+            HttpContext = new DefaultHttpContext(),
+            ConnectionId = "123",
+            PreviousUser = new ClaimsPrincipal(),
+            NewUser = new ClaimsPrincipal(),
+            NewExpiration = null,
+        };
+        Assert.True(await callback(context));
+    }
+
+    [Fact]
+    public async Task OnAuthenticationRefreshedAsyncUpdatesCircuitUser()
+    {
+        var authenticationStateProvider = new ServerAuthenticationStateProvider();
+        var services = new ServiceCollection()
+            .AddSingleton<AuthenticationStateProvider>(authenticationStateProvider)
+            .BuildServiceProvider();
+        var circuitHost = TestCircuitHost.Create(serviceScope: services.CreateAsyncScope());
+
+        var handleRegistryMock = new Mock<ICircuitHandleRegistry>();
+        handleRegistryMock.Setup(m => m.GetCircuit(It.IsAny<IDictionary<object, object>>(), It.IsAny<object>()))
+            .Returns(circuitHost);
+
+        var refreshedUser = new ClaimsPrincipal(new ClaimsIdentity(
+            [new Claim(ClaimTypes.Name, "refreshed-user")],
+            "TestAuthType"));
+        var (_, hub) = InitializeComponentHub(handleRegistry: handleRegistryMock.Object, user: refreshedUser);
+
+        await hub.OnAuthenticationRefreshedAsync();
+
+        var authenticationState = await authenticationStateProvider.GetAuthenticationStateAsync();
+        Assert.Same(refreshedUser, authenticationState.User);
+    }
+
+    [Fact]
+    public async Task OnAuthenticationRefreshedAsyncWithoutCircuitDoesNotThrow()
+    {
+        var (_, hub) = InitializeComponentHub();
+
+        await hub.OnAuthenticationRefreshedAsync();
+    }
+
     private static (Mock<ISingleClientProxy>, ComponentHub) InitializeComponentHub(
-        TestServerComponentDeserializer deserializer = null,
+        IServerComponentDeserializer deserializer = null,
         ICircuitHandleRegistry handleRegistry = null,
-        ICircuitPersistenceProvider provider = null)
+        ICircuitPersistenceProvider provider = null,
+        ICircuitFactory circuitFactory = null,
+        ClaimsPrincipal user = null,
+        IConnectionAuthenticationRefreshFeature userRefreshFeature = null)
     {
         deserializer ??= new TestServerComponentDeserializer();
         var ephemeralDataProtectionProvider = new EphemeralDataProtectionProvider();
@@ -290,7 +521,7 @@ public class ComponentHubTest
             ephemeralDataProtectionProvider);
 
         var circuitIdFactory = TestCircuitIdFactory.Instance;
-        var circuitFactory = new TestCircuitFactory(
+        var circuitFactoryInstance = circuitFactory ?? new TestCircuitFactory(
             new Mock<IServiceScopeFactory>().Object,
             NullLoggerFactory.Instance,
             circuitIdFactory,
@@ -303,7 +534,7 @@ public class ComponentHubTest
         var hub = new ComponentHub(
             serializer: deserializer,
             dataProtectionProvider: ephemeralDataProtectionProvider,
-            circuitFactory: circuitFactory,
+            circuitFactory: circuitFactoryInstance,
             circuitIdFactory: circuitIdFactory,
             circuitRegistry: circuitRegistry,
             circuitPersistenceProvider: circuitPersistenceManager,
@@ -323,8 +554,13 @@ public class ComponentHubTest
         var httpContextFeature = new Mock<IHttpContextFeature>();
         httpContextFeature.Setup(x => x.HttpContext).Returns(() => new DefaultHttpContext());
         feature.Set(httpContextFeature.Object);
+        if (userRefreshFeature is not null)
+        {
+            feature.Set(userRefreshFeature);
+        }
         mockContext.Setup(x => x.Features).Returns(feature);
         mockContext.Setup(x => x.ConnectionId).Returns("123");
+        mockContext.Setup(x => x.User).Returns(user ?? new ClaimsPrincipal());
         hub.Context = mockContext.Object;
 
         return (mockClientProxy, hub);
@@ -423,4 +659,6 @@ public class ComponentHubTest
             return ValueTask.FromResult(circuitHost);
         }
     }
+
+    private sealed class TestComponent : ComponentBase;
 }

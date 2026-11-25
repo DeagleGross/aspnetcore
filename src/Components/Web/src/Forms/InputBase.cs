@@ -60,6 +60,18 @@ public abstract class InputBase<TValue> : ComponentBase, IDisposable
     /// </summary>
     [Parameter] public string? DisplayName { get; set; }
 
+    internal string GetDisplayName()
+    {
+        if (DisplayName is not null)
+        {
+            return DisplayName;
+        }
+
+        return ExpressionMemberAccessor.TryGetDisplayName(ValueExpression!, out var displayName)
+            ? displayName
+            : FieldIdentifier.FieldName;
+    }
+
     /// <summary>
     /// Gets the associated <see cref="Forms.EditContext"/>.
     /// This property is uninitialized if the input does not have a parent <see cref="EditForm"/>.
@@ -207,22 +219,47 @@ public abstract class InputBase<TValue> : ComponentBase, IDisposable
 
             if (_shouldGenerateFieldNames)
             {
-                if (_formattedValueExpression is null && ValueExpression is not null)
-                {
-                    _formattedValueExpression = FieldPrefix != null ? FieldPrefix.GetFieldName(ValueExpression) :
-                        ExpressionFormatter.FormatLambda(ValueExpression);
-                }
-
-                return _formattedValueExpression ?? string.Empty;
+                return GetFieldName();
             }
 
             return string.Empty;
         }
     }
 
+    /// <summary>
+    /// Gets the value to be used for the input's "id" attribute.
+    /// </summary>
+    /// <remarks>
+    /// If an explicit "id" is provided via <see cref="AdditionalAttributes"/>, that value takes precedence.
+    /// Otherwise, the id is a sanitized version of <see cref="NameAttributeValue"/> in SSR mode; generated independently in interactive mode.
+    /// </remarks>
+    protected string IdAttributeValue
+    {
+        get
+        {
+            if (AdditionalAttributes?.TryGetValue("id", out var idAttributeValue) ?? false)
+            {
+                return Convert.ToString(idAttributeValue, CultureInfo.InvariantCulture) ?? string.Empty;
+            }
+
+            var fieldName = NameAttributeValue;
+            if (string.IsNullOrEmpty(fieldName))
+            {
+                fieldName = GetFieldName();
+            }
+
+            return FieldIdGenerator.SanitizeHtmlId(fieldName);
+        }
+    }
+
+    private string GetFieldName()
+        => _formattedValueExpression ??= FieldPrefix?.GetFieldName(ValueExpression!)
+            ?? ExpressionFormatter.FormatLambda(ValueExpression!);
+
     /// <inheritdoc />
     public override Task SetParametersAsync(ParameterView parameters)
     {
+        var previousValue = Value;
         parameters.SetParameterProperties(this);
 
         if (!_hasInitializedParameters)
@@ -243,6 +280,12 @@ public abstract class InputBase<TValue> : ComponentBase, IDisposable
                 EditContext = CascadedEditContext;
                 EditContext.OnValidationStateChanged += _validationStateChangedHandler;
                 _shouldGenerateFieldNames = EditContext.ShouldUseFieldIdentifiers;
+
+                if (AssignedRenderMode is null)
+                {
+                    // Register the input for client-side validation if rendered in static SSR mode.
+                    RenderedFieldRegistry.GetOrCreate(EditContext).Register(FieldIdentifier, NameAttributeValue);
+                }
             }
             else
             {
@@ -262,6 +305,14 @@ public abstract class InputBase<TValue> : ComponentBase, IDisposable
             // emerges, we can consider changing this.
             throw new InvalidOperationException($"{GetType()} does not support changing the " +
                 $"{nameof(Forms.EditContext)} dynamically.");
+        }
+        else if ((_parsingFailed || _previousParsingAttemptFailed) && !EqualityComparer<TValue>.Default.Equals(Value, previousValue))
+        {
+            _parsingFailed = false;
+            _previousParsingAttemptFailed = false;
+            _incomingValueBeforeParsing = null;
+            _parsingValidationMessages?.Clear();
+            EditContext?.NotifyValidationStateChanged();
         }
 
         UpdateAdditionalValidationAttributes();
@@ -369,10 +420,7 @@ public abstract class InputBase<TValue> : ComponentBase, IDisposable
     void IDisposable.Dispose()
     {
         // When initialization in the SetParametersAsync method fails, the EditContext property can remain equal to null
-        if (EditContext is not null)
-        {
-            EditContext.OnValidationStateChanged -= _validationStateChangedHandler;
-        }
+        EditContext?.OnValidationStateChanged -= _validationStateChangedHandler;
 
         // Clear parsing validation messages store owned by the input when the input is disposed.
         if (_parsingValidationMessages != null)

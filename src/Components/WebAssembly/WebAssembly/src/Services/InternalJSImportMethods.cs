@@ -27,6 +27,15 @@ internal partial class InternalJSImportMethods : IInternalJSImportMethods
     public string GetApplicationEnvironment()
         => GetApplicationEnvironmentCore();
 
+    public string GetApplicationCulture()
+        => GetApplicationCultureCore();
+
+    public string[] GetAppSettingsFiles()
+        => GetAppSettingsFilesCore();
+
+    public byte[]? GetAppSettingsBytes(string fileName)
+        => GetAppSettingsBytesCore(fileName);
+
     public void AttachRootComponentToElement(string domElementSelector, int componentId, int rendererId)
         => AttachRootComponentToElementCore(domElementSelector, componentId, rendererId);
 
@@ -71,6 +80,15 @@ internal partial class InternalJSImportMethods : IInternalJSImportMethods
 
     [JSImport("Blazor._internal.getApplicationEnvironment", "blazor-internal")]
     private static partial string GetApplicationEnvironmentCore();
+
+    [JSImport("Blazor._internal.getApplicationCulture", "blazor-internal")]
+    private static partial string GetApplicationCultureCore();
+
+    [JSImport("INTERNAL.getAppSettingsFiles")]
+    private static partial string[] GetAppSettingsFilesCore();
+
+    [JSImport("INTERNAL.getAppSettingsBytes")]
+    private static partial byte[]? GetAppSettingsBytesCore(string fileName);
 
     [JSImport("Blazor._internal.attachRootComponentToElement", "blazor-internal")]
     private static partial void AttachRootComponentToElementCore(string domElementSelector, int componentId, int rendererId);

@@ -10,7 +10,7 @@ using Microsoft.Extensions.Primitives;
 
 namespace Microsoft.AspNetCore.Components.Server.Circuits;
 
-// Default implmentation of ICircuitPersistenceProvider that uses an in-memory cache
+// Default implementation of ICircuitPersistenceProvider that uses an in-memory cache
 internal sealed partial class DefaultInMemoryCircuitPersistenceProvider : ICircuitPersistenceProvider
 {
     private readonly Lock _lock = new();
@@ -84,6 +84,7 @@ internal sealed partial class DefaultInMemoryCircuitPersistenceProvider : ICircu
             case EvictionReason.Capacity:
             // Happens when the cache is full
                 var persistedCircuitEntry = (PersistedCircuitEntry)value;
+                DisposeTokenSource(persistedCircuitEntry);
                 Log.CircuitStateEvicted(_logger, persistedCircuitEntry.CircuitId, reason);
                 break;
 

@@ -6,7 +6,6 @@ using System.Collections.Immutable;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Text;
 using Microsoft.CodeAnalysis.CSharp;
 namespace Microsoft.AspNetCore.Http.RequestDelegateGenerator;
 
@@ -91,6 +90,28 @@ internal static class RequestDelegateGeneratorSources
                 {
                     logOrThrowExceptionHelper.InvalidJsonRequestBody(parameterTypeName, parameterName, jsonException);
                     httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+
+                    var problemDetailsService = httpContext.RequestServices.GetService<IProblemDetailsService>();
+                    if (problemDetailsService is not null)
+                    {
+                        IEnumerable<KeyValuePair<string, string[]>> errors =
+                        [
+                            new KeyValuePair<string, string[]>(jsonException.Path ?? string.Empty, [jsonException.Message]),
+                        ];
+
+                        var problemDetailsContext = new ProblemDetailsContext()
+                        {
+                            HttpContext = httpContext,
+                            Exception = jsonException,
+                            ProblemDetails = new HttpValidationProblemDetails(errors)
+                            {
+                                Status = StatusCodes.Status400BadRequest, 
+                            },
+                        };
+
+                        _ = await problemDetailsService.TryWriteAsync(problemDetailsContext);
+                    }
+
                     return (false, default);
                 }
             }
@@ -122,6 +143,20 @@ internal static class RequestDelegateGeneratorSources
         {
             object? formValue = null;
             var feature = httpContext.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpRequestBodyDetectionFeature>();
+
+            if (feature?.CanHaveBody == false)
+            {
+                logOrThrowExceptionHelper.UnexpectedRequestWithoutBody(parameterTypeName, parameterName);
+                httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return (false, null);
+            }
+
+            if (httpContext.Features.Get<IAntiforgeryValidationFeature>() is { IsValid: false } antiforgeryValidationFeature)
+            {
+                logOrThrowExceptionHelper.InvalidAntiforgeryToken(parameterTypeName, parameterName, antiforgeryValidationFeature.Error!);
+                httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return (false, null);
+            }
 
             if (feature?.CanHaveBody == true)
             {
@@ -345,6 +380,40 @@ internal static class RequestDelegateGeneratorSources
 
         private static readonly Action<ILogger, string, string, Exception?> _invalidFormRequestBody =
             LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId({{RequestDelegateCreationLogging.InvalidFormRequestBodyEventId}}, {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.InvalidFormRequestBodyEventName, true)}}), {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.InvalidFormRequestBodyLogMessage, true)}});
+
+        public void UnexpectedRequestWithoutBody(string parameterTypeName, string parameterName)
+        {
+            if (_shouldThrow)
+            {
+                var message = string.Format(CultureInfo.InvariantCulture, {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.UnexpectedRequestWithoutBodyExceptionMessage, true)}}, parameterTypeName, parameterName);
+                throw new BadHttpRequestException(message);
+            }
+
+            if (_rdgLogger != null)
+            {
+                _unexpectedRequestWithoutBody(_rdgLogger, parameterTypeName, parameterName, null);
+            }
+        }
+
+        private static readonly Action<ILogger, string, string, Exception?> _unexpectedRequestWithoutBody =
+            LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId({{RequestDelegateCreationLogging.UnexpectedRequestWithoutBodyEventId}}, {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.UnexpectedRequestWithoutBodyEventName, true)}}), {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.UnexpectedRequestWithoutBodyLogMessage, true)}});
+
+        public void InvalidAntiforgeryToken(string parameterTypeName, string parameterName, Exception exception)
+        {
+            if (_shouldThrow)
+            {
+                var message = string.Format(CultureInfo.InvariantCulture, {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.InvalidAntiforgeryTokenExceptionMessage, true)}}, parameterTypeName, parameterName);
+                throw new BadHttpRequestException(message, exception);
+            }
+
+            if (_rdgLogger != null)
+            {
+                _invalidAntiforgeryToken(_rdgLogger, parameterTypeName, parameterName, exception);
+            }
+        }
+
+        private static readonly Action<ILogger, string, string, Exception?> _invalidAntiforgeryToken =
+            LoggerMessage.Define<string, string>(LogLevel.Debug, new EventId({{RequestDelegateCreationLogging.InvalidAntiforgeryTokenEventId}}, {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.InvalidAntiforgeryTokenEventName, true)}}), {{SymbolDisplay.FormatLiteral(RequestDelegateCreationLogging.InvalidAntiforgeryTokenLogMessage, true)}});
     }
 """;
 
@@ -389,39 +458,53 @@ internal static class RequestDelegateGeneratorSources
         public override object[] GetCustomAttributes(Type attributeType, bool inherit)
         {
             var constructorAttributes = _constructionParameterInfo?.GetCustomAttributes(attributeType, inherit);
-
-            if (constructorAttributes == null || constructorAttributes is { Length: 0 })
-            {
-                return _underlyingProperty.GetCustomAttributes(attributeType, inherit);
-            }
-
             var propertyAttributes = _underlyingProperty.GetCustomAttributes(attributeType, inherit);
 
-            var mergedAttributes = new Attribute[constructorAttributes.Length + propertyAttributes.Length];
+            // We don't have constructor attributes, so we can safely return the property attributes.
+            if (constructorAttributes == null || constructorAttributes.Length == 0)
+            {
+                return propertyAttributes;
+            }
+
+            // We don't have property attributes, so we can safely return the constructor attributes.
+            if (propertyAttributes.Length == 0)
+            {
+                return constructorAttributes;
+            }
+
+            // We have both, and we need to merge (rare scenario).
+            var arrayType = constructorAttributes.GetType();
+            var mergedAttributes = Array.CreateInstanceFromArrayType(arrayType, constructorAttributes.Length + propertyAttributes.Length);
             Array.Copy(constructorAttributes, mergedAttributes, constructorAttributes.Length);
             Array.Copy(propertyAttributes, 0, mergedAttributes, constructorAttributes.Length, propertyAttributes.Length);
 
-            return mergedAttributes;
+            return (object[])mergedAttributes;
         }
 
         public override object[] GetCustomAttributes(bool inherit)
         {
             var constructorAttributes = _constructionParameterInfo?.GetCustomAttributes(inherit);
-
-            if (constructorAttributes == null || constructorAttributes is { Length: 0 })
-            {
-                return _underlyingProperty.GetCustomAttributes(inherit);
-            }
-
             var propertyAttributes = _underlyingProperty.GetCustomAttributes(inherit);
 
-            // Since the constructors attributes should take priority we will add them first,
-            // as we usually call it as First() or FirstOrDefault() in the argument creation
-            var mergedAttributes = new object[constructorAttributes.Length + propertyAttributes.Length];
+            // We don't have constructor attributes, so we can safely return the property attributes.
+            if (constructorAttributes == null || constructorAttributes.Length == 0)
+            {
+                return propertyAttributes;
+            }
+
+            // We don't have property attributes, so we can safely return the constructor attributes.
+            if (propertyAttributes.Length == 0)
+            {
+                return constructorAttributes;
+            }
+
+            // We have both, and we need to merge (rare scenario).
+            var arrayType = constructorAttributes.GetType();
+            var mergedAttributes = Array.CreateInstanceFromArrayType(arrayType, constructorAttributes.Length + propertyAttributes.Length);
             Array.Copy(constructorAttributes, mergedAttributes, constructorAttributes.Length);
             Array.Copy(propertyAttributes, 0, mergedAttributes, constructorAttributes.Length, propertyAttributes.Length);
 
-            return mergedAttributes;
+            return (object[])mergedAttributes;
         }
 
         public override IList<CustomAttributeData> GetCustomAttributesData()

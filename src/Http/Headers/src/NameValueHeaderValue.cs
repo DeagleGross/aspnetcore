@@ -220,7 +220,7 @@ public class NameValueHeaderValue
     public static bool TryParse(StringSegment input, [NotNullWhen(true)] out NameValueHeaderValue? parsedValue)
     {
         var index = 0;
-        return SingleValueParser.TryParseValue(input, ref index, out parsedValue!);
+        return SingleValueParser.TryParseValue(input, index, out _, out parsedValue!);
     }
 
     /// <summary>
@@ -311,11 +311,11 @@ public class NameValueHeaderValue
             return null;
         }
 
-        var sb = new StringBuilder();
+        var sb = StringBuilderCache.Acquire();
 
         ToString(values, separator, leadingSeparator, sb);
 
-        return sb.ToString();
+        return StringBuilderCache.GetStringAndRelease(sb);
     }
 
     internal static int GetHashCode(IList<NameValueHeaderValue>? values)

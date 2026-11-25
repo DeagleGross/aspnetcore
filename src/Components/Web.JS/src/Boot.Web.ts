@@ -8,28 +8,39 @@
 //  - The capabilities of Boot.Server.ts and Boot.WebAssembly.ts to handle insertion
 //    of interactive components
 
-import { DotNet } from '@microsoft/dotnet-js-interop';
+import * as DotNet from './JSInterop/Microsoft.JSInterop';
 import { setCircuitOptions } from './Boot.Server.Common';
 import { setWebAssemblyOptions } from './Boot.WebAssembly.Common';
 import { shouldAutoStart } from './BootCommon';
 import { Blazor } from './GlobalExports';
 import { WebStartOptions } from './Platform/WebStartOptions';
 import { attachStreamingRenderingListener } from './Rendering/StreamingRendering';
-import { NavigationEnhancementCallbacks, attachProgressivelyEnhancedNavigationListener } from './Services/NavigationEnhancement';
+import { resetScrollIfNeeded, ScrollResetSchedule } from './Rendering/Renderer';
+import { NavigationEnhancementCallbacks, attachProgressivelyEnhancedNavigationListener, updateProgrammaticEnhancedNavigationHandler } from './Services/NavigationEnhancement';
 import { WebRootComponentManager } from './Services/WebRootComponentManager';
 import { hasProgrammaticEnhancedNavigationHandler, performProgrammaticEnhancedNavigation } from './Services/NavigationUtils';
 import { attachComponentDescriptorHandler, registerAllComponentDescriptors } from './Rendering/DomMerging/DomSync';
+import { discoverBrowserConfiguration } from './Services/ComponentDescriptorDiscovery';
 import { JSEventRegistry } from './Services/JSEventRegistry';
 import { fetchAndInvokeInitializers } from './JSInitializers/JSInitializers.Web';
 import { ConsoleLogger } from './Platform/Logging/Loggers';
 import { LogLevel } from './Platform/Logging/Logger';
-import { resolveOptions } from './Platform/Circuits/CircuitStartOptions';
+import { resolveOptions, CircuitStartOptions, ReconnectionOptions } from './Platform/Circuits/CircuitStartOptions';
 import { JSInitializer } from './JSInitializers/JSInitializers';
 import { enableFocusOnNavigate } from './Rendering/FocusOnNavigate';
 import { WebAssemblyStartOptions } from './Platform/WebAssemblyStartOptions';
+import { SsrStartOptions } from './Platform/SsrStartOptions';
+import { createBlazorValidation, ensureNovalidateOnForms } from './Validation';
 
 let started = false;
 let rootComponentManager: WebRootComponentManager;
+let initialOptions: {
+  logLevel?: LogLevel;
+  circuitLogLevel?: LogLevel;
+  circuitInactivityTimeoutMs?: number;
+  disableDomPreservation?: boolean;
+  reconnectionRetryIntervalMilliseconds?: ReconnectionOptions['retryIntervalMilliseconds'];
+};
 
 function boot(options?: Partial<WebStartOptions>) : Promise<void> {
   if (started) {
@@ -38,7 +49,17 @@ function boot(options?: Partial<WebStartOptions>) : Promise<void> {
 
   started = true;
   options = options || {};
+  // Resolved options also contain defaults and values from previous enhanced navigations.
+  initialOptions = {
+    logLevel: options.logLevel,
+    circuitLogLevel: options.circuit?.logLevel,
+    circuitInactivityTimeoutMs: options.ssr?.circuitInactivityTimeoutMs,
+    disableDomPreservation: options.ssr?.disableDomPreservation,
+    reconnectionRetryIntervalMilliseconds: options.circuit?.reconnectionOptions?.retryIntervalMilliseconds,
+  };
   options.logLevel ??= LogLevel.Error;
+  options.ssr ??= {};
+  Blazor._internal.isBlazorWeb = true;
 
   // Defined here to avoid inadvertently imported enhanced navigation
   // related APIs in WebAssembly or Blazor Server contexts.
@@ -48,15 +69,20 @@ function boot(options?: Partial<WebStartOptions>) : Promise<void> {
     }
   };
 
-  rootComponentManager = new WebRootComponentManager(options?.ssr?.circuitInactivityTimeoutMs ?? 2000);
   const jsEventRegistry = JSEventRegistry.create(Blazor);
+  rootComponentManager = new WebRootComponentManager(() => options.ssr, jsEventRegistry);
 
   const navigationEnhancementCallbacks: NavigationEnhancementCallbacks = {
     enhancedNavigationStarted: () => {
       jsEventRegistry.dispatchEvent('enhancednavigationstart', {});
     },
+    beforeDomUpdate: (source) => {
+      updateOptionsFromBrowserConfiguration(options, source);
+    },
+    isDomPreservationDisabled: () => options.ssr?.disableDomPreservation === true,
     documentUpdated: () => {
       rootComponentManager.onDocumentUpdated();
+      resetScrollIfNeeded(ScrollResetSchedule.AfterDocumentUpdate);
       jsEventRegistry.dispatchEvent('enhancedload', {});
     },
     enhancedNavigationCompleted() {
@@ -66,13 +92,18 @@ function boot(options?: Partial<WebStartOptions>) : Promise<void> {
   };
 
   attachComponentDescriptorHandler(rootComponentManager);
-  attachStreamingRenderingListener(options?.ssr, navigationEnhancementCallbacks);
-
-  if (!options?.ssr?.disableDomPreservation) {
-    attachProgressivelyEnhancedNavigationListener(navigationEnhancementCallbacks);
-  }
+  // Attach navigation first, since defining the streaming element can synchronously process buffered batches.
+  attachProgressivelyEnhancedNavigationListener(navigationEnhancementCallbacks);
+  attachStreamingRenderingListener(() => options.ssr, navigationEnhancementCallbacks);
 
   enableFocusOnNavigate(jsEventRegistry);
+
+  Blazor.formValidation = createBlazorValidation();
+
+  jsEventRegistry.addEventListener('enhancedload', () => {
+    // An enhanced-navigation morph reuses forms in place and strips the JS-added novalidate, so re-add it.
+    ensureNovalidateOnForms();
+  });
 
   // Wait until the initial page response completes before activating interactive components.
   // If stream rendering is used, this helps to ensure that only the final set of interactive
@@ -87,6 +118,8 @@ function boot(options?: Partial<WebStartOptions>) : Promise<void> {
 }
 
 function onInitialDomContentLoaded(options: Partial<WebStartOptions>) {
+  updateOptionsFromBrowserConfiguration(options);
+
   // Retrieve and start invoking the initializers.
   // Blazor server options get defaults that are configured before we invoke the initializers
   // so we do the same here.
@@ -94,14 +127,144 @@ function onInitialDomContentLoaded(options: Partial<WebStartOptions>) {
   options.circuit = initialCircuitOptions;
   options.webAssembly = options.webAssembly || ({} as WebAssemblyStartOptions);
   const logger = new ConsoleLogger(initialCircuitOptions.logLevel);
-  const initializersPromise = fetchAndInvokeInitializers(options, logger);
+  const initialSsrOptions = options.ssr || {};
+  options.ssr = initialSsrOptions;
+  const initializerSsrProxies = new WeakMap<SsrStartOptions, SsrStartOptions>();
+  const initializerSsrTargets = new WeakMap<SsrStartOptions, SsrStartOptions>();
+  const initializerSsrHandler: ProxyHandler<SsrStartOptions> = {
+    set(target, property, value) {
+      if (property === 'disableDomPreservation') {
+        initialOptions.disableDomPreservation = value;
+      } else if (property === 'circuitInactivityTimeoutMs') {
+        initialOptions.circuitInactivityTimeoutMs = value;
+      }
+      const result = Reflect.set(target, property, value);
+      if (property === 'disableDomPreservation') {
+        updateProgrammaticEnhancedNavigationHandler();
+      }
+      return result;
+    },
+  };
+  function getInitializerSsrOptions(ssrOptions: SsrStartOptions): SsrStartOptions {
+    let proxy = initializerSsrProxies.get(ssrOptions);
+    if (!proxy) {
+      proxy = new Proxy(ssrOptions, initializerSsrHandler);
+      initializerSsrProxies.set(ssrOptions, proxy);
+      initializerSsrTargets.set(proxy, ssrOptions);
+    }
+    return proxy;
+  }
+  const initializerCircuitOptions = new Proxy(initialCircuitOptions, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      return property === 'reconnectionOptions' && value
+        ? new Proxy(value, {
+          set(reconnectionTarget, reconnectionProperty, reconnectionValue) {
+            if (reconnectionProperty === 'retryIntervalMilliseconds') {
+              initialOptions.reconnectionRetryIntervalMilliseconds = reconnectionValue;
+            }
+            return Reflect.set(reconnectionTarget, reconnectionProperty, reconnectionValue);
+          },
+        })
+        : value;
+    },
+    set(target, property, value) {
+      if (property === 'logLevel') {
+        initialOptions.circuitLogLevel = value;
+      } else if (property === 'reconnectionOptions' && value?.retryIntervalMilliseconds !== undefined) {
+        initialOptions.reconnectionRetryIntervalMilliseconds = value.retryIntervalMilliseconds;
+      }
+      return Reflect.set(target, property, value);
+    },
+  });
+  const initializerOptions = new Proxy(options, {
+    get(target, property, receiver) {
+      if (property === 'ssr' && target.ssr) {
+        return getInitializerSsrOptions(target.ssr);
+      }
+      return property === 'circuit' && target.circuit === initialCircuitOptions
+        ? initializerCircuitOptions
+        : Reflect.get(target, property, receiver);
+    },
+    set(target, property, value, receiver) {
+      if (property === 'ssr') {
+        value = initializerSsrTargets.get(value) ?? value;
+        initialOptions.disableDomPreservation = value?.disableDomPreservation;
+        initialOptions.circuitInactivityTimeoutMs = value?.circuitInactivityTimeoutMs;
+        const result = Reflect.set(target, property, value, receiver);
+        updateProgrammaticEnhancedNavigationHandler();
+        return result;
+      }
+      return Reflect.set(target, property, value, receiver);
+    },
+  });
+  const initializersPromise = fetchAndInvokeInitializers(initializerOptions, logger);
   setCircuitOptions(resolveConfiguredOptions(initializersPromise, initialCircuitOptions));
   setWebAssemblyOptions(resolveConfiguredOptions(initializersPromise, options.webAssembly));
 
   registerAllComponentDescriptors(document);
+
   rootComponentManager.onDocumentUpdated();
 
   callAfterStartedCallbacks(initializersPromise);
+}
+
+function updateOptionsFromBrowserConfiguration(options: Partial<WebStartOptions>, source: Node = document): void {
+  const browserConfig = discoverBrowserConfiguration(source);
+  if (browserConfig) {
+    if (browserConfig.logLevel !== undefined) {
+      options.logLevel = initialOptions.logLevel ?? browserConfig.logLevel;
+      options.circuit ??= {} as CircuitStartOptions;
+      options.circuit.logLevel = initialOptions.circuitLogLevel ?? browserConfig.logLevel;
+    }
+
+    // SSR options
+    if (browserConfig.ssr) {
+      options.ssr = options.ssr || {};
+      if (browserConfig.ssr.disableDomPreservation !== undefined) {
+        options.ssr.disableDomPreservation = initialOptions.disableDomPreservation ?? browserConfig.ssr.disableDomPreservation;
+        updateProgrammaticEnhancedNavigationHandler();
+      }
+      if (browserConfig.ssr.circuitInactivityTimeoutMs !== undefined) {
+        options.ssr.circuitInactivityTimeoutMs = initialOptions.circuitInactivityTimeoutMs ?? browserConfig.ssr.circuitInactivityTimeoutMs;
+      }
+    }
+
+    // Circuit/Server options
+    if (browserConfig.server) {
+      const circuitOpts: Partial<CircuitStartOptions> = options.circuit ?? {};
+      options.circuit = circuitOpts as CircuitStartOptions;
+
+      const reconnOpts: Partial<ReconnectionOptions> = circuitOpts.reconnectionOptions ?? {};
+      circuitOpts.reconnectionOptions = reconnOpts as ReconnectionOptions;
+      if (browserConfig.server.reconnectionMaxRetries !== undefined) {
+        reconnOpts.maxRetries = browserConfig.server.reconnectionMaxRetries;
+      }
+      if (browserConfig.server.reconnectionRetryIntervalMilliseconds !== undefined) {
+        reconnOpts.retryIntervalMilliseconds = initialOptions.reconnectionRetryIntervalMilliseconds ?? browserConfig.server.reconnectionRetryIntervalMilliseconds;
+      }
+      if (browserConfig.server.reconnectionDialogId !== undefined) {
+        reconnOpts.dialogId = browserConfig.server.reconnectionDialogId;
+      }
+
+      // Pass through library extension keys (server-side [JsonExtensionData]) to the circuit options.
+      for (const [key, value] of Object.entries(browserConfig.server)) {
+        if (value !== undefined) {
+          (circuitOpts as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
+
+    // Apply WebAssembly server options before processing component descriptors, since
+    // registration can trigger platform loading that captures these options.
+    if (browserConfig.webAssembly) {
+      rootComponentManager.setWebAssemblyOptions({
+        environmentName: browserConfig.webAssembly.environmentName ?? '',
+        applicationCulture: browserConfig.webAssembly.applicationCulture,
+        environmentVariables: browserConfig.webAssembly.environmentVariables ?? {},
+      });
+    }
+  }
 }
 
 async function resolveConfiguredOptions<TOptions>(initializers: Promise<JSInitializer>, options: TOptions): Promise<TOptions> {

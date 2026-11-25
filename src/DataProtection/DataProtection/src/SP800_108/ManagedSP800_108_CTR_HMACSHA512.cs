@@ -31,8 +31,35 @@ internal static class ManagedSP800_108_CTR_HMACSHA512
 #endif
 
 #if NET10_0_OR_GREATER
+    /// <summary>
+    /// For FIPS enabled scenarios we have no other choice but to enforce a minimum key length of 14 bytes.
+    /// It should not be on the hot-path, but only needed for one-time derivation of keys when e.g. creating context header.
+    /// </summary>
+    /// <remarks>
+    /// NIST SP 800-131A Rev. 2:
+    /// Keys less than 112 bits in length are disallowed for HMAC generation.
+    /// The use of key lengths ≥ 112 bits is acceptable for HMAC generation.
+    /// <see href="https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-131Ar2.pdf"/>
+    /// </remarks>
+    private const int FipsMinimumKeyLengthInBytes = 14;
+
     public static void DeriveKeys(ReadOnlySpan<byte> kdk, ReadOnlySpan<byte> label, ReadOnlySpan<byte> contextHeader, ReadOnlySpan<byte> contextData, Span<byte> operationSubkey, Span<byte> validationSubkey)
-        => DeriveKeys(kdk, label, contextHeader, contextData, operationSubkey, validationSubkey, prf: null);
+    {
+        if (kdk.Length < FipsMinimumKeyLengthInBytes)
+        {
+            // When you provide a key to HMAC that is shorter than the algorithm's internal block size,
+            // the HMAC algorithm internally pads the key with zeros to reach the block size.
+            Span<byte> zeroExtended = stackalloc byte[FipsMinimumKeyLengthInBytes];
+            zeroExtended.Clear();
+            kdk.CopyTo(zeroExtended);
+
+            DeriveKeys(zeroExtended, label, contextHeader, contextData, operationSubkey, validationSubkey, prf: null);
+        }
+        else
+        {
+            DeriveKeys(kdk, label, contextHeader, contextData, operationSubkey, validationSubkey, prf: null);
+        }
+    }
 #endif
 
     /// <remarks>
@@ -69,9 +96,10 @@ internal static class ManagedSP800_108_CTR_HMACSHA512
         var prfInputLength = checked(sizeof(uint) /* [i]_2 */ + label.Length + 1 /* 0x00 */ + (contextHeader.Length + contextData.Length) + sizeof(uint) /* [K]_2 */);
 
 #if NET10_0_OR_GREATER
+        // 256 bytes covers typical purpose chains (the AAD is the KDF label); larger inputs use a heap array.
         byte[]? prfInputArray = null;
-        Span<byte> prfInput = prfInputLength <= 128
-            ? stackalloc byte[128].Slice(0, prfInputLength)
+        Span<byte> prfInput = prfInputLength <= 256
+            ? stackalloc byte[256].Slice(0, prfInputLength)
             : (prfInputArray = new byte[prfInputLength]);
 #else
         var prfInputArray = new byte[prfInputLength];
@@ -101,9 +129,17 @@ internal static class ManagedSP800_108_CTR_HMACSHA512
                 prfInput[3] = (byte)(i);
 
 #if NET10_0_OR_GREATER
-                var success = HMACSHA512.TryHashData(kdk, prfInput, prfOutput, out var bytesWritten);
-                Debug.Assert(success);
-                Debug.Assert(bytesWritten == prfOutputSizeInBytes);
+                if (prf is not null)
+                {
+                    var prfOutputArray = prf.ComputeHash(prfInputArray ?? prfInput.ToArray());
+                    prfOutputArray.CopyTo(prfOutput);
+                }
+                else
+                {
+                    var success = HMACSHA512.TryHashData(kdk, prfInput, prfOutput, out var bytesWritten);
+                    Debug.Assert(success);
+                    Debug.Assert(bytesWritten == prfOutputSizeInBytes);
+                }
 #else
                 var prfOutputArray = prf.ComputeHash(prfInputArray);
                 var prfOutput = prfOutputArray.AsSpan();

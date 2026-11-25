@@ -21,7 +21,7 @@ public class FormFeature : IFormFeature
     private FormOptions _options;
     private Task<IFormCollection>? _parsedFormTask;
     private IFormCollection? _form;
-	private MediaTypeHeaderValue? _formContentType; // null iff _form is null
+    private MediaTypeHeaderValue? _formContentType; // null iff _form is null
 
     /// <summary>
     /// Initializes a new instance of <see cref="FormFeature"/>.
@@ -32,7 +32,7 @@ public class FormFeature : IFormFeature
         ArgumentNullException.ThrowIfNull(form);
 
         Form = form;
-		_formContentType = new MediaTypeHeaderValue("application/x-www-form-urlencoded");
+        _formContentType = new MediaTypeHeaderValue("application/x-www-form-urlencoded");
         _options = FormOptions.Default;
     }
 
@@ -100,6 +100,13 @@ public class FormFeature : IFormFeature
             }
 
             if (_request is null)
+            {
+                return false;
+            }
+
+            // Both form media types contain "form", so any Content-Type without it can't match.
+            // This avoids parsing the header for common non-form requests (e.g. JSON).
+            if (!_request.ContentType.AsSpan().Contains("form", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
@@ -360,16 +367,25 @@ public class FormFeature : IFormFeature
         {
             return false;
         }
-        var hasInvokedMiddleware = _request.HttpContext.Items.ContainsKey("__AntiforgeryMiddlewareWithEndpointInvoked");
-        var hasInvalidToken = _request.HttpContext.Features.Get<IAntiforgeryValidationFeature>() is { IsValid: false };
-        return hasInvokedMiddleware && hasInvalidToken;
+
+        // Set by the antiforgery and the CSRF protection middleware respectively. Either marker means a
+        // middleware ran and recorded its verdict on IAntiforgeryValidationFeature.
+        // Check the feature first so Items (allocated lazily) is only touched when there is an invalid token.
+        if (_request.HttpContext.Features.Get<IAntiforgeryValidationFeature>() is not { IsValid: false })
+        {
+            return false;
+        }
+
+        var items = _request.HttpContext.Items;
+        return items.ContainsKey(MiddlewareInvokedKeys.Antiforgery)
+            || items.ContainsKey(MiddlewareInvokedKeys.CsrfProtection);
     }
 
     private void HandleUncheckedAntiforgeryValidationFeature()
     {
         if (HasInvalidAntiforgeryValidationFeature)
         {
-            throw new InvalidOperationException("This form is being accessed with an invalid anti-forgery token. Validate the `IAntiforgeryValidationFeature` on the request before reading from the form.");
+            throw new InvalidOperationException("This form is being accessed with a failed antiforgery validation. Validate the `IAntiforgeryValidationFeature` on the request before reading from the form.");
         }
     }
 

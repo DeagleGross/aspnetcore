@@ -33,6 +33,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void TargetingPackContainsListedAssemblies()
     {
         var actualAssemblies = Directory.GetFiles(Path.Combine(_targetingPackRoot, "ref", _targetingPackTfm), "*.dll")
@@ -108,6 +109,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void RefAssemblyReferencesHaveExpectedAssemblyVersions()
     {
         IEnumerable<string> dlls = Directory.GetFiles(Path.Combine(_targetingPackRoot, "ref", _targetingPackTfm), "*.dll", SearchOption.AllDirectories);
@@ -130,6 +132,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void PackageOverridesContainsCorrectEntries()
     {
         var packageOverridePath = Path.Combine(_targetingPackRoot, "data", "PackageOverrides.txt");
@@ -144,8 +147,24 @@ public class TargetingPackTests
             .Split(';', StringSplitOptions.RemoveEmptyEntries)
             .ToHashSet();
 
-        // PackageOverrides will contain all Aspnetcore/Runtime ref pack libs, plus an entry for Microsoft.AspNetCore.App
+        // Some packages are excluded from pruning because they contain build logic that is not in the SDK.
+        // These packages need their build targets to execute even though their runtime assemblies are in the shared framework.
+        string[] packagesExcludedFromPruning = ["Microsoft.Extensions.FileProviders.Embedded"]; // See https://github.com/dotnet/aspnetcore/issues/63719
+
+        foreach (var excludedPackage in packagesExcludedFromPruning)
+        {
+            aspnetcoreDependencies.Remove(excludedPackage);
+        }
+
+        // PackageOverrides will contain all Aspnetcore/Runtime ref pack libs, plus an entry for Microsoft.AspNetCore.App,
+        // minus any packages excluded from pruning
         Assert.Equal(packageOverrideFileLines.Length, runtimeDependencies.Count + aspnetcoreDependencies.Count + 1);
+
+        // Verify that excluded packages are NOT in PackageOverrides
+        foreach (var excludedPackage in packagesExcludedFromPruning)
+        {
+            Assert.DoesNotContain(packageOverrideFileLines, line => line.StartsWith(excludedPackage + "|", StringComparison.Ordinal));
+        }
 
         // PackageOverrides versions should remain at Major.Minor.0 while servicing.
         var netCoreAppPackageVersion = TestData.GetMicrosoftNETCoreAppVersion();
@@ -222,6 +241,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void PlatformManifestListsAllFiles()
     {
         var platformManifestPath = Path.Combine(_targetingPackRoot, "data", "PlatformManifest.txt");
@@ -287,6 +307,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void FrameworkListContainsCorrectEntries()
     {
         var frameworkListPath = Path.Combine(_targetingPackRoot, "data", "FrameworkList.xml");
@@ -354,6 +375,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void FrameworkListContainsCorrectPaths()
     {
         var frameworkListPath = Path.Combine(_targetingPackRoot, "data", "FrameworkList.xml");
@@ -364,7 +386,7 @@ public class TargetingPackTests
         var frameworkListEntries = frameworkListDoc.Root.Descendants();
 
         var packageFolder = SkipOnHelixAttribute.OnHelix() ?
-            Environment.GetEnvironmentVariable("HELIX_WORKITEM_ROOT") :
+            AppContext.BaseDirectory :
             TestData.GetPackagesFolder();
         var targetingPackPath = Path.Combine(
             packageFolder, "Microsoft.AspNetCore.App.Ref." + TestData.GetSharedFxVersion() + ".nupkg");
@@ -396,6 +418,7 @@ public class TargetingPackTests
     }
 
     [Fact]
+    [SkipNonHelix("https://github.com/dotnet/aspnetcore/issues/57426")]
     public void FrameworkListContainsAnalyzerLanguage()
     {
         var frameworkListPath = Path.Combine(_targetingPackRoot, "data", "FrameworkList.xml");

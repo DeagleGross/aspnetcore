@@ -1,10 +1,15 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using Microsoft.AspNetCore.Components.RenderTree;
+using Microsoft.AspNetCore.Components.Test.Helpers;
+
 namespace Microsoft.AspNetCore.Components.Forms;
 
 public class InputTextTest
 {
+    private readonly TestRenderer _testRenderer = new TestRenderer();
+
     [Fact]
     public async Task InputElementIsAssignedSuccessfully()
     {
@@ -21,6 +26,107 @@ public class InputTextTest
 
         // Assert
         Assert.NotNull(inputSelectComponent.Element);
+    }
+
+    [Fact]
+    public async Task RendersIdAttribute()
+    {
+        var model = new TestModel();
+        var rootComponent = new TestInputHostComponent<string, InputText>
+        {
+            EditContext = new EditContext(model),
+            ValueExpression = () => model.StringProperty,
+        };
+
+        var componentId = await RenderAndGetInputTextComponentIdAsync(rootComponent);
+        var frames = _testRenderer.GetCurrentRenderTreeFrames(componentId);
+
+        var idAttribute = frames.Array.Single(f => f.FrameType == RenderTreeFrameType.Attribute && f.AttributeName == "id");
+        Assert.Equal("model_StringProperty", idAttribute.AttributeValue);
+    }
+
+    [Fact]
+    public async Task ExplicitIdOverridesGenerated()
+    {
+        var model = new TestModel();
+        var rootComponent = new TestInputHostComponent<string, InputText>
+        {
+            EditContext = new EditContext(model),
+            ValueExpression = () => model.StringProperty,
+            AdditionalAttributes = new Dictionary<string, object> { { "id", "custom-id" } }
+        };
+
+        var componentId = await RenderAndGetInputTextComponentIdAsync(rootComponent);
+        var frames = _testRenderer.GetCurrentRenderTreeFrames(componentId);
+
+        var idAttribute = frames.Array.First(f => f.FrameType == RenderTreeFrameType.Attribute && f.AttributeName == "id");
+        Assert.Equal("custom-id", idAttribute.AttributeValue);
+    }
+
+    [Fact]
+    public async Task RendersIdAttribute_WhenShouldUseFieldIdentifiersIsFalse_InteractiveMode()
+    {
+        // simulate interactive mode where ShouldUseFieldIdentifiers is false
+        var model = new TestModel();
+        var editContext = new EditContext(model) { ShouldUseFieldIdentifiers = false };
+        var rootComponent = new TestInputHostComponent<string, InputText>
+        {
+            EditContext = editContext,
+            ValueExpression = () => model.StringProperty,
+        };
+
+        var componentId = await RenderAndGetInputTextComponentIdAsync(rootComponent);
+        var frames = _testRenderer.GetCurrentRenderTreeFrames(componentId);
+
+        // id should still be generated for Label/Input association to work in interactive mode
+        var idAttribute = frames.Array.Single(f => f.FrameType == RenderTreeFrameType.Attribute && f.AttributeName == "id");
+        Assert.Equal("model_StringProperty", idAttribute.AttributeValue);
+    }
+
+    [Fact]
+    public async Task RendersIdAttribute_ForCapturedLongDictionaryKey()
+    {
+        var values = new Dictionary<long, string> { [1L] = "Test" };
+        long key = 1;
+        var rootComponent = new TestInputHostComponent<string, InputText>
+        {
+            EditContext = new EditContext(values),
+            Value = values[key],
+            ValueExpression = () => values[key],
+        };
+
+        var componentId = await RenderAndGetInputTextComponentIdAsync(rootComponent);
+        var frames = _testRenderer.GetCurrentRenderTreeFrames(componentId);
+
+        var idAttribute = frames.Array.Single(f => f.FrameType == RenderTreeFrameType.Attribute && f.AttributeName == "id");
+        Assert.Equal("values[1]", idAttribute.AttributeValue);
+    }
+
+    [Fact]
+    public async Task RendersIdAttribute_ForCapturedGuidDictionaryKey()
+    {
+        var key = new Guid("00112233-4455-6677-8899-aabbccddeeff");
+        var values = new Dictionary<Guid, string> { [key] = "Test" };
+        var rootComponent = new TestInputHostComponent<string, InputText>
+        {
+            EditContext = new EditContext(values),
+            Value = values[key],
+            ValueExpression = () => values[key],
+        };
+
+        var componentId = await RenderAndGetInputTextComponentIdAsync(rootComponent);
+        var frames = _testRenderer.GetCurrentRenderTreeFrames(componentId);
+
+        var idAttribute = frames.Array.Single(f => f.FrameType == RenderTreeFrameType.Attribute && f.AttributeName == "id");
+        Assert.Equal("values[00112233-4455-6677-8899-aabbccddeeff]", idAttribute.AttributeValue);
+    }
+
+    private async Task<int> RenderAndGetInputTextComponentIdAsync(TestInputHostComponent<string, InputText> hostComponent)
+    {
+        var hostComponentId = _testRenderer.AssignRootComponentId(hostComponent);
+        await _testRenderer.RenderRootComponentAsync(hostComponentId);
+        var batch = _testRenderer.Batches.Single();
+        return batch.GetComponentFrames<InputText>().Single().ComponentId;
     }
 
     private class TestModel

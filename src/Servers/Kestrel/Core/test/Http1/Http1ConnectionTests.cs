@@ -53,7 +53,10 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         await _application.Output.WriteAsync(extendedAsciiEncoding.GetBytes("\r\n\r\n"));
         var readableBuffer = (await _transport.Input.ReadAsync()).Buffer;
 
-        var exception = Assert.Throws<InvalidOperationException>(() => TakeMessageHeaders(readableBuffer, trailers: false, out _consumed, out _examined));
+#pragma warning disable CS0618 // Type or member is obsolete
+        var exception = Assert.Throws<BadHttpRequestException>(() => TakeMessageHeaders(readableBuffer, trailers: false, out _consumed, out _examined));
+#pragma warning restore CS0618 // Type or member is obsolete
+        Assert.Equal(RequestRejectionReason.MalformedRequestInvalidHeaders, exception.Reason);
     }
 
     [Fact]
@@ -123,8 +126,10 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         SequencePosition TakeStartLineAndMessageHeaders()
         {
             var reader = new SequenceReader<byte>(readableBuffer);
-            Assert.True(_http1Connection.TakeStartLine(ref reader));
-            Assert.False(_http1Connection.TakeMessageHeaders(ref reader, trailers: false));
+            Assert.True(_http1Connection.TryTakeStartLineCore(ref reader).IsComplete);
+            var headersResult = _http1Connection.TryTakeMessageHeadersCore(ref reader, trailers: false);
+            Assert.False(headersResult.HasError);
+            Assert.False(headersResult.IsComplete);
             return reader.Position;
         }
 
@@ -138,7 +143,7 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         SequencePosition TakeMessageHeaders()
         {
             var reader = new SequenceReader<byte>(readableBuffer);
-            Assert.True(_http1Connection.TakeMessageHeaders(ref reader, trailers: false));
+            Assert.True(_http1Connection.TryTakeMessageHeadersCore(ref reader, trailers: false).IsComplete);
             return reader.Position;
         }
 
@@ -315,6 +320,32 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         Assert.Throws<InvalidOperationException>(() => ((IHttpResponseFeature)_http1Connection).ReasonPhrase = "Reason phrase");
     }
 
+    [Theory]
+    [InlineData("Injected\r\nHeader: value")]
+    [InlineData("Has\rCarriageReturn")]
+    [InlineData("Has\nLineFeed")]
+    [InlineData("Has\0Null")]
+    [InlineData("Control\u001FChar")]
+    [InlineData("Del\u007FChar")]
+    [InlineData("Non-ASCII\u0080Char")]
+    [InlineData("Caf\u00E9")]
+    public void ThrowsWhenReasonPhraseContainsControlCharacters(string reasonPhrase)
+    {
+        Assert.Throws<InvalidOperationException>(() => ((IHttpResponseFeature)_http1Connection).ReasonPhrase = reasonPhrase);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("OK")]
+    [InlineData("Custom Reason")]
+    [InlineData("Includes\tHTAB")]
+    public void AcceptsValidReasonPhrase(string reasonPhrase)
+    {
+        ((IHttpResponseFeature)_http1Connection).ReasonPhrase = reasonPhrase;
+        Assert.Equal(reasonPhrase, ((IHttpResponseFeature)_http1Connection).ReasonPhrase);
+    }
+
     [Fact]
     public async Task ThrowsWhenOnStartingIsSetAfterResponseStarted()
     {
@@ -440,17 +471,6 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         Assert.Equal(expectedRawTarget, _http1Connection.RawTarget);
         Assert.Equal(expectedDecodedPath, _http1Connection.Path);
         Assert.Equal(expectedQueryString, _http1Connection.QueryString);
-    }
-
-    [Fact]
-    public async Task ParseRequestStartsRequestHeadersTimeoutOnFirstByteAvailable()
-    {
-        await _application.Output.WriteAsync(Encoding.ASCII.GetBytes("G"));
-
-        ParseRequest((await _transport.Input.ReadAsync()).Buffer, out _consumed, out _examined);
-        _transport.Input.AdvanceTo(_consumed, _examined);
-
-        _timeoutControl.Verify(cc => cc.ResetTimeout(_serviceContext.ServerOptions.Limits.RequestHeadersTimeout, TimeoutReason.RequestHeaders));
     }
 
     [Fact]
@@ -1037,10 +1057,37 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
         Assert.False(_http1Connection.RequestHeaders.ContainsKey(HeaderNames.ContentLength));
     }
 
+    [Fact]
+    public void ContentLengthShouldBeRemovedWhenBothTransferEncodingAndContentLengthAndXContentLengthRequestHeadersExist()
+    {
+        // Arrange
+        string contentLength = "1024";
+        string userXContentLength = "123";
+        _http1Connection.RequestHeaders.Add(HeaderNames.ContentLength, contentLength);
+        _http1Connection.RequestHeaders.Add(HeaderNames.TransferEncoding, "chunked");
+        _http1Connection.RequestHeaders.Add("X-Content-Length", userXContentLength); // user passed this explicitly
+
+        // Act
+        Http1MessageBody.For(Kestrel.Core.Internal.Http.HttpVersion.Http11, (HttpRequestHeaders)_http1Connection.RequestHeaders, _http1Connection);
+
+        // Assert
+        Assert.True(_http1Connection.RequestHeaders.ContainsKey("X-Content-Length"));
+        Assert.Equal(userXContentLength, _http1Connection.RequestHeaders["X-Content-Length"]);
+        Assert.True(_http1Connection.RequestHeaders.ContainsKey(HeaderNames.TransferEncoding));
+        Assert.Equal("chunked", _http1Connection.RequestHeaders[HeaderNames.TransferEncoding]);
+        Assert.False(_http1Connection.RequestHeaders.ContainsKey(HeaderNames.ContentLength));
+    }
+
     private bool TakeMessageHeaders(ReadOnlySequence<byte> readableBuffer, bool trailers, out SequencePosition consumed, out SequencePosition examined)
     {
         var reader = new SequenceReader<byte>(readableBuffer);
-        if (_http1Connection.TakeMessageHeaders(ref reader, trailers: trailers))
+        var parseResult = _http1Connection.TryTakeMessageHeadersCore(ref reader, trailers: trailers);
+        if (parseResult.HasError)
+        {
+            throw _http1Connection.CreateBadRequestException(parseResult, readableBuffer);
+        }
+
+        if (parseResult.IsComplete)
         {
             consumed = reader.Position;
             examined = reader.Position;
@@ -1057,24 +1104,13 @@ public class Http1ConnectionTests : Http1ConnectionTestsBase
     private bool TakeStartLine(ReadOnlySequence<byte> readableBuffer, out SequencePosition consumed, out SequencePosition examined)
     {
         var reader = new SequenceReader<byte>(readableBuffer);
-        if (_http1Connection.TakeStartLine(ref reader))
+        var parseResult = _http1Connection.TryTakeStartLineCore(ref reader);
+        if (parseResult.HasError)
         {
-            consumed = reader.Position;
-            examined = reader.Position;
-            return true;
+            throw _http1Connection.CreateBadRequestException(parseResult, readableBuffer);
         }
-        else
-        {
-            consumed = reader.Position;
-            examined = readableBuffer.End;
-            return false;
-        }
-    }
 
-    private bool ParseRequest(ReadOnlySequence<byte> readableBuffer, out SequencePosition consumed, out SequencePosition examined)
-    {
-        var reader = new SequenceReader<byte>(readableBuffer);
-        if (_http1Connection.ParseRequest(ref reader))
+        if (parseResult.IsComplete)
         {
             consumed = reader.Position;
             examined = reader.Position;

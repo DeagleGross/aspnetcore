@@ -134,6 +134,93 @@ public class MultipartReaderTests
     }
 
     [Fact]
+    public async Task MultipartReader_MixedHeaderNamesCountExceeded_Throws()
+    {
+        using var stream = MakeStream($"--{Boundary}\r\n" +
+            "First: one\r\nSecond: two\r\nFirst: three\r\n\r\n" +
+            $"body\r\n--{Boundary}--\r\n");
+        var reader = new MultipartReader(Boundary, stream)
+        {
+            HeadersCountLimit = 2,
+        };
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadNextSectionAsync());
+        Assert.Equal("Multipart headers count limit 2 exceeded.", exception.Message);
+    }
+    [Theory]
+    [InlineData(1, "Custom-header", "value")]
+    [InlineData(1, "custom-HEADER", "value")]
+    [InlineData(1, "Custom-header", "")]
+    [InlineData(2, "Custom-header", "value")]
+    [InlineData(3, "Custom-header", "value")]
+    [InlineData(MultipartReader.DefaultHeadersCountLimit, "Custom-header", "value")]
+    public async Task MultipartReader_RepeatedHeaderCountExceeded_Throws(int limit, string repeatedName, string value)
+    {
+        var headers = $"Custom-header: {value}\r\n" +
+            string.Concat(Enumerable.Repeat($"{repeatedName}: {value}\r\n", limit));
+        using var stream = MakeStream($"--{Boundary}\r\n{headers}\r\nbody\r\n--{Boundary}--\r\n");
+        var reader = new MultipartReader(Boundary, stream)
+        {
+            HeadersCountLimit = limit,
+        };
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadNextSectionAsync());
+        Assert.Equal($"Multipart headers count limit {limit} exceeded.", exception.Message);
+    }
+    [Theory]
+    [InlineData(1, "value")]
+    [InlineData(2, "value")]
+    [InlineData(3, "value")]
+    [InlineData(MultipartReader.DefaultHeadersCountLimit, "value")]
+    [InlineData(2, "")]
+    [InlineData(1, "one, two, three")]
+    public async Task MultipartReader_HeaderCountAtLimit_SucceedsForEachSection(int limit, string value)
+    {
+        var headers = $"Custom-header: {value}\r\n" +
+            string.Concat(Enumerable.Repeat($"custom-HEADER: {value}\r\n", limit - 1));
+        var part = $"--{Boundary}\r\n{headers}\r\nbody\r\n";
+        using var stream = MakeStream(part + part + $"--{Boundary}--\r\n");
+        var reader = new MultipartReader(Boundary, stream)
+        {
+            HeadersCountLimit = limit,
+        };
+        for (var i = 0; i < 2; i++)
+        {
+            var section = await reader.ReadNextSectionAsync();
+            Assert.NotNull(section);
+            Assert.Single(section.Headers);
+            Assert.Equal(Enumerable.Repeat(value, limit), section.Headers["Custom-header"].ToArray());
+            using var bodyReader = new StreamReader(section.Body);
+            Assert.Equal("body", await bodyReader.ReadToEndAsync());
+        }
+        Assert.Null(await reader.ReadNextSectionAsync());
+    }
+    [Fact]
+    public async Task MultipartReader_ZeroHeaderCountLimit_NoHeaders_Success()
+    {
+        using var stream = MakeStream($"--{Boundary}\r\n\r\nbody\r\n--{Boundary}--\r\n");
+        var reader = new MultipartReader(Boundary, stream)
+        {
+            HeadersCountLimit = 0,
+        };
+        var section = await reader.ReadNextSectionAsync();
+        Assert.NotNull(section);
+        Assert.Empty(section.Headers);
+        using var bodyReader = new StreamReader(section.Body);
+        Assert.Equal("body", await bodyReader.ReadToEndAsync());
+        Assert.Null(await reader.ReadNextSectionAsync());
+    }
+    [Fact]
+    public async Task MultipartReader_ZeroHeaderCountLimit_WithHeader_Throws()
+    {
+        using var stream = MakeStream(OnePartBody);
+        var reader = new MultipartReader(Boundary, stream)
+        {
+            HeadersCountLimit = 0,
+        };
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadNextSectionAsync());
+        Assert.Equal("Multipart headers count limit 0 exceeded.", exception.Message);
+    }
+
+    [Fact]
     public async Task MultipartReader_HeadersLengthExceeded_Throws()
     {
         var stream = MakeStream(OnePartBodyTwoHeaders);
@@ -144,6 +231,21 @@ public class MultipartReaderTests
 
         var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadNextSectionAsync());
         Assert.Equal("Line length limit 17 exceeded.", exception.Message);
+    }
+
+    [Fact]
+    public async Task MultipartReader_HeaderLineSpanningMultipleBuffers_EnforcesHeadersLengthLimit()
+    {
+        // A single header line that is much larger than the internal read buffer (4 KiB) and
+        // the headers length limit (16 KiB), and is never terminated with a CRLF. The limit
+        // must be enforced while reading the line, before the whole payload is buffered in
+        // memory, rather than relying on the post-read length check.
+        var body = "--9051914041544843365972754266\r\n" + new string('a', 100_000);
+        var stream = MakeStream(body);
+        var reader = new MultipartReader(Boundary, stream);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadNextSectionAsync());
+        Assert.Equal("Line length limit 16384 exceeded.", exception.Message);
     }
 
     [Fact]
@@ -485,5 +587,103 @@ public class MultipartReaderTests
         Assert.Equal("fault", GetString(buffer, read));
 
         Assert.Null(await reader.ReadNextSectionAsync());
+    }
+
+    [Fact]
+    public async Task MultipartReader_BoundaryWithUnexpectedTrailingData_ThrowsIOException()
+    {
+        // Boundary line has garbage data after it that isn't "--" (final boundary marker)
+        var body =
+"--9051914041544843365972754266\r\n" +
+"Content-Disposition: form-data; name=\"text\"\r\n" +
+"\r\n" +
+"text default\r\n" +
+"--9051914041544843365972754266 garbage\r\n";
+
+        var stream = MakeStream(body);
+        var reader = new MultipartReader(Boundary, stream);
+
+        var section = await reader.ReadNextSectionAsync();
+        Assert.NotNull(section);
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+        {
+            await section.Body.CopyToAsync(new MemoryStream());
+        });
+    }
+
+    [Fact]
+    public async Task MultipartReader_BoundaryWithUnexpectedTrailingData_SyncRead_ThrowsIOException()
+    {
+        // Same as above but exercises the synchronous Read path
+        var body =
+"--9051914041544843365972754266\r\n" +
+"Content-Disposition: form-data; name=\"text\"\r\n" +
+"\r\n" +
+"text default\r\n" +
+"--9051914041544843365972754266 garbage\r\n";
+
+        var stream = MakeStream(body);
+        var reader = new MultipartReader(Boundary, stream);
+
+        var section = await reader.ReadNextSectionAsync();
+        Assert.NotNull(section);
+
+        var buffer = new byte[1024];
+        Assert.Throws<IOException>(() =>
+        {
+            // Read until the boundary with trailing garbage is encountered
+            while (section.Body.Read(buffer, 0, buffer.Length) > 0) { }
+        });
+    }
+
+    [Fact]
+    public async Task MultipartReader_FinalBoundaryWithTrailingWhitespace_Success()
+    {
+        // Trailing whitespace on the final boundary line is allowed (trimmed)
+        var body =
+"--9051914041544843365972754266\r\n" +
+"Content-Disposition: form-data; name=\"text\"\r\n" +
+"\r\n" +
+"text default\r\n" +
+"--9051914041544843365972754266--   \r\n";
+
+        var stream = MakeStream(body);
+        var reader = new MultipartReader(Boundary, stream);
+
+        var section = await reader.ReadNextSectionAsync();
+        Assert.NotNull(section);
+        var buffer = new MemoryStream();
+        await section.Body.CopyToAsync(buffer);
+        Assert.Equal("text default", Encoding.ASCII.GetString(buffer.ToArray()));
+
+        Assert.Null(await reader.ReadNextSectionAsync());
+    }
+
+    [Fact]
+    public async Task MultipartReader_IntermediateBoundaryWithTrailingData_ThrowsIOException()
+    {
+        // Non-final boundary with non-whitespace trailing data should throw
+        var body =
+"--9051914041544843365972754266\r\n" +
+"Content-Disposition: form-data; name=\"text\"\r\n" +
+"\r\n" +
+"text default\r\n" +
+"--9051914041544843365972754266 notwhitespace\r\n" +
+"Content-Disposition: form-data; name=\"text2\"\r\n" +
+"\r\n" +
+"text2\r\n" +
+"--9051914041544843365972754266--\r\n";
+
+        var stream = MakeStream(body);
+        var reader = new MultipartReader(Boundary, stream);
+
+        var section = await reader.ReadNextSectionAsync();
+        Assert.NotNull(section);
+
+        await Assert.ThrowsAsync<IOException>(async () =>
+        {
+            await section.Body.CopyToAsync(new MemoryStream());
+        });
     }
 }

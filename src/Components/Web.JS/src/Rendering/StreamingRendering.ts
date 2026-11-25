@@ -6,15 +6,13 @@ import { NavigationEnhancementCallbacks, hasNeverStartedAnyEnhancedPageLoad, per
 import { isWithinBaseUriSpace, toAbsoluteUri } from '../Services/NavigationUtils';
 import { synchronizeDomContent } from './DomMerging/DomSync';
 
-let enableDomPreservation = true;
+let getSsrOptions: () => SsrStartOptions | undefined;
 let navigationEnhancementCallbacks: NavigationEnhancementCallbacks;
 
-export function attachStreamingRenderingListener(options: SsrStartOptions | undefined, callbacks: NavigationEnhancementCallbacks) {
+export function attachStreamingRenderingListener(options: () => SsrStartOptions | undefined, callbacks: NavigationEnhancementCallbacks) {
   navigationEnhancementCallbacks = callbacks;
 
-  if (options?.disableDomPreservation) {
-    enableDomPreservation = false;
-  }
+  getSsrOptions = options;
 
   // By the time <blazor-ssr-end> is in the DOM, we know all the preceding content within the same <blazor-ssr> is also there,
   // so it's time to process it. We can't simply listen for <blazor-ssr>, because connectedCallback may fire before its content
@@ -53,7 +51,7 @@ class BlazorStreamingUpdate extends HTMLElement {
             case 'not-found':
               // not-found template has enhanced nav set to true by default,
               // check for the options to avoid overriding user settings
-              const useEnhancedNav = isEnhancedNav && enableDomPreservation;
+              const useEnhancedNav = isEnhancedNav && !getSsrOptions()?.disableDomPreservation;
               redirect(node, false, useEnhancedNav);
               break;
             case 'error':
@@ -69,51 +67,42 @@ class BlazorStreamingUpdate extends HTMLElement {
 
 function redirect(node: HTMLTemplateElement, changeUrl: boolean, isEnhancedNav: boolean): void {
   // We use 'replace' here because it's closest to the non-progressively-enhanced behavior, and will make the most sense
- // if the async delay was very short, as the user would not perceive having been on the intermediate page.
- const destinationUrl = toAbsoluteUri(node.content.textContent!);
- const isFormPost = node.getAttribute('from') === 'form-post';
- if (isEnhancedNav && isWithinBaseUriSpace(destinationUrl)) {
-   // At this point the destinationUrl might be an opaque URL so we don't know whether it's internal/external or
-   // whether it's even going to the same URL we're currently on. So we don't know how to update the history.
-   // Defer that until the redirection is resolved by performEnhancedPageLoad.
-   const treatAsRedirectionFromMethod = isFormPost ? 'post' : 'get';
-   const fetchOptions = undefined;
-   performEnhancedPageLoad(destinationUrl, /* interceptedLink */ false, fetchOptions, treatAsRedirectionFromMethod, changeUrl);
- } else {
-   if (isFormPost) {
-     // The URL is not yet updated. Push a whole new entry so that 'back' goes back to the pre-redirection location.
-     // WARNING: The following check to avoid duplicating history entries won't work if the redirection is to an opaque URL.
-     // We could change the server-side logic to return URLs in plaintext if they match the current request URL already,
-     // but it's arguably easier to understand that history non-duplication only works for enhanced nav, which is also the
-     // case for non-streaming responses.
-     if (destinationUrl !== location.href) {
-       location.assign(destinationUrl);
-     }
-   } else {
-     // The URL was already updated on the original link click. Replace so that 'back' goes to the pre-redirection location.
-     location.replace(destinationUrl);
-   }
+  // if the async delay was very short, as the user would not perceive having been on the intermediate page.
+  const destinationUrl = toAbsoluteUri(node.content.textContent!);
+  const isFormPost = node.getAttribute('from') === 'form-post';
+  if (isEnhancedNav && isWithinBaseUriSpace(destinationUrl)) {
+    // At this point the destinationUrl might be an opaque URL so we don't know whether it's internal/external or
+    // whether it's even going to the same URL we're currently on. So we don't know how to update the history.
+    // Defer that until the redirection is resolved by performEnhancedPageLoad.
+    const treatAsRedirectionFromMethod = isFormPost ? 'post' : 'get';
+    const fetchOptions = undefined;
+    performEnhancedPageLoad(destinationUrl, /* interceptedLink */ false, fetchOptions, treatAsRedirectionFromMethod, changeUrl);
+  } else {
+    if (isFormPost) {
+      // The URL is not yet updated. Push a whole new entry so that 'back' goes back to the pre-redirection location.
+      // WARNING: The following check to avoid duplicating history entries won't work if the redirection is to an opaque URL.
+      // We could change the server-side logic to return URLs in plaintext if they match the current request URL already,
+      // but it's arguably easier to understand that history non-duplication only works for enhanced nav, which is also the
+      // case for non-streaming responses.
+      if (destinationUrl !== location.href) {
+        location.assign(destinationUrl);
+      }
+    } else {
+      // The URL was already updated on the original link click. Replace so that 'back' goes to the pre-redirection location.
+      location.replace(destinationUrl);
+    }
   }
 }
 
 function insertStreamingContentIntoDocument(componentIdAsString: string, docFrag: DocumentFragment): void {
+  // Apply configuration before streamed components can activate.
+  navigationEnhancementCallbacks.beforeDomUpdate(document);
+  navigationEnhancementCallbacks.beforeDomUpdate(docFrag);
+
   const markers = findStreamingMarkers(componentIdAsString);
   if (markers) {
     const { startMarker, endMarker } = markers;
-    if (enableDomPreservation) {
-      synchronizeDomContent({ startExclusive: startMarker, endExclusive: endMarker }, docFrag);
-    } else {
-      // In this mode we completely delete the old content before inserting the new content
-      const destinationRoot = endMarker.parentNode!;
-      const existingContent = new Range();
-      existingContent.setStart(startMarker, startMarker.textContent!.length);
-      existingContent.setEnd(endMarker, 0);
-      existingContent.deleteContents();
-
-      while (docFrag.childNodes[0]) {
-        destinationRoot.insertBefore(docFrag.childNodes[0], endMarker);
-      }
-    }
+    synchronizeDomContent({ startExclusive: startMarker, endExclusive: endMarker }, docFrag, !getSsrOptions()?.disableDomPreservation);
 
     navigationEnhancementCallbacks.documentUpdated();
   }

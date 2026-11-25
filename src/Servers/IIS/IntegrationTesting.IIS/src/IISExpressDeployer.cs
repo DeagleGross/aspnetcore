@@ -167,6 +167,8 @@ public partial class IISExpressDeployer : IISDeployerBase
                 Logger.LogInformation("Attempting to start IIS Express on port: {port}", port);
                 PrepareConfig(contentRoot, port);
 
+                // Use 2 since 1 is used by the our default site in Http.config
+                DeploymentParameters.SiteName = "2";
                 var parameters = string.IsNullOrEmpty(DeploymentParameters.ServerConfigLocation) ?
                                 string.Format(CultureInfo.InvariantCulture, "/port:{0} /path:\"{1}\" /trace:error /systray:false", uri.Port, contentRoot) :
                                 string.Format(CultureInfo.InvariantCulture, "/site:{0} /config:{1} /trace:error /systray:false", DeploymentParameters.SiteName, DeploymentParameters.ServerConfigLocation);
@@ -177,7 +179,9 @@ public partial class IISExpressDeployer : IISDeployerBase
                 {
                     FileName = iisExpressPath,
                     Arguments = parameters,
-                    UseShellExecute = false,
+                    InheritedHandles = [],
+                    // Prevent orphaned IIS Express processes even if the test process exits during startup.
+                    KillOnParentExit = true,
                     CreateNoWindow = true,
                     RedirectStandardError = true,
                     RedirectStandardOutput = true,
@@ -245,16 +249,20 @@ public partial class IISExpressDeployer : IISDeployerBase
                     Logger.LogInformation("iisexpress Process {pid} failed to bind to port {port}, trying again", process.Id, port);
 
                     // Wait for the process to exit and try again
-                    process.WaitForExit(30 * 1000);
+                    using CancellationTokenSource exitTimeout = new(TimeSpan.FromSeconds(30));
+                    try
+                    {
+                        await process.WaitForExitStatusAsync(exitTimeout.Token);
+                    }
+                    catch (OperationCanceledException) when (exitTimeout.IsCancellationRequested)
+                    {
+                        Logger.LogWarning("iisexpress Process {pid} did not exit within 30 seconds", process.Id);
+                    }
                     await Task.Delay(1000); // Wait a second to make sure the socket is completely cleaned up
                 }
                 else
                 {
                     _hostProcess = process;
-
-                    // Ensure iisexpress.exe is killed if test process termination is non-graceful.
-                    // Prevents locked files when stop debugging unit test.
-                    ProcessTracker.Add(_hostProcess);
 
                     // cache the process start time for verifying log file name.
                     var _ = _hostProcess.StartTime;
@@ -293,7 +301,7 @@ public partial class IISExpressDeployer : IISDeployerBase
             .RequiredElement("modules")
             .GetOrAdd("add", "name", AspNetCoreModuleV2ModuleName);
 
-        ConfigureModuleAndBinding(config.Root, contentRoot, port);
+        ConfigureModuleAndBinding(config.Root, contentRoot, port, siteId: 2);
 
         var webConfigPath = Path.Combine(contentRoot, "web.config");
         if (!DeploymentParameters.PublishApplicationBeforeDeployment && !File.Exists(webConfigPath))
@@ -556,11 +564,11 @@ public partial class IISExpressDeployer : IISDeployerBase
             // See: https://stackoverflow.com/questions/4772092/starting-and-stopping-iis-express-programmatically
 
             SendStopMessageToProcess(hostProcess.Id);
-            if (!hostProcess.WaitForExit((int)ShutdownTimeSpan.TotalMilliseconds))
+            if (!hostProcess.TryWaitForExitStatus(ShutdownTimeSpan, out ProcessExitStatus status))
             {
                 throw new InvalidOperationException($"iisexpress Process {hostProcess.Id} failed to gracefully shutdown.");
             }
-            if (hostProcess.ExitCode != 0)
+            if (status.ExitCode != 0)
             {
                 Logger.LogWarning($"IISExpress exit code is non-zero after graceful shutdown. Exit code: {hostProcess.ExitCode}");
                 throw new InvalidOperationException($"IISExpress exit code is non-zero after graceful shutdown. Exit code: {hostProcess.ExitCode}.");

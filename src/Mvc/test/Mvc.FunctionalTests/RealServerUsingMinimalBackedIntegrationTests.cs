@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.InternalTesting;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Microsoft.AspNetCore.Mvc.FunctionalTests;
@@ -19,6 +20,7 @@ public class RealServerUsingMinimalBackedIntegrationTests : IClassFixture<Kestre
     }
 
     [Fact]
+    [QuarantinedTest("https://github.com/dotnet/aspnetcore/issues/70662", OperatingSystems.Windows)]
     public async Task RetrievesDataFromRealServer()
     {
         // Arrange
@@ -50,6 +52,7 @@ public class RealServerUsingMinimalBackedIntegrationTests : IClassFixture<Kestre
     }
 
     [Fact]
+    [QuarantinedTest("https://github.com/dotnet/aspnetcore/issues/67340", OperatingSystems.Windows)]
     public void CanResolveServices()
     {
         // Act

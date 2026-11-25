@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Primitives;
 
 namespace Microsoft.Net.Http.Headers;
@@ -75,7 +76,7 @@ public static class HeaderUtilities
             throw new ArgumentException("An empty string is not allowed.", parameterName);
         }
 
-        if (HttpRuleParser.GetTokenLength(value, 0) != value.Length)
+        if (!HttpRuleParser.IsToken(value))
         {
             throw new FormatException(string.Format(CultureInfo.InvariantCulture, "Invalid token '{0}'.", value));
         }
@@ -169,16 +170,21 @@ public static class HeaderUtilities
         current++; // skip delimiter.
         current = current + HttpRuleParser.GetWhitespaceLength(input, current);
 
-        if (skipEmptyValues)
+        if (skipEmptyValues && (current < input.Length) && (input[current] == ','))
         {
-            while ((current < input.Length) && (input[current] == ','))
-            {
-                current++; // skip delimiter.
-                current = current + HttpRuleParser.GetWhitespaceLength(input, current);
-            }
+            current = SkipEmptyValues(input, current);
         }
 
         return current;
+    }
+
+    // Rare: one or more consecutive empty values (e.g. "a,,b"). Kept out of line so that
+    // GetNextNonEmptyOrWhitespaceIndex stays small; long runs are skipped vectorized.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int SkipEmptyValues(StringSegment input, int current)
+    {
+        Debug.Assert(input[current] == ',');
+        return current + HttpRuleParser.GetSeparatorsAndWhitespaceLength(input, current, ',');
     }
 
     private static int AdvanceCacheDirectiveIndex(int current, string headerValue)
@@ -690,7 +696,8 @@ public static class HeaderUtilities
     public static StringSegment EscapeAsQuotedString(StringSegment input)
     {
         // By calling this, we know that the string requires quotes around it to be a valid token.
-        var backSlashCount = CountAndCheckCharactersNeedingBackslashesWhenEncoding(input);
+        var inputSpan = input.AsSpan();
+        var backSlashCount = inputSpan.Count('\\') + inputSpan.Count('"');
 
         // 2 for quotes
         return string.Create(input.Length + backSlashCount + 2, input, (span, segment) =>
@@ -714,19 +721,6 @@ public static class HeaderUtilities
                 span[spanIndex++] = segment[i];
             }
         });
-    }
-
-    private static int CountAndCheckCharactersNeedingBackslashesWhenEncoding(StringSegment input)
-    {
-        var numberOfCharactersNeedingEscaping = 0;
-        for (var i = 0; i < input.Length; i++)
-        {
-            if (input[i] == '\\' || input[i] == '\"')
-            {
-                numberOfCharactersNeedingEscaping++;
-            }
-        }
-        return numberOfCharactersNeedingEscaping;
     }
 
     internal static void ThrowIfReadOnly(bool isReadOnly)

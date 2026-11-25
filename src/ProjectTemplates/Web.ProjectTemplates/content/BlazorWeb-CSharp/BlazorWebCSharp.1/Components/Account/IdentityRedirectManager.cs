@@ -1,32 +1,24 @@
 using Microsoft.AspNetCore.Components;
-using Microsoft.AspNetCore.Identity;
-using BlazorWebCSharp._1.Data;
 
 namespace BlazorWebCSharp._1.Components.Account;
 
 internal sealed class IdentityRedirectManager(NavigationManager navigationManager)
 {
-    public const string StatusCookieName = "Identity.StatusMessage";
-
-    private static readonly CookieBuilder StatusCookieBuilder = new()
-    {
-        SameSite = SameSiteMode.Strict,
-        HttpOnly = true,
-        IsEssential = true,
-        MaxAge = TimeSpan.FromSeconds(5),
-    };
+    public const string StatusMessageKey = "Identity.StatusMessage";
 
     public void RedirectTo(string? uri)
     {
-        uri ??= "";
-
-        // Prevent open redirects.
-        if (!Uri.IsWellFormedUriString(uri, UriKind.Relative))
+        // The URI can come from a "returnUrl" query string parameter, which anyone can set in a link to the app.
+        // To prevent open redirects, resolve it to an absolute URI and only use it if it's within the app.
+        // Appending "/" to the path also accepts the app's root URI without a trailing slash, such as "/app?page=2".
+        var baseUri = new Uri(navigationManager.BaseUri);
+        if (!Uri.TryCreate(baseUri, uri, out var redirectUri)
+            || !(redirectUri.GetLeftPart(UriPartial.Path) + "/").StartsWith(baseUri.AbsoluteUri, StringComparison.Ordinal))
         {
-            uri = navigationManager.ToBaseRelativePath(uri);
+            redirectUri = baseUri;
         }
 
-        navigationManager.NavigateTo(uri);
+        navigationManager.NavigateTo(redirectUri.AbsoluteUri);
     }
 
     public void RedirectTo(string uri, Dictionary<string, object?> queryParameters)
@@ -36,19 +28,7 @@ internal sealed class IdentityRedirectManager(NavigationManager navigationManage
         RedirectTo(newUri);
     }
 
-    public void RedirectToWithStatus(string uri, string message, HttpContext context)
-    {
-        context.Response.Cookies.Append(StatusCookieName, message, StatusCookieBuilder.Build(context));
-        RedirectTo(uri);
-    }
-
     private string CurrentPath => navigationManager.ToAbsoluteUri(navigationManager.Uri).GetLeftPart(UriPartial.Path);
 
     public void RedirectToCurrentPage() => RedirectTo(CurrentPath);
-
-    public void RedirectToCurrentPageWithStatus(string message, HttpContext context)
-        => RedirectToWithStatus(CurrentPath, message, context);
-
-    public void RedirectToInvalidUser(UserManager<ApplicationUser> userManager, HttpContext context)
-        => RedirectToWithStatus("Account/InvalidUser", $"Error: Unable to load user with ID '{userManager.GetUserId(context.User)}'.", context);
 }

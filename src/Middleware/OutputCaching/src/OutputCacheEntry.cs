@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers;
-using System.Diagnostics;
 using System.IO.Pipelines;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Primitives;
@@ -88,29 +87,15 @@ internal sealed class OutputCacheEntry : IDisposable
             var index = 0;
             if (count != 0)
             {
-                (string, StringValues)[]? arr = null;
-
+                var arr = new (string, StringValues)[count];
                 foreach (var header in headers)
                 {
                     if (OutputCacheEntryFormatter.ShouldStoreHeader(header.Key))
                     {
-                        arr ??= ArrayPool<(string, StringValues)>.Shared.Rent(count);
                         arr[index++] = (header.Key, header.Value);
                     }
                 }
-
-                if (arr is null)
-                {
-                    Headers = default;
-                }
-                else
-                {
-                    var newArr = new (string, StringValues)[index];
-                    Array.Copy(arr, newArr, index);
-                    Headers = newArr;
-
-                    ArrayPool<(string, StringValues)>.Shared.Return(arr);
-                }
+                Headers = index == 0 ? default : new(arr, 0, index);
             }
         }
         return this;

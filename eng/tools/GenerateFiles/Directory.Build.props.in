@@ -1,8 +1,10 @@
 <Project>
   <PropertyGroup>
     <DefaultNetCoreTargetFramework>${DefaultNetCoreTargetFramework}</DefaultNetCoreTargetFramework>
+    <UseMonoRuntime>false</UseMonoRuntime>
     <ArtifactsShippingPackagesDir>${ArtifactsShippingPackagesDir}</ArtifactsShippingPackagesDir>
     <TreatWarningsAsErrors Condition="'$(BuildingInsideVisualStudio)' != 'true'">true</TreatWarningsAsErrors>
     <LibNetHostAppPackVersion Condition=" '$(LibNetHostAppPackVersion)' == '' ">${LibNetHostAppPackVersion}</LibNetHostAppPackVersion>
+    <_ProductVersionForInstallers>${MicrosoftAspNetCoreAppRuntimeVersion}</_ProductVersionForInstallers>
   </PropertyGroup>
 </Project>

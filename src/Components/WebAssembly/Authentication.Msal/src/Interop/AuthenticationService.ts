@@ -144,6 +144,10 @@ class MsalAuthorizeService implements AuthorizeService {
         this._msalApplication = new Msal.PublicClientApplication(this._settings);
     }
 
+    async initialize(): Promise<void> {
+        await this._msalApplication.initialize();
+    }
+
     getAccount() {
         if (this._account) {
             return this._account;
@@ -283,8 +287,7 @@ class MsalAuthorizeService implements AuthorizeService {
             return await this._msalApplication.loginPopup(request);
         } catch (e) {
             // If the user explicitly cancelled the pop-up, avoid performing a redirect.
-            if (this.isMsalError(e) && e.errorCode !== Msal.BrowserAuthErrorMessage.userCancelledError.code) {
-                this.debug('User canceled sign-in pop-up');
+            if (this.isMsalError(e) && e.errorCode !== Msal.BrowserAuthErrorCodes.userCancelled) {
                 this.signInWithRedirect(request);
             } else {
                 this.debug(`Sign-in pop-up failed: '${(e as Error).message}'.`);
@@ -460,16 +463,21 @@ class MsalAuthorizeService implements AuthorizeService {
 export class AuthenticationService {
 
     static _infrastructureKey = 'Microsoft.Authentication.WebAssembly.Msal';
-    static _initialized: boolean;
+    private static _initialization: Promise<void> | undefined;
     static instance: MsalAuthorizeService;
 
     public static async init(settings: AuthorizeServiceConfiguration, jsLoggingOptions: JavaScriptLoggingOptions) {
-        if (!AuthenticationService._initialized) {
-            AuthenticationService.instance = new MsalAuthorizeService(settings, new Logger(jsLoggingOptions));
-            AuthenticationService.instance.initializeMsalHandler();
-            AuthenticationService._initialized = true;
+        if (!AuthenticationService._initialization) {
+            const instance = new MsalAuthorizeService(settings, new Logger(jsLoggingOptions));
+            AuthenticationService.instance = instance;
+            AuthenticationService._initialization = instance.initialize()
+                .then(() => instance.initializeMsalHandler())
+                .catch(error => {
+                    AuthenticationService._initialization = undefined;
+                    throw error;
+                });
         }
-        return Promise.resolve();
+        return AuthenticationService._initialization;
     }
 
     public static getUser() {

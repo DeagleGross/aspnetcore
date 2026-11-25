@@ -10,7 +10,9 @@ using Microsoft.AspNetCore.Components.Rendering;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Logging.Testing;
 using Microsoft.Extensions.Options;
 using Microsoft.JSInterop;
 using Moq;
@@ -251,6 +253,9 @@ public class CircuitHostTest
         var handler = new Mock<CircuitHandler>(MockBehavior.Strict);
         var tcs = new TaskCompletionSource();
         var reportedErrors = new List<UnhandledExceptionEventArgs>();
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var logger = loggerFactory.CreateLogger<CircuitHost>();
 
         SetupMockInboundActivityHandler(handler);
 
@@ -259,7 +264,10 @@ public class CircuitHostTest
             .Returns(tcs.Task)
             .Verifiable();
 
-        var circuitHost = TestCircuitHost.Create(handlers: new[] { handler.Object }, descriptors: [new ComponentDescriptor()]);
+        var circuitHost = TestCircuitHost.Create(
+            handlers: [handler.Object],
+            descriptors: [new ComponentDescriptor()],
+            logger: logger);
         circuitHost.UnhandledException += (sender, errorInfo) =>
         {
             Assert.Same(circuitHost, sender);
@@ -285,6 +293,47 @@ public class CircuitHostTest
         var aex = Assert.IsType<AggregateException>(reportedErrors.Single().ExceptionObject);
         Assert.Same(ex, aex.InnerExceptions.Single());
         Assert.False(reportedErrors.Single().IsTerminating);
+
+        var log = Assert.Single(sink.Writes, write => write.EventId.Name == "InitializationFailed");
+        Assert.Equal(LogLevel.Debug, log.LogLevel);
+        Assert.Same(aex, log.Exception);
+
+        var error = Assert.Single(sink.Writes, write => write.LogLevel == LogLevel.Error);
+        Assert.Equal("CircuitHandlerFailed", error.EventId.Name);
+        Assert.Same(ex, error.Exception);
+    }
+
+    [Fact]
+    public async Task InitializeAsync_LogsInitialComponentActivationFailureAsError()
+    {
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            descriptors:
+            [
+                new ComponentDescriptor
+                {
+                    ComponentType = typeof(MissingServiceInjectedComponent),
+                    Parameters = ParameterView.Empty,
+                    Sequence = 0,
+                },
+            ],
+            logger: loggerFactory.CreateLogger<CircuitHost>());
+
+        var evt = await Assert.RaisesAsync<UnhandledExceptionEventArgs>(
+            handler => circuitHost.UnhandledException += new UnhandledExceptionEventHandler(handler),
+            handler => circuitHost.UnhandledException -= new UnhandledExceptionEventHandler(handler),
+            () => circuitHost.InitializeAsync(
+                new ProtectedPrerenderComponentApplicationStore(Mock.Of<IDataProtectionProvider>()),
+                default,
+                CancellationToken.None));
+
+        var exception = Assert.IsType<InvalidOperationException>(evt.Arguments.ExceptionObject);
+        Assert.Contains($"There is no registered service of type '{typeof(MissingService).FullName}'.", exception.Message);
+
+        var error = Assert.Single(sink.Writes, write => write.LogLevel == LogLevel.Error);
+        Assert.Equal("RootComponentInitializationFailed", error.EventId.Name);
+        Assert.Same(exception, error.Exception);
     }
 
     [Fact]
@@ -520,6 +569,551 @@ public class CircuitHostTest
         Assert.False(await circuitHost.SendPersistedStateToClient(rootComponents, applicationState, cancellationToken));
     }
 
+    private static async Task<CircuitHost> CreateConnectedCircuitHostAsync(
+        Mock<ISingleClientProxy> mockProxy = null,
+        bool initialize = true)
+    {
+        var ownsProxy = mockProxy is null;
+        mockProxy ??= new Mock<ISingleClientProxy>();
+
+        if (ownsProxy)
+        {
+            mockProxy
+                .Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+        }
+
+        var client = new CircuitClientProxy(mockProxy.Object, "connection-id");
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+
+        if (initialize)
+        {
+            await circuitHost.InitializeAsync(
+                new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+                default,
+                CancellationToken.None);
+
+            // TestCircuitHost has no descriptors so InitializeAsync skips OnConnectionUpAsync.
+            await circuitHost.Renderer.Dispatcher.InvokeAsync(
+                () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+        }
+
+        return circuitHost;
+    }
+
+    [Fact]
+    public async Task AliveConnectedIdle_ReturnsTrueAndSendsMessage()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        var result = await circuitHost.RequestPauseAsync(CancellationToken.None);
+
+        Assert.True(result);
+        proxy.Verify(c => c.SendCoreAsync("JS.RequestPause",
+            It.Is<object[]>(a => a.Length == 0), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ConnectedWhileDispatcherBusy_ReturnsTrueAndSendsMessage()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        var tcs = new TaskCompletionSource();
+        var dispatcherTask = circuitHost.Renderer.Dispatcher.InvokeAsync(() => tcs.Task);
+
+        var result = await circuitHost.RequestPauseAsync(CancellationToken.None);
+
+        Assert.True(result);
+        proxy.Verify(c => c.SendCoreAsync("JS.RequestPause",
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        tcs.SetResult();
+        await dispatcherTask;
+    }
+
+    [Fact]
+    public async Task PauseWhileAsyncHandlerSuspended_NoUnobservedExceptions()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync(It.IsAny<string>(), It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        var unhandledExceptions = new List<Exception>();
+        circuitHost.UnhandledException += (_, e) =>
+            unhandledExceptions.Add((Exception)e.ExceptionObject);
+
+        // Simulate an async event handler that suspends at an await point.
+        var asyncWorkTcs = new TaskCompletionSource();
+        var handlerStarted = new TaskCompletionSource();
+        var handlerTask = circuitHost.Renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            handlerStarted.SetResult();
+            // Simulates: await Http.GetAsync(...) — dispatcher is released here.
+            await asyncWorkTcs.Task;
+            // This continuation runs after the circuit is disposed.
+            // Any attempt to render or use JSRuntime will fail.
+        });
+
+        // Wait for the handler to reach the await point.
+        await handlerStarted.Task;
+
+        // Pause succeeds — the dispatcher is free (handler is suspended).
+        var result = await circuitHost.RequestPauseAsync(CancellationToken.None);
+        Assert.True(result);
+
+        // Dispose the circuit (simulating what PauseCircuitAsync does after persistence).
+        await circuitHost.DisposeAsync();
+
+        // Release the async work — continuation runs on a disposed circuit.
+        asyncWorkTcs.SetResult();
+
+        // Wait for the handler to complete.
+        // The continuation should not throw unobserved exceptions.
+        await handlerTask;
+
+        Assert.Empty(unhandledExceptions);
+    }
+
+    [Fact]
+    public async Task PauseFromHandler_PauseMessageSentBeforeRenderBatch()
+    {
+        var messageOrder = new List<string>();
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync(It.IsAny<string>(), It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Callback((string method, object[] _, CancellationToken _) => messageOrder.Add(method))
+             .Returns(Task.CompletedTask);
+
+        var client = new CircuitClientProxy(proxy.Object, "connection-id");
+        var remoteRenderer = GetRemoteRenderer();
+        var circuitHost = TestCircuitHost.Create(clientProxy: client, remoteRenderer: remoteRenderer);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default, CancellationToken.None);
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+
+        messageOrder.Clear();
+
+        // Simulate an event handler that mutates state and triggers pause.
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(async () =>
+        {
+            // Mutate state — this will cause a render after the handler returns.
+            var component = new TestComponent(builder =>
+            {
+                builder.AddContent(0, "rendered");
+            });
+            circuitHost.Renderer.AssignRootComponentId(component);
+
+            // Trigger pause — SendCoreAsync("JS.RequestPause") is called NOW.
+            await circuitHost.RequestPauseAsync(CancellationToken.None);
+        });
+
+        // JS.RequestPause is sent inside the handler.
+        // JS.RenderBatch (if sent) comes after the handler completes.
+        var pauseIndex = messageOrder.IndexOf("JS.RequestPause");
+        Assert.True(pauseIndex >= 0, "JS.RequestPause should have been sent");
+
+        var renderIndex = messageOrder.IndexOf("JS.RenderBatch");
+        if (renderIndex >= 0)
+        {
+            Assert.True(pauseIndex < renderIndex,
+                "JS.RequestPause should be sent before JS.RenderBatch");
+        }
+    }
+
+    [Fact]
+    public async Task PauseFromOutside_WhileSyncRenderBlocked_PauseWaitsForRender()
+    {
+        var renderReleased = false;
+        var pauseSentAfterRelease = false;
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Callback(() => pauseSentAfterRelease = renderReleased)
+             .Returns(Task.CompletedTask);
+
+        var client = new CircuitClientProxy(proxy.Object, "connection-id");
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default, CancellationToken.None);
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+
+        // ManualResetEventSlim is used because the callback is synchronous (simulating sync rendering).
+        var renderStarted = new ManualResetEventSlim();
+        var releaseRender = new ManualResetEventSlim();
+
+        var dispatcherTask = Task.Run(() => circuitHost.Renderer.Dispatcher.InvokeAsync(() =>
+        {
+            renderStarted.Set();
+            releaseRender.Wait();
+        }));
+
+        renderStarted.Wait();
+
+        var pauseTask = Task.Run(() => circuitHost.RequestPauseAsync(CancellationToken.None));
+
+        renderReleased = true;
+        releaseRender.Set();
+        await dispatcherTask;
+
+        var result = await pauseTask;
+        Assert.True(result);
+        Assert.True(pauseSentAfterRelease, "Pause should be sent after sync render finishes");
+    }
+
+    [Fact]
+    public async Task DispatchedPause_WhileSyncWorkBlocked_PauseWaitsForSyncWork()
+    {
+        var syncWorkReleased = false;
+        var pauseSentAfterRelease = false;
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Callback(() => pauseSentAfterRelease = syncWorkReleased)
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        var syncWorkStarted = new ManualResetEventSlim();
+        var releaseSyncWork = new ManualResetEventSlim();
+
+        var dispatcherTask = Task.Run(() => circuitHost.Renderer.Dispatcher.InvokeAsync(() =>
+        {
+            syncWorkStarted.Set();
+            releaseSyncWork.Wait();
+        }));
+
+        syncWorkStarted.Wait();
+
+        var pauseTask = Task.Run(() => circuitHost.Renderer.Dispatcher.InvokeAsync(
+            async () => await circuitHost.RequestPauseAsync(CancellationToken.None)));
+
+        syncWorkReleased = true;
+        releaseSyncWork.Set();
+        await dispatcherTask;
+
+        var result = await pauseTask;
+        Assert.True(result);
+        Assert.True(pauseSentAfterRelease, "Pause should be sent after sync work finishes");
+    }
+
+    [Fact]
+    public async Task Disposed_ReturnsFalseNoMessage()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+        await circuitHost.DisposeAsync();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+        proxy.Verify(c => c.SendCoreAsync(It.IsAny<string>(),
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Disconnected_ReturnsFalse()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        var client = new CircuitClientProxy(proxy.Object, "connection-id");
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default, CancellationToken.None);
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+
+        client.SetDisconnected();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+        proxy.Verify(c => c.SendCoreAsync(It.IsAny<string>(),
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task NotInitialized_ReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync(initialize: false);
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AlreadyPausedAndDisposed_ReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+
+        await circuitHost.DisposeAsync();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PauseInProgress_IdempotentReturnsTrue()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+
+        proxy.Verify(c => c.SendCoreAsync("JS.RequestPause",
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Exactly(2));
+    }
+
+    [Fact]
+    public async Task CancelledBeforeSend_ReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.False(await circuitHost.RequestPauseAsync(cts.Token));
+    }
+
+    [Fact]
+    public async Task CancelledAfterSend_ReturnsTrue()
+    {
+        using var cts = new CancellationTokenSource();
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        var result = await circuitHost.RequestPauseAsync(cts.Token);
+        cts.Cancel();
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public async Task SendSucceeds_ReturnsTrue_EvenIfClientNeverReceives()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SendThrows_ReturnsFalse()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .ThrowsAsync(new IOException("Connection reset"));
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task AfterReconnect_SendsOnNewConnection()
+    {
+        var oldProxy = new Mock<ISingleClientProxy>();
+        var newProxy = new Mock<ISingleClientProxy>();
+        newProxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+
+        var client = new CircuitClientProxy(oldProxy.Object, "old-connection");
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default, CancellationToken.None);
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+
+        client.Transfer(newProxy.Object, "new-connection");
+
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+        newProxy.Verify(c => c.SendCoreAsync("JS.RequestPause",
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Once);
+        oldProxy.Verify(c => c.SendCoreAsync(It.IsAny<string>(),
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task DisconnectedCache_ReturnsFalse()
+    {
+        var client = new CircuitClientProxy(Mock.Of<ISingleClientProxy>(), "conn");
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default, CancellationToken.None);
+        await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            () => circuitHost.OnConnectionUpAsync(CancellationToken.None));
+
+        client.SetDisconnected();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task MultipleConcurrentCalls_AllReturnTrue()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        var tasks = Enumerable.Range(0, 10)
+            .Select(_ => circuitHost.RequestPauseAsync(CancellationToken.None))
+            .ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, Assert.True);
+    }
+
+    [Fact]
+    public async Task PauseDisposeRepause_OldRefReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+
+        await circuitHost.DisposeAsync();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task StaleReference_ReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+        var circuit = circuitHost.Circuit;
+        await circuitHost.DisposeAsync();
+
+        Assert.False(await circuit.RequestCircuitPauseAsync());
+    }
+
+    [Fact]
+    public async Task DrainMultipleCircuits_AllAccepted()
+    {
+        var hosts = new List<CircuitHost>();
+        for (var i = 0; i < 5; i++)
+        {
+            hosts.Add(await CreateConnectedCircuitHostAsync());
+        }
+
+        var tasks = hosts.Select(h => h.RequestPauseAsync(CancellationToken.None)).ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        Assert.All(results, Assert.True);
+    }
+
+    [Fact]
+    public async Task HostShutdownCancels_ReturnsFalse()
+    {
+        var tcs = new TaskCompletionSource();
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns((string _, object[] _, CancellationToken ct) =>
+             {
+                 ct.ThrowIfCancellationRequested();
+                 return tcs.Task;
+             });
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        using var cts = new CancellationTokenSource();
+        var pauseTask = circuitHost.RequestPauseAsync(cts.Token);
+
+        cts.Cancel();
+        tcs.SetCanceled();
+
+        Assert.False(await pauseTask);
+    }
+
+    [Fact]
+    public async Task RecoverableRenderingError_StillConnected_ReturnsTrue()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task FatalRenderingError_Disposed_ReturnsFalse()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+        await circuitHost.DisposeAsync();
+
+        Assert.False(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    // Initialized but OnConnectionUpAsync not yet fired (Blazor Web path without descriptors).
+    [Fact]
+    public async Task DuringOnCircuitOpenedAsync_ReturnsFalse()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy, initialize: false);
+        await circuitHost.InitializeAsync(
+            new ProtectedPrerenderComponentApplicationStore(new EphemeralDataProtectionProvider()),
+            default,
+            CancellationToken.None);
+
+        var result = await circuitHost.RequestPauseAsync(CancellationToken.None);
+        Assert.False(result);
+
+        proxy.Verify(c => c.SendCoreAsync(It.IsAny<string>(),
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task ClientUnresponsive_ServerReturnsTrue()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        Assert.True(await circuitHost.RequestPauseAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PublicApi_DelegatesToCircuitHost_Connected()
+    {
+        var proxy = new Mock<ISingleClientProxy>();
+        proxy.Setup(c => c.SendCoreAsync("JS.RequestPause", It.IsAny<object[]>(), It.IsAny<CancellationToken>()))
+             .Returns(Task.CompletedTask);
+        var circuitHost = await CreateConnectedCircuitHostAsync(proxy);
+
+        Assert.True(await circuitHost.Circuit.RequestCircuitPauseAsync());
+        proxy.Verify(c => c.SendCoreAsync("JS.RequestPause",
+            It.IsAny<object[]>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task PublicApi_DelegatesToCircuitHost_Disconnected()
+    {
+        var client = new CircuitClientProxy();
+        var circuitHost = TestCircuitHost.Create(clientProxy: client);
+
+        Assert.False(await circuitHost.Circuit.RequestCircuitPauseAsync());
+    }
+
+    [Fact]
+    public async Task CalledFromDispatcher_NoDeadlock_ReturnsTrue()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        var result = await circuitHost.Renderer.Dispatcher.InvokeAsync(
+            async () => await circuitHost.Circuit.RequestCircuitPauseAsync());
+
+        Assert.True(result);
+    }
+
+    [Fact]
+    public async Task CalledFromBackgroundThread_ReturnsTrue()
+    {
+        var circuitHost = await CreateConnectedCircuitHostAsync();
+
+        var result = await Task.Run(() => circuitHost.Circuit.RequestCircuitPauseAsync());
+
+        Assert.True(result);
+    }
+
     [Fact]
     public async Task UpdateRootComponents_CanAddNewRootComponent()
     {
@@ -540,6 +1134,108 @@ public class CircuitHostTest
         var componentState = ((TestRemoteRenderer)circuitHost.Renderer).GetTestComponentState(0);
         var component = Assert.IsType<DynamicallyAddedComponent>(componentState.Component);
         Assert.Equal(expectedMessage, component.Message);
+    }
+
+    [Fact]
+    public async Task UpdateRootComponents_LogsInitialComponentActivationFailureAsError()
+    {
+        // Arrange
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            remoteRenderer: GetRemoteRenderer(),
+            serviceScope: new ServiceCollection().BuildServiceProvider().CreateAsyncScope(),
+            logger: loggerFactory.CreateLogger<CircuitHost>());
+
+        // Act
+        var evt = await Assert.RaisesAsync<UnhandledExceptionEventArgs>(
+            handler => circuitHost.UnhandledException += new UnhandledExceptionEventHandler(handler),
+            handler => circuitHost.UnhandledException -= new UnhandledExceptionEventHandler(handler),
+            () => AddComponentAsync<MissingServiceInjectedComponent>(circuitHost, 1));
+
+        // Assert
+        var exception = Assert.IsType<InvalidOperationException>(evt.Arguments.ExceptionObject);
+        Assert.Contains($"There is no registered service of type '{typeof(MissingService).FullName}'.", exception.Message);
+
+        var error = Assert.Single(sink.Writes, write => write.LogLevel == LogLevel.Error);
+        Assert.Equal("RootComponentInitializationFailed", error.EventId.Name);
+        Assert.Same(exception, error.Exception);
+    }
+
+    [Fact]
+    public async Task UpdateRootComponents_CircuitHandlerFailureLogsSingleError()
+    {
+        var handler = new Mock<CircuitHandler>(MockBehavior.Strict);
+        SetupMockInboundActivityHandler(handler);
+        handler
+            .Setup(h => h.OnCircuitOpenedAsync(It.IsAny<Circuit>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidTimeZoneException());
+
+        var services = new ServiceCollection()
+            .AddSingleton(handler.Object)
+            .BuildServiceProvider();
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            remoteRenderer: GetRemoteRenderer(),
+            serviceScope: services.CreateAsyncScope(),
+            logger: loggerFactory.CreateLogger<CircuitHost>());
+
+        await Assert.RaisesAsync<UnhandledExceptionEventArgs>(
+            callback => circuitHost.UnhandledException += new UnhandledExceptionEventHandler(callback),
+            callback => circuitHost.UnhandledException -= new UnhandledExceptionEventHandler(callback),
+            () => AddComponentAsync<TestComponent>(circuitHost, 1));
+
+        var error = Assert.Single(sink.Writes, write => write.LogLevel == LogLevel.Error);
+        Assert.Equal("CircuitHandlerFailed", error.EventId.Name);
+
+        var wrapper = Assert.Single(sink.Writes, write => write.EventId.Name == "UpdateRootComponentsFailed");
+        Assert.Equal(LogLevel.Debug, wrapper.LogLevel);
+    }
+
+    [Fact]
+    public async Task UpdateRootComponents_InvalidStateTransitionDoesNotLogError()
+    {
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            descriptors: [new ComponentDescriptor()],
+            logger: loggerFactory.CreateLogger<CircuitHost>());
+
+        await Assert.RaisesAsync<UnhandledExceptionEventArgs>(
+            callback => circuitHost.UnhandledException += new UnhandledExceptionEventHandler(callback),
+            callback => circuitHost.UnhandledException -= new UnhandledExceptionEventHandler(callback),
+            () => circuitHost.UpdateRootComponents(
+                new RootComponentOperationBatch { BatchId = 1, Operations = [] },
+                null,
+                isRestore: false,
+                CancellationToken.None));
+
+        Assert.DoesNotContain(sink.Writes, write => write.LogLevel == LogLevel.Error);
+        var wrapper = Assert.Single(sink.Writes, write => write.EventId.Name == "UpdateRootComponentsFailed");
+        Assert.Equal(LogLevel.Debug, wrapper.LogLevel);
+    }
+
+    [Fact]
+    public async Task UpdateRootComponents_InboundActivityFailureDoesNotLogError()
+    {
+        var services = new ServiceCollection()
+            .AddSingleton<CircuitHandler>(new ThrowingInboundActivityCircuitHandler())
+            .BuildServiceProvider();
+        var sink = new TestSink();
+        var loggerFactory = new TestLoggerFactory(sink, enabled: true);
+        var circuitHost = TestCircuitHost.Create(
+            remoteRenderer: GetRemoteRenderer(),
+            serviceScope: services.CreateAsyncScope(),
+            logger: loggerFactory.CreateLogger<CircuitHost>());
+
+        var evt = await Assert.RaisesAsync<UnhandledExceptionEventArgs>(
+            callback => circuitHost.UnhandledException += new UnhandledExceptionEventHandler(callback),
+            callback => circuitHost.UnhandledException -= new UnhandledExceptionEventHandler(callback),
+            () => AddComponentAsync<TestComponent>(circuitHost, 1));
+
+        Assert.IsType<InvalidTimeZoneException>(evt.Arguments.ExceptionObject);
+        Assert.DoesNotContain(sink.Writes, write => write.LogLevel == LogLevel.Error);
     }
 
     [Fact]
@@ -785,7 +1481,13 @@ public class CircuitHostTest
     private async Task AddComponentAsync<TComponent>(CircuitHost circuitHost, int ssrComponentId, Dictionary<string, object> parameters = null, string componentKey = "")
         where TComponent : IComponent
     {
-        var addOperation = new RootComponentOperation
+        // Add component
+        await circuitHost.UpdateRootComponents(new() { Operations = [CreateAddOperation<TComponent>(ssrComponentId, parameters, componentKey)] }, null, false, CancellationToken.None);
+    }
+
+    private RootComponentOperation CreateAddOperation<TComponent>(int ssrComponentId, Dictionary<string, object> parameters = null, string componentKey = "")
+        where TComponent : IComponent
+        => new()
         {
             Type = RootComponentOperationType.Add,
             SsrComponentId = ssrComponentId,
@@ -794,10 +1496,6 @@ public class CircuitHostTest
                 componentType: typeof(TComponent),
                 parameters: CreateWebRootComponentParameters(parameters)),
         };
-
-        // Add component
-        await circuitHost.UpdateRootComponents(new() { Operations = [addOperation] }, null, false, CancellationToken.None);
-    }
 
     private async Task UpdateComponentAsync<TComponent>(CircuitHost circuitHost, int ssrComponentId, Dictionary<string, object> parameters = null, string componentKey = "")
     {
@@ -912,7 +1610,7 @@ public class CircuitHostTest
                   NullLogger.Instance,
                   CreateJSRuntime(new CircuitOptions()),
                   new CircuitJSComponentInterop(new CircuitOptions()))
-        {            
+        {
         }
 
         public ComponentState GetTestComponentState(int id)
@@ -925,6 +1623,13 @@ public class CircuitHostTest
 
         private static RemoteJSRuntime CreateJSRuntime(CircuitOptions options)
             => new RemoteJSRuntime(Options.Create(options), Options.Create(new HubOptions<ComponentHub>()), null);
+    }
+
+    private sealed class ThrowingInboundActivityCircuitHandler : CircuitHandler
+    {
+        public override Func<CircuitInboundActivityContext, Task> CreateInboundActivityHandler(
+            Func<CircuitInboundActivityContext, Task> next)
+            => _ => throw new InvalidTimeZoneException();
     }
 
     private class DispatcherComponent : ComponentBase, IDisposable
@@ -1108,6 +1813,14 @@ public class CircuitHostTest
             _disposeTcs.SetResult();
         }
     }
+
+    private sealed class MissingServiceInjectedComponent : ComponentBase
+    {
+        [Inject]
+        public MissingService Service { get; set; } = default!;
+    }
+
+    private sealed class MissingService;
 
     private class TestComponent() : IComponent, IHandleAfterRender
     {

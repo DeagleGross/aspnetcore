@@ -24,12 +24,14 @@ public class WebsiteProcess : IDisposable
     public WebsiteProcess(string path, ITestOutputHelper output)
     {
         _output = new StringBuilder();
+        _startTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _process = new Process();
         _process.StartInfo = new ProcessStartInfo
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            InheritedHandles = [],
             FileName = "dotnet",
             Arguments = path
         };
@@ -41,8 +43,6 @@ public class WebsiteProcess : IDisposable
         _process.Start();
 
         _processEx = new ProcessEx(output, _process, Timeout.InfiniteTimeSpan);
-
-        _startTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     public string GetOutput()
@@ -95,6 +95,11 @@ public class WebsiteProcess : IDisposable
             {
                 _output.AppendLine("ERROR: " + data);
             }
+        }
+
+        if (!IsReady)
+        {
+            _startTcs.TrySetException(new InvalidOperationException("Received error before application started."));
         }
     }
 

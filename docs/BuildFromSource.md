@@ -22,11 +22,11 @@ To get started, fork this repo and then clone it locally. This workflow assumes 
 
 1. If you're on Windows, update the PowerShell execution policy on your machine. For more information on execution policies, review [the execution policy docs](https://learn.microsoft.com/powershell/module/microsoft.powershell.security/set-executionpolicy). To do this, open a PowerShell prompt and issue the following command:
 
+    > :warning: All Windows commands below assume a PowerShell prompt.
+
     ```powershell
     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
     ```
-
-    > :warning: All Windows commands below assume a PowerShell prompt.
 
 1. If you're on Windows, install Visual Studio (even if you aren't using it to build) to get the required C++ components and native tools. To install Visual Studio on your machine, use the official installer script in the repo.
 
@@ -35,7 +35,7 @@ To get started, fork this repo and then clone it locally. This workflow assumes 
     > To modify an existing Visual Studio installation, [follow the instructions for installing from a configuration file](https://learn.microsoft.com/visualstudio/install/import-export-installation-configurations#import-a-configuration) and use the `.vsconfig` file located in the root of the repository:
 
     ```powershell
-    ./eng/scripts/InstallVisualStudio.ps1 Enterprise Preview
+    ./eng/scripts/InstallVisualStudio.ps1 -Edition Enterprise -Channel Preview
     ```
 
     Replace `Enterprise` with `Professional` or `Community` if that is your preferred Visual Studio edition.
@@ -118,6 +118,8 @@ The steps you follow next depend on your preferred development environment:
     . ./activate.ps1
     ```
 
+    If you tried to activate before restoring and the repository SDK was missing, run the platform's `restore` script from the repo root, wait for it to complete, and activate again.
+
 1. After you've activated the locally installed .NET, open the project you want to modify by running the `code` command in the project's directory. For example, if you want to modify the`src/Http` project:
 
     ```bash
@@ -189,6 +191,14 @@ This ASP.NET Core repo contains a top-level build script located at `eng/build.c
 
 > :warning: We do _not_ recommend running the top-level build script for the repo. You'll rarely need to build the entire repo; building a sub-project is usually sufficient for your workflow.
 
+### Choosing a validation scope
+
+Check the build script in the area you changed (`build.cmd` on Windows, `build.sh` on Linux/macOS) and the area's `AGENTS.md` for prerequisites such as submodules, generated assets, or native tools. For a focused change, select a specific project using the repo-level script's `-projects` argument (see below), or use `dotnet build` or `dotnet test` with a project file after activation and any required generated files are in place. Use the area build when the change needs its broader integration coverage. If a broader build stops on an unrelated prerequisite before reaching your target, report both the prerequisite and what the focused build actually covered; don't treat the broader build as passing.
+
+For projects with multiple target frameworks, check the project file and build each target supported by your environment. Confirm that the intended tests actually ran and that required packages or other build outputs were produced; a zero exit code by itself does not establish this.
+
+Projects share the repository `artifacts` directory for build outputs. Avoid concurrent build/test invocations whose project graphs overlap in that directory; run them sequentially unless their outputs are isolated or the tests use an already-built graph. If `CS2012` or a file-in-use error occurs during overlapping builds, retry the affected command serially before treating it as a source failure.
+
 ### Common arguments
 
 Common arguments that can be invoked on the `build.cmd` or `build.sh` scripts include:
@@ -214,7 +224,32 @@ While it's typically better to use the project-specific build scripts, the repo-
 | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `.\eng\build.cmd -all -pack -arch x64`                                                           | Build development packages for all the shipping projects in the repo. Must be run from the root of the repo.                            |
 | `.\eng\build.cmd -test -projects .\src\Framework\test\Microsoft.AspNetCore.App.UnitTests.csproj` | Run all the unit tests in the `Microsoft.AspNetCore.App.UnitTests` project.                                                             |
-| `.\eng\build.cmd -noBuildNative -noBuildManage`                                                  | Builds the repo and skips native and managed projects, a quicker alternative to `./restore.cmd`. Must be run from the root of the repo. |
+| `.\eng\build.cmd -noBuildNative -noBuildManaged`                                                 | Builds the repo and skips native and managed projects, a quicker alternative to `./restore.cmd`. Must be run from the root of the repo. |
+
+### Native tool ABI test
+
+The Linux x64 package-build jobs run an ABI canary after the build completes for pull request builds only.
+An `afterBuild` step targeting the agent host launches a separate runtime-only
+container; Docker is not run inside the build container.
+The test mounts the `aspnetcoretools` native publish output read-only and runs
+certificate and user-secret operations without an SDK or rebuilding.
+
+To run it locally after building the native tools, use Docker on the host.
+Select the repository's `DefaultNetCoreTargetFramework` from `eng/Versions.props`
+(`net12.0` on this branch), rather than retained outputs for older frameworks:
+
+```bash
+bash eng/scripts/run-native-abi-tests.sh artifacts/bin/aspnetcoretools/Release/net12.0/linux-x64/publish
+```
+
+The image is `mcr.microsoft.com/dotnet-buildtools/prereqs:ubuntu-18.04-net11.0-abi-test-amd64`.
+Its runtime prerequisites also cover the current main-branch tools.
+Ubuntu 18.04/glibc 2.27 matches the current Bionic cross sysroot.
+If the .NET 12 baseline changes to Ubuntu 20.04, update this gate's image before
+changing the producing runtime/cross-build images; this is not a final .NET 12 baseline decision.
+Missing native output, container failures, and failed tool assertions fail the build.
+Container output is saved under `artifacts/log/NativeAbi`.
+Package installation, arm64, and musl are not covered by this gate.
 
 ## Complete list of repo dependencies
 

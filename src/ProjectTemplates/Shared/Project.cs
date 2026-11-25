@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Diagnostics;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -19,6 +20,8 @@ public class Project : IDisposable
 {
     private const string _urlsNoHttps = "http://127.0.0.1:0";
     private const string _urls = "http://127.0.0.1:0;https://127.0.0.1:0";
+    // Generated projects run with a copied SDK. Do not let the parent MSBuild process redirect that host back to the repository SDK.
+    private const string _msBuildSdksPathEnvironmentVariable = "MSBuildSDKsPath";
 
     public static string ArtifactsLogDir
     {
@@ -69,11 +72,17 @@ public class Project : IDisposable
         bool isItemTemplate = false,
         string[] args = null,
         // Used to set special options in MSBuild
-        IDictionary<string, string> environmentVariables = null)
+        IDictionary<string, string> environmentVariables = null,
+        string restoreArgs = null)
     {
+        if (templateName.Contains(' '))
+        {
+            throw new ArgumentException("Template name cannot contain spaces.");
+        }
+
         var hiveArg = $"--debug:disable-sdk-templates --debug:custom-hive \"{TemplatePackageInstaller.CustomHivePath}\"";
         var argString = $"new {templateName} {hiveArg}";
-        environmentVariables ??= new Dictionary<string, string>();
+        environmentVariables = AddBootstrapSdkEnvironmentVariables(environmentVariables);
         if (!isItemTemplate)
         {
             argString += " --no-restore";
@@ -111,6 +120,13 @@ public class Project : IDisposable
         // We omit the hive argument and the template output dir as they are not relevant and add noise.
         ProjectArguments = argString.Replace(hiveArg, "");
 
+        // Only add -n parameter if ProjectName is set and args doesn't already contain -n or --name
+        if (!string.IsNullOrEmpty(ProjectName) &&
+            args?.Any(a => a.Contains("-n ") || a.Contains("--name ") || a == "-n" || a == "--name") != true)
+        {
+            argString += $" -n \"{ProjectName}\"";
+        }
+
         argString += $" -o {TemplateOutputDir}";
 
         if (Directory.Exists(TemplateOutputDir))
@@ -119,7 +135,13 @@ public class Project : IDisposable
             Directory.Delete(TemplateOutputDir, recursive: true);
         }
 
-        using var createExecution = ProcessEx.Run(Output, AppContext.BaseDirectory, DotNetMuxer.MuxerPathOrDefault(), argString, environmentVariables);
+        using var createExecution = ProcessEx.Run(
+            Output,
+            AppContext.BaseDirectory,
+            DotNetMuxer.MuxerPathOrDefault(),
+            argString,
+            environmentVariables,
+            envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await createExecution.Exited;
 
         var createResult = new ProcessResult(createExecution);
@@ -128,7 +150,18 @@ public class Project : IDisposable
         if (!isItemTemplate)
         {
             argString = "restore /bl";
-            using var restoreExecution = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), argString, environmentVariables);
+            if (!string.IsNullOrEmpty(restoreArgs))
+            {
+                argString += $" {restoreArgs}";
+            }
+
+            using var restoreExecution = ProcessEx.Run(
+                Output,
+                TemplateOutputDir,
+                DotNetMuxer.MuxerPathOrDefault(),
+                argString,
+                environmentVariables,
+                envVarToRemove: _msBuildSdksPathEnvironmentVariable);
             await restoreExecution.Exited;
 
             var restoreResult = new ProcessResult(restoreExecution);
@@ -148,13 +181,20 @@ public class Project : IDisposable
     internal async Task RunDotNetPublishAsync(IDictionary<string, string> packageOptions = null, string additionalArgs = null, bool noRestore = true)
     {
         Output.WriteLine("Publishing ASP.NET Core application...");
+        packageOptions = AddBootstrapSdkEnvironmentVariables(packageOptions);
 
         // Avoid restoring as part of build or publish. These projects should have already restored as part of running dotnet new. Explicitly disabling restore
         // should avoid any global contention and we can execute a build or publish in a lock-free way
 
         var restoreArgs = noRestore ? "--no-restore" : null;
 
-        using var execution = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), $"publish {restoreArgs} -c Release /bl {additionalArgs}", packageOptions);
+        using var execution = ProcessEx.Run(
+            Output,
+            TemplateOutputDir,
+            DotNetMuxer.MuxerPathOrDefault(),
+            $"publish {restoreArgs} -c Release /bl {additionalArgs}",
+            packageOptions,
+            envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await execution.Exited;
 
         var result = new ProcessResult(execution);
@@ -173,11 +213,18 @@ public class Project : IDisposable
     internal async Task RunDotNetBuildAsync(IDictionary<string, string> packageOptions = null, string additionalArgs = null, bool errorOnBuildWarning = true)
     {
         Output.WriteLine("Building ASP.NET Core application...");
+        packageOptions = AddBootstrapSdkEnvironmentVariables(packageOptions);
 
         // Avoid restoring as part of build or publish. These projects should have already restored as part of running dotnet new. Explicitly disabling restore
         // should avoid any global contention and we can execute a build or publish in a lock-free way
 
-        using var execution = ProcessEx.Run(Output, TemplateOutputDir, DotNetMuxer.MuxerPathOrDefault(), $"build --no-restore -c Debug /bl {additionalArgs}", packageOptions);
+        using var execution = ProcessEx.Run(
+            Output,
+            TemplateOutputDir,
+            DotNetMuxer.MuxerPathOrDefault(),
+            $"build --no-restore -c Debug /bl {additionalArgs}",
+            packageOptions,
+            envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await execution.Exited;
 
         var result = new ProcessResult(execution);
@@ -191,6 +238,19 @@ public class Project : IDisposable
         CaptureBinLogOnFailure(execution);
 
         Assert.True(0 == result.ExitCode, ErrorMessages.GetFailedProcessMessage("build", this, result));
+    }
+
+    private static IDictionary<string, string> AddBootstrapSdkEnvironmentVariables(IDictionary<string, string> environmentVariables)
+    {
+        environmentVariables ??= new Dictionary<string, string>();
+
+        // The Helix payload places Directory.Build.props outside the generated projects' parent
+        // directory hierarchy, so pass runtime selection and bootstrap SDK pruning workarounds to child processes.
+        environmentVariables["UseMonoRuntime"] = "false";
+        environmentVariables["LoadPrunePackageDataFromNearestFramework"] = "true";
+        environmentVariables["AllowMissingPrunePackageData"] = "true";
+
+        return environmentVariables;
     }
 
     internal AspNetProcess StartBuiltProjectAsync(bool hasListeningUri = true, ILogger logger = null, bool noHttps = false)
@@ -224,6 +284,87 @@ public class Project : IDisposable
         return new AspNetProcess(DevCert, Output, TemplatePublishDir, projectDll, environment, published: true, hasListeningUri: hasListeningUri, usePublishedAppHost: usePublishedAppHost);
     }
 
+    internal (ProcessEx process, string listeningUri) ServePublishedStandaloneApp(ITestOutputHelper output)
+    {
+        output.WriteLine("Running blazor-gateway on published output...");
+
+        var gatewayAssemblyPath = ResolveGatewayAssemblyPath();
+        var endpointsManifestPath = Path.Combine(TemplatePublishDir, $"{ProjectName}.staticwebassets.endpoints.json");
+        Assert.True(File.Exists(gatewayAssemblyPath), $"Expected the gateway assembly to exist at '{gatewayAssemblyPath}'.");
+        Assert.True(File.Exists(endpointsManifestPath), $"Expected the static web assets endpoints manifest to exist at '{endpointsManifestPath}'.");
+
+        var args = string.Join(
+            " ",
+            $"\"{gatewayAssemblyPath}\"",
+            "--urls http://127.0.0.1:0",
+            "--environment Development",
+            $"--contentRoot \"{TemplatePublishDir}\"",
+            $"--ClientApps:app:EndpointsManifest \"{endpointsManifestPath}\"",
+            "--ClientApps:app:PathPrefix \"\"");
+
+        var serveProcess = ProcessEx.Run(output, TemplatePublishDir, DotNetMuxer.MuxerPathOrDefault(), args);
+        var listeningUri = ResolveListeningUrl(serveProcess);
+        return (serveProcess, listeningUri);
+
+        static string ResolveListeningUrl(ProcessEx process)
+        {
+            const string listeningMessagePrefix = "Now listening on: ";
+            var buffer = new List<string>();
+            try
+            {
+                foreach (var line in process.OutputLinesAsEnumerable)
+                {
+                    if (line != null)
+                    {
+                        buffer.Add(line);
+                        var trimmedLine = line.Trim();
+                        var prefixIndex = trimmedLine.IndexOf(listeningMessagePrefix, StringComparison.Ordinal);
+                        if (prefixIndex >= 0)
+                        {
+                            var listeningUri = trimmedLine[(prefixIndex + listeningMessagePrefix.Length)..];
+                            if (Uri.TryCreate(listeningUri, UriKind.Absolute, out _))
+                            {
+                                return listeningUri;
+                            }
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
+
+            throw new InvalidOperationException(
+                $"Couldn't find listening url:\n{string.Join(Environment.NewLine, buffer.Append(process.Error))}");
+        }
+    }
+
+    private static string ResolveGatewayAssemblyPath()
+    {
+        var packageRoot = ProcessEx.NuGetPackagesRestorePath;
+        if (!string.IsNullOrEmpty(packageRoot))
+        {
+            var gatewayPackageRoot = Path.Combine(packageRoot, "microsoft.aspnetcore.components.gateway");
+            if (Directory.Exists(gatewayPackageRoot))
+            {
+                var matchingVersion = Directory.EnumerateDirectories(gatewayPackageRoot)
+                    .OrderByDescending(Path.GetFileName)
+                    .FirstOrDefault();
+
+                if (!string.IsNullOrEmpty(matchingVersion))
+                {
+                    var candidate = Path.Combine(matchingVersion, "tools", "blazor-gateway.dll");
+                    if (File.Exists(candidate))
+                    {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        throw new FileNotFoundException("Could not locate the built Blazor gateway assembly. Ensure the package has been restored and the gateway package exists in the NuGet cache.");
+    }
+
     internal async Task RunDotNetEfCreateMigrationAsync(string migrationName)
     {
         var args = $"--verbose --no-build migrations add {migrationName}";
@@ -238,7 +379,7 @@ public class Project : IDisposable
             command = "dotnet-ef";
         }
 
-        using var result = ProcessEx.Run(Output, TemplateOutputDir, command, args);
+        using var result = ProcessEx.Run(Output, TemplateOutputDir, command, args, envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await result.Exited;
         var processResult = new ProcessResult(result);
         Assert.True(0 == processResult.ExitCode, ErrorMessages.GetFailedProcessMessage("run EF migrations", this, processResult));
@@ -258,7 +399,7 @@ public class Project : IDisposable
             command = "dotnet-ef";
         }
 
-        using var result = ProcessEx.Run(Output, TemplateOutputDir, command, args);
+        using var result = ProcessEx.Run(Output, TemplateOutputDir, command, args, envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await result.Exited;
         var processResult = new ProcessResult(result);
         Assert.True(0 == processResult.ExitCode, ErrorMessages.GetFailedProcessMessage("update database", this, processResult));
@@ -286,11 +427,13 @@ public class Project : IDisposable
         }";
 
         // This comparison can break depending on how GIT checked out newlines on different files.
-        Assert.Contains(RemoveNewLines(emptyMigration), RemoveNewLines(contents));
+        // Whitespace is also normalized so the assertion works regardless of indentation
+        // (e.g. block-scoped vs file-scoped namespaces in generated migrations).
+        Assert.Contains(NormalizeWhitespace(emptyMigration), NormalizeWhitespace(contents));
 
-        static string RemoveNewLines(string str)
+        static string NormalizeWhitespace(string str)
         {
-            return str.Replace("\n", string.Empty).Replace("\r", string.Empty);
+            return new string(str.Where(c => !char.IsWhiteSpace(c)).ToArray());
         }
     }
 
@@ -347,6 +490,42 @@ public class Project : IDisposable
 
             // Check there are no more launch profiles defined
             Assert.False(profilesEnumerator.MoveNext());
+        }
+    }
+
+    public async Task VerifyDnsCompliantHostname(string expectedHostname)
+    {
+        var launchSettingsPath = Path.Combine(TemplateOutputDir, "Properties", "launchSettings.json");
+        Assert.True(File.Exists(launchSettingsPath), $"launchSettings.json not found at {launchSettingsPath}");
+
+        var launchSettingsContent = await File.ReadAllTextAsync(launchSettingsPath);
+        using var launchSettings = JsonDocument.Parse(launchSettingsContent);
+
+        var profiles = launchSettings.RootElement.GetProperty("profiles");
+
+        foreach (var profile in profiles.EnumerateObject())
+        {
+            if (profile.Value.TryGetProperty("applicationUrl", out var applicationUrl))
+            {
+                var urls = applicationUrl.GetString();
+                if (!string.IsNullOrEmpty(urls))
+                {
+                    // Verify the hostname in the URL matches expected DNS-compliant format
+                    Assert.Contains($"{expectedHostname}.dev.localhost:", urls);
+
+                    // Verify no underscores in hostname (RFC 952/1123 compliance)
+                    var hostnamePattern = @"://([^:]+)\.dev\.localhost:";
+                    var matches = System.Text.RegularExpressions.Regex.Matches(urls, hostnamePattern);
+                    foreach (System.Text.RegularExpressions.Match match in matches)
+                    {
+                        var hostname = match.Groups[1].Value;
+                        Assert.DoesNotContain("_", hostname);
+                        Assert.DoesNotContain(".", hostname);
+                        Assert.False(hostname.StartsWith("-", StringComparison.Ordinal), $"Hostname '{hostname}' should not start with hyphen (RFC 952/1123 violation)");
+                        Assert.False(hostname.EndsWith("-", StringComparison.Ordinal), $"Hostname '{hostname}' should not end with hyphen (RFC 952/1123 violation)");
+                    }
+                }
+            }
         }
     }
 
@@ -419,7 +598,9 @@ public class Project : IDisposable
             DotNetMuxer.MuxerPathOrDefault(),
             arguments +
                 $" --debug:disable-sdk-templates --debug:custom-hive \"{TemplatePackageInstaller.CustomHivePath}\"" +
-                $" -o {TemplateOutputDir}");
+                $" -o {TemplateOutputDir}",
+            envVars: AddBootstrapSdkEnvironmentVariables(null),
+            envVarToRemove: _msBuildSdksPathEnvironmentVariable);
         await result.Exited;
         Assert.True(result.ExitCode == 0, result.GetFormattedOutput());
     }

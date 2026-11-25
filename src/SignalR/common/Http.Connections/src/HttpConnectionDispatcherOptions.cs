@@ -5,6 +5,7 @@ using System.IO.Pipelines;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Connections;
+using Microsoft.AspNetCore.Connections.Features;
 
 namespace Microsoft.AspNetCore.Http.Connections;
 
@@ -16,12 +17,12 @@ public class HttpConnectionDispatcherOptions
     // Selected because this is the default value of PipeWriter.PauseWriterThreshold.
     // There maybe the opportunity for performance gains by tuning this default.
     private const int DefaultBufferSize = 65536;
+    private const string UseLegacyLongPollingAuthenticationRefreshSwitch =
+        "Microsoft.AspNetCore.Http.Connections.UseLegacyLongPollingAuthenticationRefresh";
 
     private PipeOptions? _transportPipeOptions;
     private PipeOptions? _appPipeOptions;
-    private TimeSpan _transportSendTimeout;
-    private long _transportMaxBufferSize;
-    private long _applicationMaxBufferSize;
+    private bool? _useLegacyLongPollingAuthenticationRefresh;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HttpConnectionDispatcherOptions"/> class.
@@ -65,12 +66,12 @@ public class HttpConnectionDispatcherOptions
     /// </remarks>
     public long TransportMaxBufferSize
     {
-        get => _transportMaxBufferSize;
+        get;
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
 
-            _transportMaxBufferSize = value;
+            field = value;
         }
     }
 
@@ -82,12 +83,12 @@ public class HttpConnectionDispatcherOptions
     /// </remarks>
     public long ApplicationMaxBufferSize
     {
-        get => _applicationMaxBufferSize;
+        get;
         set
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
 
-            _applicationMaxBufferSize = value;
+            field = value;
         }
     }
 
@@ -106,12 +107,12 @@ public class HttpConnectionDispatcherOptions
     /// </remarks>
     public TimeSpan TransportSendTimeout
     {
-        get => _transportSendTimeout;
+        get;
         set
         {
             ArgumentOutOfRangeException.ThrowIfEqual(value, TimeSpan.Zero);
 
-            _transportSendTimeout = value;
+            field = value;
         }
     }
 
@@ -132,7 +133,68 @@ public class HttpConnectionDispatcherOptions
     /// </remarks>
     public bool AllowStatefulReconnects { get; set; }
 
-    internal bool TransportSendTimeoutEnabled => _transportSendTimeout != Timeout.InfiniteTimeSpan;
+    /// <summary>
+    /// When set to <c>true</c>, enables the <c>/refresh</c> endpoint that allows clients to refresh their
+    /// authentication token without disconnecting. The server will re-authenticate the request and update
+    /// the connection's <see cref="System.Security.Claims.ClaimsPrincipal"/>.
+    /// </summary>
+    /// <remarks>
+    /// It is recommended to also enable <see cref="CloseOnAuthenticationExpiration"/> so that the connection
+    /// is closed if authentication is not refreshed before it expires.
+    /// </remarks>
+    public bool EnableAuthenticationRefresh { get; set; }
+
+    /// <summary>
+    /// An optional callback invoked when the <c>/refresh</c> endpoint has successfully re-authenticated
+    /// the request but before the connection's user is replaced. Return <c>true</c> to accept the new
+    /// principal, or <c>false</c> to reject the refresh. When rejected, the endpoint responds with
+    /// HTTP 403 and the connection's current user remains in place.
+    /// </summary>
+    /// <remarks>
+    /// This callback is an additional policy applied on top of the connection's default identity
+    /// association check (or an application-provided
+    /// <see cref="IConnectionAuthenticationRefreshFeature.OnAuthenticationRefresh"/>
+    /// override): both must accept the refresh for it to be applied. It cannot be used to bypass that
+    /// underlying identity check.
+    /// </remarks>
+    public Func<AuthenticationRefreshContext, Task<bool>>? OnAuthenticationRefresh { get; set; }
+
+    /// <summary>
+    /// Gets or sets the maximum amount of time, relative to now, that a refreshed authentication
+    /// expiration is allowed to advance to, regardless of the expiration reported by the authentication
+    /// ticket. Set to <see langword="null"/> to leave the ticket's own expiration (or lack of one) unmodified.
+    /// When set, the value must be greater than <see cref="TimeSpan.Zero"/>.
+    /// </summary>
+    /// <remarks>
+    /// This applies whenever <see cref="EnableAuthenticationRefresh"/> is <c>true</c>, including when the
+    /// authentication ticket does not itself set an expiration. It does not affect the safety behavior for
+    /// Windows authentication, whose expiration is never tracked or refreshed by this feature.
+    /// </remarks>
+    public TimeSpan? MaximumAuthenticationExpiration
+    {
+        get;
+        set
+        {
+            if (value is { } timeSpan && timeSpan <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "The value must be greater than zero.");
+            }
+
+            field = value;
+        }
+    }
+
+    internal bool TransportSendTimeoutEnabled => TransportSendTimeout != Timeout.InfiniteTimeSpan;
+
+    internal bool UseLegacyLongPollingAuthenticationRefresh
+    {
+        get
+        {
+            return _useLegacyLongPollingAuthenticationRefresh ??=
+                AppContext.TryGetSwitch(UseLegacyLongPollingAuthenticationRefreshSwitch, out var enabled) && enabled;
+        }
+        set => _useLegacyLongPollingAuthenticationRefresh = value;
+    }
 
     // We initialize these lazily based on the state of the options specified here.
     // Though these are mutable it's extremely rare that they would be mutated past the

@@ -126,13 +126,12 @@ class ReconnectionProcess {
         if (!result) {
           // Try to resume the circuit if the reconnect failed
           // If the server responded and refused to reconnect, stop auto-retrying.
-          this.reconnectDisplay.update({ type: 'pause', remote: true });
           const resumeResult = await this.resumeCallback();
           if (resumeResult) {
             return;
           }
 
-          this.reconnectDisplay.failed();
+          this.reconnectDisplay.rejected();
           return;
         }
         return;
@@ -197,7 +196,7 @@ class ReconnectionProcess {
       }
     };
 
-    timeoutId = setTimeout(step, intervalMs);
+    timeoutId = setTimeout(step, Math.min(totalTimeMs, intervalMs));
 
     document.addEventListener('visibilitychange', stepIfDocumentIsVisible);
     await new Promise<void>(resolve => resolveTimerPromise = resolve);

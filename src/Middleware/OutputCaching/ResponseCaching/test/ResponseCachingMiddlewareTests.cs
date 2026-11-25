@@ -656,7 +656,6 @@ public class ResponseCachingMiddlewareTests
         Assert.Null(context.CachedResponse);
 
         middleware.FinalizeCacheHeaders(context);
-        $
         Assert.NotNull(context.CachedResponse);
         Assert.Empty(sink.Writes);
     }

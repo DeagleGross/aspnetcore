@@ -72,7 +72,7 @@ public static class Helpers
         }
         else
         {
-            return Path.Combine(folder, "W3SVC1");
+            return Path.Combine(folder, $"W3SVC{result.DeploymentParameters.SiteName}");
         }
     }
 
@@ -157,7 +157,8 @@ public static class Helpers
     public static void AssertWorkerProcessStop(this IISDeploymentResult deploymentResult, int? timeout = null)
     {
         var hostProcess = deploymentResult.HostProcess;
-        Assert.True(hostProcess.WaitForExit(timeout ?? (int)TimeoutExtensions.DefaultTimeoutValue.TotalMilliseconds));
+        Assert.True(hostProcess.TryWaitForExitStatus(
+            TimeSpan.FromMilliseconds(timeout ?? (int)TimeoutExtensions.DefaultTimeoutValue.TotalMilliseconds), out _));
 
         if (deploymentResult.DeploymentParameters.ServerType == ServerType.IISExpress)
         {
@@ -256,7 +257,7 @@ public static class Helpers
         var siteElement = config
             .RequiredElement("system.applicationHost")
             .RequiredElement("sites")
-            .RequiredElement("site");
+            .Elements("site").Last();
 
         var application = siteElement
             .RequiredElement("application");

@@ -81,6 +81,31 @@ app.MapGet("/", handler);
     }
 
     [Fact]
+    public async Task MapAction_QueryParam_SharedDelegateSignature_PreservesDefaultValue()
+    {
+        // Regression test for https://github.com/dotnet/aspnetcore/issues/69675.
+        // Two endpoints that share the same delegate signature (int) => string but differ
+        // only in the default value of their parameter must each get their own interceptor.
+        // Otherwise, the second endpoint reuses the first endpoint's delegate type and default.
+        var source = """
+app.MapGet("/page-1", (int page = 1) => $"page {page}");
+app.MapGet("/page-2", (int page = 2) => $"page {page}");
+""";
+        var (_, compilation) = await RunGeneratorAsync(source);
+        var endpoints = GetEndpointsFromCompilation(compilation);
+
+        Assert.Equal(2, endpoints.Length);
+
+        var httpContextA = CreateHttpContext();
+        await endpoints[0].RequestDelegate(httpContextA);
+        await VerifyResponseBodyAsync(httpContextA, "page 1");
+
+        var httpContextB = CreateHttpContext();
+        await endpoints[1].RequestDelegate(httpContextB);
+        await VerifyResponseBodyAsync(httpContextB, "page 2");
+    }
+
+    [Fact]
     public async Task MapAction_SingleNullableStringParam_WithEmptyQueryStringValueProvided_StringReturn()
     {
         var (results, compilation) = await RunGeneratorAsync("""
@@ -137,6 +162,52 @@ app.MapGet("/hello", ([FromQuery] int p1 = 10) => $"{p1}");
 
         await endpoint.RequestDelegate(httpContext);
         await VerifyResponseBodyAsync(httpContext, "10");
+    }
+
+    [Theory]
+    [InlineData(null, "Id: 00000000-0000-0000-0000-000000000000")]
+    [InlineData("a0e1f2b3-c4d5-4e6f-7a8b-9c0d1e2f3a4b", "Id: a0e1f2b3-c4d5-4e6f-7a8b-9c0d1e2f3a4b")]
+    public async Task CanSetGuidParamAsOptionalWithDefaultValue(string queryValue, string expectedResponse)
+    {
+        var (_, compilation) = await RunGeneratorAsync("""
+app.MapGet("/", ([FromQuery] Guid id = default) => $"Id: {id}");
+""");
+        var endpoint = GetEndpointFromCompilation(compilation);
+
+        var httpContext = CreateHttpContext();
+        if (queryValue is not null)
+        {
+            httpContext.Request.Query = new QueryCollection(new Dictionary<string, StringValues>
+            {
+                ["id"] = queryValue
+            });
+        }
+
+        await endpoint.RequestDelegate(httpContext);
+        await VerifyResponseBodyAsync(httpContext, expectedResponse);
+    }
+
+    [Theory]
+    [InlineData(null, "Date: 0001-01-01T00:00:00.0000000")]
+    [InlineData("2024-01-15", "Date: 2024-01-15T00:00:00.0000000")]
+    public async Task CanSetDateTimeParamAsOptionalWithDefaultValue(string queryValue, string expectedResponse)
+    {
+        var (_, compilation) = await RunGeneratorAsync("""
+app.MapGet("/", ([FromQuery] DateTime date = default) => $"Date: {date:O}");
+""");
+        var endpoint = GetEndpointFromCompilation(compilation);
+
+        var httpContext = CreateHttpContext();
+        if (queryValue is not null)
+        {
+            httpContext.Request.Query = new QueryCollection(new Dictionary<string, StringValues>
+            {
+                ["date"] = queryValue
+            });
+        }
+
+        await endpoint.RequestDelegate(httpContext);
+        await VerifyResponseBodyAsync(httpContext, expectedResponse);
     }
 
     public static object[][] MapAction_ExplicitQueryParam_NameTest_Data

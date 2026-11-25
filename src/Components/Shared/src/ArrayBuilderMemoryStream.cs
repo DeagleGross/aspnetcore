@@ -5,6 +5,8 @@ using System.Runtime.CompilerServices;
 
 #if BLAZOR_WEBVIEW
 namespace Microsoft.AspNetCore.Components.WebView;
+#elif COMPONENTS_WEBASSEMBLY
+namespace Microsoft.AspNetCore.Components.WebAssembly.Rendering;
 #else
 namespace Microsoft.AspNetCore.Components.Server.Circuits;
 #endif
@@ -38,7 +40,7 @@ internal sealed class ArrayBuilderMemoryStream : Stream
         set => throw new NotSupportedException();
     }
 
-    public ArrayBuilder<byte> ArrayBuilder { get; }
+    public ArrayBuilder<byte> ArrayBuilder { get; set; }
 
     /// <inheritdoc />
     public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();

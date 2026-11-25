@@ -15,9 +15,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Microsoft.AspNetCore.OutputCaching" />
-    <Reference Include="Microsoft.AspNetCore.TestHost" />
-    <Reference Include="Microsoft.Extensions.TimeProvider.Testing" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+
+    <ProjectReference Include="$(RepoRoot)src\Hosting\TestHost\src\Microsoft.AspNetCore.TestHost.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\OutputCaching\src\Microsoft.AspNetCore.OutputCaching.csproj" />
   </ItemGroup>
 
 </Project>

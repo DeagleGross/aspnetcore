@@ -19,12 +19,14 @@ public class ClientProcess : IDisposable
     public ClientProcess(ITestOutputHelper output, string path, string serverPort, string testCase)
     {
         _output = new StringBuilder();
+        _startTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         _process = new Process();
         _process.StartInfo = new ProcessStartInfo
         {
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            InheritedHandles = [],
             FileName = "dotnet",
             Arguments = @$"{path} --use_tls false --server_port {serverPort} --client_type httpclient --test_case {testCase}"
         };
@@ -36,8 +38,6 @@ public class ClientProcess : IDisposable
         _process.Start();
 
         _processEx = new ProcessEx(output, _process, timeout: Timeout.InfiniteTimeSpan);
-
-        _startTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     public Task WaitForReadyAsync() => _startTcs.Task;
@@ -79,6 +79,11 @@ public class ClientProcess : IDisposable
             {
                 _output.AppendLine("ERROR: " + data);
             }
+        }
+
+        if (!IsReady)
+        {
+            _startTcs.TrySetException(new InvalidOperationException("Received error before application started."));
         }
     }
 

@@ -1,11 +1,16 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Buffers;
+using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.AspNetCore.Components.RenderTree;
 
 #if BLAZOR_WEBVIEW
 namespace Microsoft.AspNetCore.Components.WebView;
+#elif COMPONENTS_WEBASSEMBLY
+namespace Microsoft.AspNetCore.Components.WebAssembly.Rendering;
 #else
 namespace Microsoft.AspNetCore.Components.Server.Circuits;
 #endif
@@ -33,30 +38,69 @@ namespace Microsoft.AspNetCore.Components.Server.Circuits;
 /// </summary>
 internal sealed class RenderBatchWriter : IDisposable
 {
+    // A batch with more distinct deduplicated strings than this gets a fresh dictionary afterwards,
+    // so a writer reused across batches does not keep a large table alive.
+    private const int MaxRetainedDeduplicatedStrings = 128;
+
     private readonly ArrayBuilder<string> _strings;
-    private readonly Dictionary<string, int> _deduplicatedStringIndices;
+    private Dictionary<string, int> _deduplicatedStringIndices;
     private readonly BinaryWriter _binaryWriter;
+    private readonly bool _useUtf16StringTable;
+
+    // Private scratch space used to assemble fixed-size records before writing them in a single call.
+    // Every write fully overwrites the bytes it emits, so no data carries over between records or batches.
+    private const int ScratchBufferSize = 256;
+    private byte[]? _scratchBuffer = ArrayPool<byte>.Shared.Rent(ScratchBufferSize);
 
     public RenderBatchWriter(Stream output, bool leaveOpen)
+        : this(output, leaveOpen, useUtf16StringTable: false)
+    {
+    }
+
+    public RenderBatchWriter(Stream output, bool leaveOpen, bool useUtf16StringTable)
     {
         _strings = new ArrayBuilder<string>();
         _deduplicatedStringIndices = new Dictionary<string, int>();
         _binaryWriter = new BinaryWriter(output, Encoding.UTF8, leaveOpen);
+        _useUtf16StringTable = useUtf16StringTable;
     }
 
     public void Write(in RenderBatch renderBatch)
     {
-        var updatedComponentsOffset = Write(renderBatch.UpdatedComponents);
-        var referenceFramesOffset = Write(renderBatch.ReferenceFrames);
-        var disposedComponentIdsOffset = Write(renderBatch.DisposedComponentIDs);
-        var disposedEventHandlerIdsOffset = Write(renderBatch.DisposedEventHandlerIDs);
-        var stringTableOffset = WriteStringTable();
+        try
+        {
+            var updatedComponentsOffset = Write(renderBatch.UpdatedComponents);
+            var referenceFramesOffset = Write(renderBatch.ReferenceFrames);
+            var disposedComponentIdsOffset = Write(renderBatch.DisposedComponentIDs);
+            var disposedEventHandlerIdsOffset = Write(renderBatch.DisposedEventHandlerIDs);
+            var stringTableOffset = _useUtf16StringTable ? WriteStringTableUtf16() : WriteStringTable();
 
-        _binaryWriter.Write(updatedComponentsOffset);
-        _binaryWriter.Write(referenceFramesOffset);
-        _binaryWriter.Write(disposedComponentIdsOffset);
-        _binaryWriter.Write(disposedEventHandlerIdsOffset);
-        _binaryWriter.Write(stringTableOffset);
+            _binaryWriter.Write(updatedComponentsOffset);
+            _binaryWriter.Write(referenceFramesOffset);
+            _binaryWriter.Write(disposedComponentIdsOffset);
+            _binaryWriter.Write(disposedEventHandlerIdsOffset);
+            _binaryWriter.Write(stringTableOffset);
+        }
+        finally
+        {
+            // Each batch has its own string table. Reset it even if writing failed, so the writer
+            // can be reused for the next batch and holds no strings or pooled buffers in between.
+            ResetStringTable();
+        }
+    }
+
+    private void ResetStringTable()
+    {
+        _strings.Clear();
+
+        if (_deduplicatedStringIndices.Count > MaxRetainedDeduplicatedStrings)
+        {
+            _deduplicatedStringIndices = new Dictionary<string, int>();
+        }
+        else
+        {
+            _deduplicatedStringIndices.Clear();
+        }
     }
 
     int Write(in ArrayRange<RenderTreeDiff> diffs)
@@ -103,14 +147,16 @@ internal sealed class RenderBatchWriter : IDisposable
         // the recipient can index into the array directly without walking it.
         // So we output some value for all properties, even when not applicable
         // for this specific RenderTreeEditType.
-        _binaryWriter.Write((int)edit.Type);
-        _binaryWriter.Write(edit.SiblingIndex);
+        var buffer = _scratchBuffer.AsSpan(0, 16);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer, (int)edit.Type);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(4), edit.SiblingIndex);
 
         // ReferenceFrameIndex and MoveToSiblingIndex share a slot, so this writes
         // whichever one applies to the edit type
-        _binaryWriter.Write(edit.ReferenceFrameIndex);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(8), edit.ReferenceFrameIndex);
 
-        WriteString(edit.RemovedAttributeName, allowDeduplication: true);
+        BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(12), GetStringIndex(edit.RemovedAttributeName, allowDeduplication: true));
+        _binaryWriter.Write(buffer);
     }
 
     int Write(in ArrayRange<RenderTreeFrame> frames)
@@ -130,19 +176,24 @@ internal sealed class RenderBatchWriter : IDisposable
 
     void Write(in RenderTreeFrame frame)
     {
-        // TODO: Change this to write as a short, saving 2 bytes per frame
-        _binaryWriter.Write((int)frame.FrameType);
-
         // We want each frame to take up the same number of bytes, so that the
         // recipient can index into the array directly instead of having to
         // walk through it.
-        // Since we can fit every frame type into 16 bytes, use that as the
-        // common size. For smaller frames, we add padding to expand it to
-        // 16 bytes.
+        // Since we can fit every frame type into 16 bytes (plus 4 bytes for the
+        // frame type), use that as the common size. For smaller frames, the
+        // remaining bytes are zero padding. The whole frame is assembled in a
+        // scratch buffer so it can be written to the output in a single call.
+        var buffer = _scratchBuffer.AsSpan(0, 20);
+        buffer.Clear();
+
+        // TODO: Change this to write as a short, saving 2 bytes per frame
+        BinaryPrimitives.WriteInt32LittleEndian(buffer, (int)frame.FrameType);
+        var data = buffer.Slice(4);
+
         switch (frame.FrameType)
         {
             case RenderTreeFrameType.Attribute:
-                WriteString(frame.AttributeName, allowDeduplication: true);
+                BinaryPrimitives.WriteInt32LittleEndian(data, GetStringIndex(frame.AttributeName, allowDeduplication: true));
                 if (frame.AttributeValue is bool boolValue)
                 {
                     // Encoding the bool as either "" or null is pretty odd, but avoids
@@ -152,19 +203,18 @@ internal sealed class RenderBatchWriter : IDisposable
                     // or something else, we'll need a different encoding mechanism. Since there
                     // would never be more than (say) 2^28 (268 million) distinct string table
                     // entries, we could use the first 4 bits to encode the value type.
-                    WriteString(boolValue ? string.Empty : null, allowDeduplication: true);
+                    BinaryPrimitives.WriteInt32LittleEndian(data.Slice(4), GetStringIndex(boolValue ? string.Empty : null, allowDeduplication: true));
                 }
                 else
                 {
                     var attributeValueString = frame.AttributeValue as string;
-                    WriteString(attributeValueString, allowDeduplication: string.IsNullOrEmpty(attributeValueString));
+                    BinaryPrimitives.WriteInt32LittleEndian(data.Slice(4), GetStringIndex(attributeValueString, allowDeduplication: string.IsNullOrEmpty(attributeValueString)));
                 }
-                _binaryWriter.Write(frame.AttributeEventHandlerId); // 8 bytes
+                BinaryPrimitives.WriteUInt64LittleEndian(data.Slice(8), frame.AttributeEventHandlerId); // 8 bytes
                 break;
             case RenderTreeFrameType.Component:
-                _binaryWriter.Write(frame.ComponentSubtreeLength);
-                _binaryWriter.Write(frame.ComponentId);
-                WritePadding(_binaryWriter, 8);
+                BinaryPrimitives.WriteInt32LittleEndian(data, frame.ComponentSubtreeLength);
+                BinaryPrimitives.WriteInt32LittleEndian(data.Slice(4), frame.ComponentId);
                 break;
             case RenderTreeFrameType.ComponentReferenceCapture:
             case RenderTreeFrameType.ComponentRenderMode:
@@ -172,34 +222,30 @@ internal sealed class RenderBatchWriter : IDisposable
                 // The client doesn't need to know about these. But we still have
                 // to include them in the array otherwise the ReferenceFrameIndex
                 // values in the edits data would be wrong.
-                WritePadding(_binaryWriter, 16);
                 break;
             case RenderTreeFrameType.Element:
-                _binaryWriter.Write(frame.ElementSubtreeLength);
-                WriteString(frame.ElementName, allowDeduplication: true);
-                WritePadding(_binaryWriter, 8);
+                BinaryPrimitives.WriteInt32LittleEndian(data, frame.ElementSubtreeLength);
+                BinaryPrimitives.WriteInt32LittleEndian(data.Slice(4), GetStringIndex(frame.ElementName, allowDeduplication: true));
                 break;
             case RenderTreeFrameType.ElementReferenceCapture:
-                WriteString(frame.ElementReferenceCaptureId, allowDeduplication: false);
-                WritePadding(_binaryWriter, 12);
+                BinaryPrimitives.WriteInt32LittleEndian(data, GetStringIndex(frame.ElementReferenceCaptureId, allowDeduplication: false));
                 break;
             case RenderTreeFrameType.Region:
-                _binaryWriter.Write(frame.RegionSubtreeLength);
-                WritePadding(_binaryWriter, 12);
+                BinaryPrimitives.WriteInt32LittleEndian(data, frame.RegionSubtreeLength);
                 break;
             case RenderTreeFrameType.Text:
-                WriteString(
+                BinaryPrimitives.WriteInt32LittleEndian(data, GetStringIndex(
                     frame.TextContent,
-                    allowDeduplication: string.IsNullOrWhiteSpace(frame.TextContent));
-                WritePadding(_binaryWriter, 12);
+                    allowDeduplication: string.IsNullOrWhiteSpace(frame.TextContent)));
                 break;
             case RenderTreeFrameType.Markup:
-                WriteString(frame.MarkupContent, allowDeduplication: false);
-                WritePadding(_binaryWriter, 12);
+                BinaryPrimitives.WriteInt32LittleEndian(data, GetStringIndex(frame.MarkupContent, allowDeduplication: false));
                 break;
             default:
                 throw new ArgumentException($"Unsupported frame type: {frame.FrameType}");
         }
+
+        _binaryWriter.Write(buffer);
     }
 
     int Write(in ArrayRange<int> numbers)
@@ -207,12 +253,7 @@ internal sealed class RenderBatchWriter : IDisposable
         var startPos = (int)_binaryWriter.BaseStream.Position;
         _binaryWriter.Write(numbers.Count);
 
-        var array = numbers.Array;
-        var count = numbers.Count;
-        for (var index = 0; index < count; index++)
-        {
-            _binaryWriter.Write(array[index]);
-        }
+        WriteInt32Values(numbers.Array.AsSpan(0, numbers.Count));
 
         return startPos;
     }
@@ -222,39 +263,64 @@ internal sealed class RenderBatchWriter : IDisposable
         var startPos = (int)_binaryWriter.BaseStream.Position;
         _binaryWriter.Write(numbers.Count);
 
-        var array = numbers.Array;
-        var count = numbers.Count;
-        for (var index = 0; index < count; index++)
-        {
-            _binaryWriter.Write(array[index]);
-        }
+        WriteUInt64Values(numbers.Array.AsSpan(0, numbers.Count));
 
         return startPos;
     }
 
-    void WriteString(string value, bool allowDeduplication)
+    void WriteInt32Values(ReadOnlySpan<int> values)
+    {
+        // Encode in chunks through the scratch buffer so each chunk is a single write to the output.
+        var buffer = _scratchBuffer.AsSpan(0, ScratchBufferSize);
+        while (!values.IsEmpty)
+        {
+            var chunkLength = Math.Min(values.Length, ScratchBufferSize / sizeof(int));
+            for (var i = 0; i < chunkLength; i++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(buffer.Slice(i * sizeof(int)), values[i]);
+            }
+
+            _binaryWriter.Write(buffer.Slice(0, chunkLength * sizeof(int)));
+            values = values.Slice(chunkLength);
+        }
+    }
+
+    void WriteUInt64Values(ReadOnlySpan<ulong> values)
+    {
+        var buffer = _scratchBuffer.AsSpan(0, ScratchBufferSize);
+        while (!values.IsEmpty)
+        {
+            var chunkLength = Math.Min(values.Length, ScratchBufferSize / sizeof(ulong));
+            for (var i = 0; i < chunkLength; i++)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(buffer.Slice(i * sizeof(ulong)), values[i]);
+            }
+
+            _binaryWriter.Write(buffer.Slice(0, chunkLength * sizeof(ulong)));
+            values = values.Slice(chunkLength);
+        }
+    }
+
+    int GetStringIndex(string? value, bool allowDeduplication)
     {
         if (value == null)
         {
-            _binaryWriter.Write(-1);
+            return -1;
         }
-        else
+
+        int stringIndex;
+        if (!allowDeduplication || !_deduplicatedStringIndices.TryGetValue(value, out stringIndex))
         {
-            int stringIndex;
+            stringIndex = _strings.Count;
+            _strings.Append(value);
 
-            if (!allowDeduplication || !_deduplicatedStringIndices.TryGetValue(value, out stringIndex))
+            if (allowDeduplication)
             {
-                stringIndex = _strings.Count;
-                _strings.Append(value);
-
-                if (allowDeduplication)
-                {
-                    _deduplicatedStringIndices.Add(value, stringIndex);
-                }
+                _deduplicatedStringIndices.Add(value, stringIndex);
             }
-
-            _binaryWriter.Write(stringIndex);
         }
+
+        return stringIndex;
     }
 
     int WriteStringTable()
@@ -280,24 +346,47 @@ internal sealed class RenderBatchWriter : IDisposable
         return locationsStartPos;
     }
 
-    static void WritePadding(BinaryWriter writer, int numBytes)
+    int WriteStringTableUtf16()
     {
-        while (numBytes >= 4)
+        // UTF-16LE string table: each entry is [int32 charCount][UTF-16LE chars].
+        // This avoids UTF-8 encode on C# side and UTF-8 decode on JS side,
+        // since both C# and JS strings are natively UTF-16.
+        var stringsCount = _strings.Count;
+        var locations = new int[stringsCount];
+
+        for (var i = 0; i < stringsCount; i++)
         {
-            writer.Write(0);
-            numBytes -= 4;
+            var stringValue = _strings.Buffer[i];
+            locations[i] = (int)_binaryWriter.BaseStream.Position;
+
+            // Write char count (not byte count) as int32
+            _binaryWriter.Write(stringValue.Length);
+
+            // Write UTF-16LE chars — zero-cost reinterpret via MemoryMarshal
+            var charSpan = stringValue.AsSpan();
+            var byteSpan = MemoryMarshal.AsBytes(charSpan);
+            _binaryWriter.BaseStream.Write(byteSpan);
         }
 
-        while (numBytes > 0)
+        // Now write the locations
+        var locationsStartPos = (int)_binaryWriter.BaseStream.Position;
+        for (var i = 0; i < stringsCount; i++)
         {
-            writer.Write((byte)0);
-            numBytes--;
+            _binaryWriter.Write(locations[i]);
         }
+
+        return locationsStartPos;
     }
 
     public void Dispose()
     {
         _strings.Dispose();
         _binaryWriter.Dispose();
+
+        if (_scratchBuffer is { } scratchBuffer)
+        {
+            _scratchBuffer = null;
+            ArrayPool<byte>.Shared.Return(scratchBuffer);
+        }
     }
 }

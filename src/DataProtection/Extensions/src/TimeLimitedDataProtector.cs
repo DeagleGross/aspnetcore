@@ -2,6 +2,10 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
+#if NET
+using System.Buffers;
+using System.Buffers.Binary;
+#endif
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Threading;
@@ -17,6 +21,7 @@ namespace Microsoft.AspNetCore.DataProtection;
 internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
 {
     private const string MyPurposeString = "Microsoft.AspNetCore.DataProtection.TimeLimitedDataProtector.v1";
+    private const int ExpirationTimeHeaderSize = 8; // size of the expiration time header in bytes (64-bit UTC tick count)
 
     private readonly IDataProtector _innerProtector;
     private IDataProtector? _innerProtectorWithTimeLimitedPurpose; // created on-demand
@@ -49,12 +54,20 @@ internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
     {
         ArgumentNullThrowHelper.ThrowIfNull(plaintext);
 
-        // We prepend the expiration time (as a 64-bit UTC tick count) to the unprotected data.
-        byte[] plaintextWithHeader = new byte[checked(8 + plaintext.Length)];
-        BitHelpers.WriteUInt64(plaintextWithHeader, 0, (ulong)expiration.UtcTicks);
-        Buffer.BlockCopy(plaintext, 0, plaintextWithHeader, 8, plaintext.Length);
+        var innerProtector = GetInnerProtectorWithTimeLimitedPurpose();
+#if NET
+        if (innerProtector is ISpanDataProtector spanProtector)
+        {
+            return ProtectWithSpanProtector(spanProtector, plaintext, expiration);
+        }
+#endif
 
-        return GetInnerProtectorWithTimeLimitedPurpose().Protect(plaintextWithHeader);
+        // We prepend the expiration time (as a 64-bit UTC tick count) to the unprotected data.
+        byte[] plaintextWithHeader = new byte[checked(ExpirationTimeHeaderSize + plaintext.Length)];
+        BitHelpers.WriteUInt64(plaintextWithHeader, 0, (ulong)expiration.UtcTicks);
+        Buffer.BlockCopy(plaintext, 0, plaintextWithHeader, ExpirationTimeHeaderSize, plaintext.Length);
+
+        return innerProtector.Protect(plaintextWithHeader);
     }
 
     public byte[] Unprotect(byte[] protectedData, out DateTimeOffset expiration)
@@ -70,8 +83,16 @@ internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
 
         try
         {
-            byte[] plaintextWithHeader = GetInnerProtectorWithTimeLimitedPurpose().Unprotect(protectedData);
-            if (plaintextWithHeader.Length < 8)
+            var innerProtector = GetInnerProtectorWithTimeLimitedPurpose();
+#if NET
+            if (innerProtector is ISpanDataProtector spanProtector)
+            {
+                return UnprotectWithSpanProtector(spanProtector, protectedData, now, out expiration);
+            }
+#endif
+
+            byte[] plaintextWithHeader = innerProtector.Unprotect(protectedData);
+            if (plaintextWithHeader.Length < ExpirationTimeHeaderSize)
             {
                 // header isn't present
                 throw new CryptographicException(Resources.TimeLimitedDataProtector_PayloadInvalid);
@@ -88,8 +109,8 @@ internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
             }
 
             // Not expired - split and return payload
-            byte[] retVal = new byte[plaintextWithHeader.Length - 8];
-            Buffer.BlockCopy(plaintextWithHeader, 8, retVal, 0, retVal.Length);
+            byte[] retVal = new byte[plaintextWithHeader.Length - ExpirationTimeHeaderSize];
+            Buffer.BlockCopy(plaintextWithHeader, ExpirationTimeHeaderSize, retVal, 0, retVal.Length);
             expiration = embeddedExpiration;
             return retVal;
         }
@@ -99,6 +120,73 @@ internal sealed class TimeLimitedDataProtector : ITimeLimitedDataProtector
             throw new CryptographicException(Resources.CryptCommon_GenericError, ex);
         }
     }
+
+#if NET
+    // The span-based paths produce and consume exactly the same payload as the byte[]-based paths below, but avoid
+    // allocating the intermediate { expiration || plaintext } array. Buffers start on the stack and only rent from the
+    // pool when the payload doesn't fit. Rented buffers are cleared when returned to the pool, and the stack buffers
+    // that may hold plaintext are cleared before returning. Nothing pooled escapes this call.
+    private static byte[] ProtectWithSpanProtector(ISpanDataProtector protector, byte[] plaintext, DateTimeOffset expiration)
+    {
+        var plaintextWithHeaderLength = checked(ExpirationTimeHeaderSize + plaintext.Length);
+        Span<byte> plaintextWithHeaderInitialBuffer = stackalloc byte[256];
+        using var plaintextWithHeader = new RefPooledArrayBufferWriter<byte>(plaintextWithHeaderInitialBuffer);
+        var destination = new RefPooledArrayBufferWriter<byte>(stackalloc byte[256]);
+        try
+        {
+            // We prepend the expiration time (as a 64-bit UTC tick count) to the unprotected data.
+            var span = plaintextWithHeader.GetSpan(plaintextWithHeaderLength);
+            BinaryPrimitives.WriteUInt64BigEndian(span, (ulong)expiration.UtcTicks);
+            plaintext.CopyTo(span.Slice(ExpirationTimeHeaderSize));
+            plaintextWithHeader.Advance(plaintextWithHeaderLength);
+
+            protector.Protect(plaintextWithHeader.WrittenSpan, ref destination);
+            return destination.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            // 'destination' is passed by ref, so it can't be a 'using' variable (CS1657).
+            destination.Dispose();
+            plaintextWithHeaderInitialBuffer.Clear();
+        }
+    }
+
+    private static byte[] UnprotectWithSpanProtector(ISpanDataProtector protector, byte[] protectedData, DateTimeOffset now, out DateTimeOffset expiration)
+    {
+        Span<byte> initialBuffer = stackalloc byte[256];
+        var destination = new RefPooledArrayBufferWriter<byte>(initialBuffer);
+        try
+        {
+            protector.Unprotect(protectedData, ref destination);
+            var plaintextWithHeader = destination.WrittenSpan;
+            if (plaintextWithHeader.Length < ExpirationTimeHeaderSize)
+            {
+                // header isn't present
+                throw new CryptographicException(Resources.TimeLimitedDataProtector_PayloadInvalid);
+            }
+
+            // Read expiration time back out of the payload
+            ulong utcTicksExpiration = BinaryPrimitives.ReadUInt64BigEndian(plaintextWithHeader);
+            DateTimeOffset embeddedExpiration = new DateTimeOffset(checked((long)utcTicksExpiration), TimeSpan.Zero /* UTC */);
+
+            // Are we expired?
+            if (now > embeddedExpiration)
+            {
+                throw new CryptographicException(Resources.FormatTimeLimitedDataProtector_PayloadExpired(embeddedExpiration));
+            }
+
+            // Not expired - return payload
+            expiration = embeddedExpiration;
+            return plaintextWithHeader.Slice(ExpirationTimeHeaderSize).ToArray();
+        }
+        finally
+        {
+            // 'destination' is passed by ref, so it can't be a 'using' variable (CS1657).
+            destination.Dispose();
+            initialBuffer.Clear();
+        }
+    }
+#endif
 
     /*
      * EXPLICIT INTERFACE IMPLEMENTATIONS
