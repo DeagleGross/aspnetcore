@@ -4,7 +4,6 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Internal;
 using Microsoft.Extensions.Primitives;
-using Microsoft.Net.Http.Headers;
 
 namespace Microsoft.AspNetCore.OutputCaching;
 
@@ -66,17 +65,6 @@ internal sealed class DefaultPolicy : IOutputCachePolicy
         {
             context.AllowCacheStorage = false;
             return ValueTask.CompletedTask;
-        }
-
-        // Don't cache reponses that explicitly prevent caching
-        if (HeaderUtilities.ContainsCacheDirective(context.HttpContext.Response.Headers.CacheControl, CacheControlHeaderValue.NoStoreString))
-        {
-            context.AllowCacheStorage = false;
-        }
-
-        if (HeaderUtilities.ContainsCacheDirective(context.HttpContext.Response.Headers.Pragma, CacheControlHeaderValue.NoStoreString))
-        {
-            context.AllowCacheStorage = false;
         }
 
         return ValueTask.CompletedTask;

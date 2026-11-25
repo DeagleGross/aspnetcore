@@ -1,7 +1,6 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
-using System.Linq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.ObjectPool;
@@ -272,6 +271,7 @@ internal sealed class OutputCacheMiddleware
         var cacheEntryAge = context.ResponseTime.Value - context.CachedResponse.Created;
         context.CachedEntryAge = cacheEntryAge > TimeSpan.Zero ? cacheEntryAge : TimeSpan.Zero;
 
+        // Policies can mark the entry as stale in ServeFromCacheAsync.
         context.IsCacheEntryFresh = true;
 
         foreach (var policy in policies)
@@ -397,20 +397,7 @@ internal sealed class OutputCacheMiddleware
             var response = context.HttpContext.Response;
             var headers = response.Headers;
 
-            DateTimeOffset? responseExpires = null;
-
-            HeaderUtilities.TryParseSeconds(response.Headers.CacheControl, CacheControlHeaderValue.SharedMaxAgeString, out var responseSharedMaxAge);
-            HeaderUtilities.TryParseSeconds(response.Headers.CacheControl, CacheControlHeaderValue.MaxAgeString, out var responseMaxAge);
-            if (HeaderUtilities.TryParseDate(response.Headers.Expires.ToString(), out var expires))
-            {
-                responseExpires = expires;
-            }
-
-            context.CachedResponseValidFor = responseSharedMaxAge
-                ?? responseMaxAge
-                ?? responseExpires - context.ResponseTime
-                ?? context.ResponseExpirationTimeSpan
-                ?? _options.DefaultExpirationTimeSpan;
+            context.CachedResponseValidFor = context.ResponseExpirationTimeSpan ?? _options.DefaultExpirationTimeSpan;
 
             // Setting the date on the raw response headers.
             headers.Date = HeaderUtilities.FormatDate(context.ResponseTime!.Value);
@@ -433,11 +420,7 @@ internal sealed class OutputCacheMiddleware
     /// <returns><c>true</c> if the response was cached; otherwise <c>false</c>.</returns>
     internal async ValueTask<bool> FinalizeCacheBodyAsync(OutputCacheContext context)
     {
-        // If the response has Vary headers which are not part of the configured ones, we can't cache the response.
-        var hasCustomVaryHeaders = context.HttpContext.Response.Headers.Vary == "*" ||
-                context.HttpContext.Response.Headers.Vary.Any(header => !context.CacheVaryByRules.HeaderNames.Contains(header, StringComparer.OrdinalIgnoreCase));
-
-        if (!hasCustomVaryHeaders && context.AllowCacheStorage && context.OutputCacheStream.BufferingEnabled
+        if (context.AllowCacheStorage && context.OutputCacheStream.BufferingEnabled
             && context.CachedResponse is not null
             && !context.HttpContext.RequestAborted.IsCancellationRequested)
         {
@@ -461,6 +444,9 @@ internal sealed class OutputCacheMiddleware
                 else
                 {
                     _logger.ResponseCached();
+
+                    // ServeResponseAsync policies run after the response headers were finalized and may have updated the expiration.
+                    context.CachedResponseValidFor = context.ResponseExpirationTimeSpan ?? _options.DefaultExpirationTimeSpan;
 
                     await OutputCacheEntryFormatter.StoreAsync(context.CacheKey, context.CachedResponse, context.Tags, context.CachedResponseValidFor,
                         _store, _logger, context.HttpContext.RequestAborted);

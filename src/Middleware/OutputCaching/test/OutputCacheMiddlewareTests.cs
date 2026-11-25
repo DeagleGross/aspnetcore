@@ -416,8 +416,10 @@ public abstract class OutputCacheMiddlewareTests
     }
 
     [Fact]
-    public void FinalizeCacheHeadersAsync_ResponseValidity_UseExpiryIfAvailable()
+    public void FinalizeCacheHeadersAsync_ResponseValidity_IgnoresExpiryIfAvailable()
     {
+        // The Expires header should not be used when set in the response
+
         var timeProvider = new FakeTimeProvider();
         var options = new OutputCacheOptions
         {
@@ -432,13 +434,15 @@ public abstract class OutputCacheMiddlewareTests
 
         middleware.FinalizeCacheHeaders(context);
 
-        Assert.Equal(TimeSpan.FromSeconds(11), context.CachedResponseValidFor);
+        Assert.Equal(options.DefaultExpirationTimeSpan, context.CachedResponseValidFor);
         Assert.Empty(sink.Writes);
     }
 
     [Fact]
     public void FinalizeCacheHeadersAsync_ResponseValidity_UseMaxAgeIfAvailable()
     {
+        // The MaxAge header should not be used if set in the response
+
         var timeProvider = new FakeTimeProvider();
         var sink = new TestSink();
         var options = new OutputCacheOptions
@@ -458,7 +462,7 @@ public abstract class OutputCacheMiddlewareTests
 
         middleware.FinalizeCacheHeaders(context);
 
-        Assert.Equal(TimeSpan.FromSeconds(12), context.CachedResponseValidFor);
+        Assert.Equal(options.DefaultExpirationTimeSpan, context.CachedResponseValidFor);
         Assert.Empty(sink.Writes);
     }
 
@@ -484,7 +488,7 @@ public abstract class OutputCacheMiddlewareTests
 
         middleware.FinalizeCacheHeaders(context);
 
-        Assert.Equal(TimeSpan.FromSeconds(13), context.CachedResponseValidFor);
+        Assert.Equal(options.DefaultExpirationTimeSpan, context.CachedResponseValidFor);
         Assert.Empty(sink.Writes);
     }
 
@@ -1365,6 +1369,77 @@ public abstract class OutputCacheMiddlewareTests
             await middleware.Invoke(requestContext.HttpContext);
             var response = Encoding.UTF8.GetString(responseStream.GetBuffer());
             return response;
+        }
+    }
+
+    [Fact]
+    public async Task TryServeFromCacheAsync_PolicyCanMarkCachedResponseAsStale()
+    {
+        var cache = GetStore();
+        var sink = new TestSink();
+        var timeProvider = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        var options = new OutputCacheOptions { TimeProvider = timeProvider };
+        var middleware = TestUtils.CreateTestMiddleware(testSink: sink, cache: cache, options: options, keyProvider: new TestResponseCachingKeyProvider("BaseKey"));
+        var context = TestUtils.CreateTestContext(cache: cache, options: options);
+
+        using (var entry = new OutputCacheEntry(timeProvider.GetUtcNow(), StatusCodes.Status200OK))
+        {
+            await OutputCacheEntryFormatter.StoreAsync(
+                "BaseKey",
+                entry,
+                null,
+                TimeSpan.FromSeconds(10),
+                cache,
+                NullLogger.Instance,
+                default);
+        }
+
+        Assert.False(await middleware.TryServeFromCacheAsync(context, [new StaleCachedResponsePolicy()]));
+        Assert.Equal(1, cache.GetCount);
+        Assert.DoesNotContain(sink.Writes, w => w.EventId == LoggedMessage.CachedResponseServed.EventId);
+    }
+
+    [Fact]
+    public async Task Invoke_UsesExpirationSetByPolicyAfterResponseIsWritten()
+    {
+        var options = new OutputCacheOptions();
+        options.AddBasePolicy(builder => builder.AddPolicy(new ExpireOnServeResponsePolicy(TimeSpan.FromSeconds(42))));
+
+        var cache = GetStore();
+        var middleware = TestUtils.CreateTestMiddleware(options: options, cache: cache, next: c => c.Response.WriteAsync("Hello"));
+        var context = TestUtils.CreateTestContext(cache: cache);
+        context.HttpContext.Request.Method = "GET";
+        context.HttpContext.Request.Path = "/";
+
+        await middleware.Invoke(context.HttpContext);
+
+        Assert.Equal(1, cache.SetCount);
+        Assert.Equal(TimeSpan.FromSeconds(42), cache.LastValidFor);
+    }
+
+    private sealed class StaleCachedResponsePolicy : IOutputCachePolicy
+    {
+        public ValueTask CacheRequestAsync(OutputCacheContext context, CancellationToken cancellation) => ValueTask.CompletedTask;
+
+        public ValueTask ServeFromCacheAsync(OutputCacheContext context, CancellationToken cancellation)
+        {
+            context.IsCacheEntryFresh = false;
+            return ValueTask.CompletedTask;
+        }
+
+        public ValueTask ServeResponseAsync(OutputCacheContext context, CancellationToken cancellation) => ValueTask.CompletedTask;
+    }
+
+    private sealed class ExpireOnServeResponsePolicy(TimeSpan expiration) : IOutputCachePolicy
+    {
+        public ValueTask CacheRequestAsync(OutputCacheContext context, CancellationToken cancellation) => ValueTask.CompletedTask;
+
+        public ValueTask ServeFromCacheAsync(OutputCacheContext context, CancellationToken cancellation) => ValueTask.CompletedTask;
+
+        public ValueTask ServeResponseAsync(OutputCacheContext context, CancellationToken cancellation)
+        {
+            context.ResponseExpirationTimeSpan = expiration;
+            return ValueTask.CompletedTask;
         }
     }
 }

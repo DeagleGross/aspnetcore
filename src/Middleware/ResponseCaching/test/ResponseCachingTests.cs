@@ -263,14 +263,9 @@ public class ResponseCachingTests
         }
     }
 
-    [Fact(Skip = "Not supported by Output Caching as opposed to Response Caching. Kept for reference.")]
-    public async Task ServesCachedContent_IfVaryHeader_Mismatches()
+    [Fact]
+    public async Task ServesCachedContent_IfVaryHeader_Matches()
     {
-        // Response Caching handles this scenario by storing a special entry using the base key, and then issuing a subsequent lookup
-        // on a newly built key that includes the Vary header value from the request.
-
-        // Output caching doesn't have this separate entry so it can't handle the scenario and just returns a fresh response.
-
         var builders = TestUtils.CreateBuildersWithResponseCaching(contextAction: context => context.Response.Headers.Vary = HeaderNames.From);
 
         foreach (var builder in builders)
@@ -924,6 +919,7 @@ public class ResponseCachingTests
         }
     }
 
+    [Fact]
     public async Task ServesCachedContent_IfCachedVaryByNotUpdated_OnCacheMiss()
     {
         var builders = TestUtils.CreateBuildersWithResponseCaching(contextAction: context => context.Response.Headers.Vary = context.Request.Headers.Pragma);

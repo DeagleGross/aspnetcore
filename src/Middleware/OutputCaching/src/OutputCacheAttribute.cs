@@ -17,7 +17,6 @@ public sealed class OutputCacheAttribute : Attribute
     // The same goes for nullable-ResponseCacheLocation and nullable-bool.
     private int? _duration;
     private bool? _noCache;
-    private string[]? _varyByQueryKeys;
 
     private IOutputCachePolicy? _builtPolicy;
 
@@ -43,28 +42,7 @@ public sealed class OutputCacheAttribute : Attribute
     /// <summary>
     /// Gets or sets the query keys to vary by.
     /// </summary>
-    public string[]? VaryByQueryKeys
-    {
-        get
-        {
-            return _varyByQueryKeys;
-        }
-
-        init
-        {
-            if (value?.Length > 1)
-            {
-                for (var i = 0; i < value.Length; i++)
-                {
-                    if (string.IsNullOrEmpty(value[i]))
-                    {
-                        throw new ArgumentException($"When {nameof(value)} contains more than one value, it cannot contain a null or empty value.", nameof(value));
-                    }
-                }
-            }
-            _varyByQueryKeys = value;
-        }
-    }
+    public string[]? VaryByQueryKeys { get; init; }
 
     /// <summary>
     /// Gets or sets the header names to vary by.
