@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Net.Http;
+using Microsoft.AspNetCore.ResponseCaching;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Net.Http.Headers;
 
@@ -32,6 +33,32 @@ public class ResponseCachingPolicyVaryTests
             var subsequentResponse = await SendAsync(client, from: "user2@example.com", language: null);
 
             Assert.Equal(initialResponse, subsequentResponse);
+        }
+    }
+
+    [Fact]
+    public async Task VaryByQueryKeysSetAfterResponseStarts_AreIgnored()
+    {
+        // Like Response Caching, which reads the query keys when the response starts.
+        var builders = ResponseCachingTestUtils.CreateBuildersWithResponseCaching(contextAction: context => context.Response.OnStarting(() =>
+        {
+            context.Features.Get<IResponseCachingFeature>().VaryByQueryKeys = ["query"];
+            return Task.CompletedTask;
+        }));
+
+        foreach (var builder in builders)
+        {
+            using var host = builder.Build();
+
+            await host.StartAsync();
+
+            using var server = host.GetTestServer();
+            var client = server.CreateClient();
+
+            var initialResponse = await client.GetAsync("?query=a");
+            var subsequentResponse = await client.GetAsync("?query=b");
+
+            Assert.Equal(initialResponse.Headers.GetValues("X-Value"), subsequentResponse.Headers.GetValues("X-Value"));
         }
     }
 

@@ -41,7 +41,7 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
         // Like the Response Caching middleware, provide the feature even when the response isn't cached, since MVC requires it.
         if (context.HttpContext.Features.Get<IResponseCachingFeature>() is null)
         {
-            context.HttpContext.Features.Set<IResponseCachingFeature>(new ResponseCachingFeature());
+            context.HttpContext.Features.Set<IResponseCachingFeature>(new ResponseCachingFeature(context));
         }
 
         return ValueTask.CompletedTask;

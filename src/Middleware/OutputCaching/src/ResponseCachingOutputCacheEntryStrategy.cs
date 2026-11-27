@@ -57,7 +57,8 @@ internal sealed class ResponseCachingOutputCacheEntryStrategy : IOutputCacheEntr
         // Like Response Caching, read the Vary header captured when the response started rather than the one sent to the client:
         // headers added later, e.g. by Response Compression in an OnStarting callback, aren't part of the vary rules.
         var varyHeaderNames = GetNormalizedNames(SplitCommaSeparatedValues(context.CachedResponse!.FindHeader(HeaderNames.Vary)));
-        var varyQueryKeys = GetNormalizedNames(context.HttpContext.Features.Get<IResponseCachingFeature>()?.VaryByQueryKeys);
+        var responseCachingFeature = context.HttpContext.Features.Get<IResponseCachingFeature>();
+        var varyQueryKeys = GetNormalizedNames(responseCachingFeature is ResponseCachingFeature feature ? feature.VaryByQueryKeysWhenResponseStarted : responseCachingFeature?.VaryByQueryKeys);
         if (ContainsDelimiters(varyHeaderNames) || ContainsDelimiters(varyQueryKeys))
         {
             return;

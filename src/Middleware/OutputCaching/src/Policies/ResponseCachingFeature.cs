@@ -11,7 +11,13 @@ namespace Microsoft.AspNetCore.OutputCaching;
 /// </summary>
 internal sealed class ResponseCachingFeature : IResponseCachingFeature
 {
+    private readonly OutputCacheContext _context;
     private string[]? _varyByQueryKeys;
+
+    public ResponseCachingFeature(OutputCacheContext context)
+    {
+        _context = context;
+    }
 
     public string[]? VaryByQueryKeys
     {
@@ -31,6 +37,17 @@ internal sealed class ResponseCachingFeature : IResponseCachingFeature
             }
 
             _varyByQueryKeys = value;
+
+            if (!_context.ResponseStarted)
+            {
+                VaryByQueryKeysWhenResponseStarted = value;
+            }
         }
     }
+
+    /// <summary>
+    /// The query keys set before the response started. Like Response Caching, which reads them when the response starts,
+    /// the query keys set later aren't part of the vary rules.
+    /// </summary>
+    internal string[]? VaryByQueryKeysWhenResponseStarted { get; private set; }
 }
