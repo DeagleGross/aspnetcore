@@ -14,8 +14,13 @@ app.UseOutputCache();
 
 | Scenario | What it shows |
 |---|---|
+| [Authentication](Scenarios/Authentication.cs) | Requests with an `Authorization` header aren't cached, while cookie-authenticated users are served the cached responses. |
 | [CacheControlHeaders](Scenarios/CacheControlHeaders.cs) | The endpoint sets `Cache-Control: public, max-age=3`. Clients send `no-cache` or `max-age=0`. The query string isn't part of the key. |
+| [ConcurrentRequests](Scenarios/ConcurrentRequests.cs) | 5 concurrent requests while the cache is empty: the endpoint runs for each of them, since Response Caching doesn't lock. |
+| [ConditionalRequests](Scenarios/ConditionalRequests.cs) | `If-None-Match` and `If-Modified-Since` are answered with a 304 from the cache. |
 | [MvcResponseCacheAttribute](Scenarios/MvcResponseCacheAttribute.cs) | MVC actions with `[ResponseCache(Duration = 3)]`, `Location = Client` and `NoStore = true`. Controllers don't change. |
+| [RequestCacheDirectives](Scenarios/RequestCacheDirectives.cs) | Clients send `only-if-cached`, `Pragma: no-cache`, `min-fresh`, `max-age` and `max-stale`. |
+| [ResponseCompression](Scenarios/ResponseCompression.cs) | Response Compression adds `Vary: Accept-Encoding`, so one compressed response is cached per encoding. |
 | [VaryByQueryKeys](Scenarios/VaryByQueryKeys.cs) | `[ResponseCache(VaryByQueryKeys = ["page"])]`. One response is cached per `page` value. The default Output Caching policy returns 500, since MVC requires `IResponseCachingFeature`. |
 | [VaryHeader](Scenarios/VaryHeader.cs) | The endpoint sets `Vary: Accept-Language`. One response is cached per language. An extra column also declares the header with `SetVaryByHeader`, with the same result. |
 
@@ -55,5 +60,5 @@ A scenario implements:
 - `CreateResponseCachingApp`: the application using Response Caching.
 - `CreateOutputCachingApp`: the same application migrated to Output Caching.
 - `MapEndpoints`: the endpoints, shared by all applications.
-- `Steps`: the requests sent to every application in the `compare` mode.
-- Optionally `ConfigureServices` for services shared by all applications, and `Applications` to compare more variations.
+- `Steps`: the requests sent to every application in the `compare` mode. A step can send concurrent requests with `Parallel`.
+- Optionally `ConfigureServices` for services shared by all applications, `ConfigurePipeline` for middleware running before the caching middleware, and `Applications` to compare more variations.

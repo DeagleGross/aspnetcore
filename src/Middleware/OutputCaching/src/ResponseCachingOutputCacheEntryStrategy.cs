@@ -3,7 +3,6 @@
 
 using System.Linq;
 using System.Text;
-using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.ResponseCaching;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
@@ -55,7 +54,9 @@ internal sealed class ResponseCachingOutputCacheEntryStrategy : IOutputCacheEntr
 
     public async ValueTask StoreAsync(OutputCacheContext context, CancellationToken cancellationToken)
     {
-        var varyHeaderNames = GetNormalizedNames(context.HttpContext.Response.Headers.GetCommaSeparatedValues(HeaderNames.Vary));
+        // Like Response Caching, read the Vary header captured when the response started rather than the one sent to the client:
+        // headers added later, e.g. by Response Compression in an OnStarting callback, aren't part of the vary rules.
+        var varyHeaderNames = GetNormalizedNames(SplitCommaSeparatedValues(context.CachedResponse!.FindHeader(HeaderNames.Vary)));
         var varyQueryKeys = GetNormalizedNames(context.HttpContext.Features.Get<IResponseCachingFeature>()?.VaryByQueryKeys);
         if (ContainsDelimiters(varyHeaderNames) || ContainsDelimiters(varyQueryKeys))
         {
@@ -200,6 +201,20 @@ internal sealed class ResponseCachingOutputCacheEntryStrategy : IOutputCacheEntr
     }
 
     // Same normalization as Response Caching: upper case and ordinal order, so the order and casing of the names don't create new rules.
+    private static string[] SplitCommaSeparatedValues(StringValues values)
+    {
+        var result = new List<string>();
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrEmpty(value))
+            {
+                result.AddRange(value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
+        }
+
+        return result.ToArray();
+    }
+
     private static string[] GetNormalizedNames(string[]? names)
     {
         if (names is null || names.Length == 0)

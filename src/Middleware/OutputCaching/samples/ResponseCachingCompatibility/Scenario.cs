@@ -34,6 +34,7 @@ public abstract class Scenario
         builder.Services.AddOutputCache(options => options.AddBasePolicy(policy => policy.Cache()));
 
         var app = builder.Build();
+        ConfigurePipeline(app);
         app.UseOutputCache();
         MapEndpoints(app);
         return app;
@@ -47,7 +48,14 @@ public abstract class Scenario
     }
 
     /// <summary>
-    /// The endpoints, identical in all applications.
+    /// The middleware running before the caching middleware, e.g. authentication, identical in all applications.
+    /// </summary>
+    public virtual void ConfigurePipeline(WebApplication app)
+    {
+    }
+
+    /// <summary>
+    /// The endpoints, and the middleware running after the caching middleware, identical in all applications.
     /// </summary>
     public abstract void MapEndpoints(WebApplication app);
 
@@ -82,4 +90,5 @@ public sealed record ScenarioApplication(string Key, string Name, Func<WebApplic
 /// <param name="Path">The request path and query.</param>
 /// <param name="ConfigureRequest">Sets request headers.</param>
 /// <param name="DelaySeconds">The time to wait before sending the request.</param>
-public sealed record Step(string Description, string Path = "/", Action<HttpRequestMessage>? ConfigureRequest = null, int DelaySeconds = 0);
+/// <param name="Parallel">The number of identical requests sent concurrently.</param>
+public sealed record Step(string Description, string Path = "/", Action<HttpRequestMessage>? ConfigureRequest = null, int DelaySeconds = 0, int Parallel = 1);

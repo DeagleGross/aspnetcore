@@ -29,6 +29,7 @@
     <ProjectReference Include="$(RepoRoot)src\Middleware\OutputCaching\src\Microsoft.AspNetCore.OutputCaching.csproj" />
     <ProjectReference Include="$(RepoRoot)src\Middleware\ResponseCaching.Abstractions\src\Microsoft.AspNetCore.ResponseCaching.Abstractions.csproj" />
     <ProjectReference Include="$(RepoRoot)src\Middleware\ResponseCaching\src\Microsoft.AspNetCore.ResponseCaching.csproj" />
+    <ProjectReference Include="$(RepoRoot)src\Middleware\ResponseCompression\src\Microsoft.AspNetCore.ResponseCompression.csproj" />
     <ProjectReference Include="$(RepoRoot)src\Mvc\Mvc.Core\src\Microsoft.AspNetCore.Mvc.Core.csproj" />
     <ProjectReference Include="$(RepoRoot)src\Servers\HttpSys\src\Microsoft.AspNetCore.Server.HttpSys.csproj" />
     <ProjectReference Include="$(RepoRoot)src\Servers\IIS\IIS\src\Microsoft.AspNetCore.Server.IIS.csproj" />

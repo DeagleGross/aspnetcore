@@ -10,6 +10,32 @@ namespace Microsoft.AspNetCore.NewResponseCaching.Tests;
 public class ResponseCachingPolicyVaryTests
 {
     [Fact]
+    public async Task VaryHeaderAddedWhenResponseStarts_IsIgnored()
+    {
+        // Like Response Compression for requests which don't accept compression: Response Caching reads the Vary header before.
+        var builders = ResponseCachingTestUtils.CreateBuildersWithResponseCaching(contextAction: context => context.Response.OnStarting(() =>
+        {
+            context.Response.Headers.Vary = HeaderNames.From;
+            return Task.CompletedTask;
+        }));
+
+        foreach (var builder in builders)
+        {
+            using var host = builder.Build();
+
+            await host.StartAsync();
+
+            using var server = host.GetTestServer();
+            var client = server.CreateClient();
+
+            var initialResponse = await SendAsync(client, from: "user@example.com", language: null);
+            var subsequentResponse = await SendAsync(client, from: "user2@example.com", language: null);
+
+            Assert.Equal(initialResponse, subsequentResponse);
+        }
+    }
+
+    [Fact]
     public async Task VaryHeaderNames_AreCombinedWithDeclaredHeaderNames()
     {
         var builders = ResponseCachingTestUtils.CreateBuildersWithResponseCaching(
