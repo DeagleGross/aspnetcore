@@ -301,6 +301,27 @@ public sealed class OutputCachePolicyBuilder
     }
 
     /// <summary>
+    /// Replaces the default policy with one applying the HTTP caching semantics of the Response Caching middleware.
+    /// </summary>
+    /// <remarks>
+    /// Request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
+    /// Only <c>GET</c> and <c>HEAD</c> requests without an <c>Authorization</c> header, and <c>200</c> responses marked <c>public</c>, are cached.
+    /// The expiration is read from the response <c>s-maxage</c>, <c>max-age</c> or <c>Expires</c> headers, and defaults to 10 seconds.
+    /// Responses are varied by all query keys. Responses with a <c>Vary</c> header listing headers which were not declared with
+    /// <see cref="SetVaryByHeader(string[])"/> are not stored.
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// builder.Services.AddOutputCache(options => options.AddBasePolicy(policy => policy.UseResponseCachingSemantics()));
+    /// </code>
+    /// </example>
+    public OutputCachePolicyBuilder UseResponseCachingSemantics()
+    {
+        _policies.Remove(DefaultPolicy.Instance);
+        return AddPolicy(ResponseCachingPolicy.Instance);
+    }
+
+    /// <summary>
     /// Adds a policy setting whether to vary by the Host header ot not.
     /// </summary>
     public OutputCachePolicyBuilder SetVaryByHost(bool enabled)
