@@ -636,7 +636,7 @@ public class ResponseCachingTests
         }
     }
 
-    [Fact(Skip = "ResponseCachingPolicy varies by all query keys, so the request without the query string doesn't match the cached response.")]
+    [Fact]
     public async Task Serves304_IfIfModifiedSince_Satisfied()
     {
         var builders = ResponseCachingTestUtils.CreateBuildersWithResponseCaching(contextAction: context =>
@@ -689,7 +689,7 @@ public class ResponseCachingTests
         }
     }
 
-    [Fact(Skip = "ResponseCachingPolicy varies by all query keys, so the request without the query string doesn't match the cached response.")]
+    [Fact]
     public async Task Serves304_IfIfNoneMatch_Satisfied()
     {
         var builders = ResponseCachingTestUtils.CreateBuildersWithResponseCaching(contextAction: context =>

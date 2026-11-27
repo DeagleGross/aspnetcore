@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.ResponseCaching;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
@@ -12,7 +13,8 @@ namespace Microsoft.AspNetCore.OutputCaching;
 /// request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
 /// </summary>
 /// <remarks>
-/// As with Response Caching, the headers listed by the response <c>Vary</c> header extend the cache key, and concurrent requests aren't locked.
+/// As with Response Caching, the query string isn't part of the cache key, unless the query keys are set in <see cref="IResponseCachingFeature"/>.
+/// The headers listed by the response <c>Vary</c> header and these query keys extend the cache key, and concurrent requests aren't locked.
 /// </remarks>
 internal sealed class ResponseCachingPolicy : IOutputCachePolicy
 {
@@ -32,11 +34,15 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
         context.AllowCacheLookup = attemptResponseCaching && AllowCacheLookup(context);
         context.AllowCacheStorage = attemptResponseCaching && AllowCacheStorage(context);
 
-        // Response Caching extends the cache key with the headers listed by the response Vary header.
-        context.VaryByResponseHeaders = true;
+        // Response Caching extends the cache key after the response is produced, with the request headers listed by the response
+        // Vary header and the query keys set in IResponseCachingFeature.
+        context.VaryByResponse = true;
 
-        // The cache key is computed before the response is produced, so query keys can't be selected by the response.
-        context.CacheVaryByRules.QueryKeys = "*";
+        // Like the Response Caching middleware, provide the feature even when the response isn't cached, since MVC requires it.
+        if (context.HttpContext.Features.Get<IResponseCachingFeature>() is null)
+        {
+            context.HttpContext.Features.Set<IResponseCachingFeature>(new ResponseCachingFeature());
+        }
 
         return ValueTask.CompletedTask;
     }

@@ -52,6 +52,6 @@ public sealed class CacheControlHeaders : Scenario
         new("4. Client sends 'Cache-Control: max-age=0': endpoint runs", ConfigureRequest: r => r.Headers.TryAddWithoutValidation("Cache-Control", "max-age=0")),
         new("5. Same request: served from cache"),
         new("6. Wait 4s, max-age=3 expired: endpoint runs", DelaySeconds: 4),
-        new("7. Known difference: query string is part of the key", Path: "/?page=2"),
+        new("7. Query string isn't part of the key: served from cache", Path: "/?page=2"),
     ];
 }

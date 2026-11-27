@@ -307,7 +307,8 @@ public sealed class OutputCachePolicyBuilder
     /// Request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
     /// Only <c>GET</c> and <c>HEAD</c> requests without an <c>Authorization</c> header, and <c>200</c> responses marked <c>public</c>, are cached.
     /// The expiration is read from the response <c>s-maxage</c>, <c>max-age</c> or <c>Expires</c> headers, and defaults to 10 seconds.
-    /// Responses are varied by all query keys, and by the request headers listed by the response <c>Vary</c> header.
+    /// The query string isn't part of the cache key. Responses are varied by the request headers listed by the response <c>Vary</c> header,
+    /// and by the query keys set in <c>IResponseCachingFeature.VaryByQueryKeys</c> (e.g. with MVC's <c>[ResponseCache(VaryByQueryKeys = ...)]</c>).
     /// Concurrent requests aren't locked.
     /// </remarks>
     /// <example>

@@ -108,13 +108,7 @@ internal static class ResponseCachingTestUtils
         Action<HttpContext> contextAction = null,
         Action<OutputCachePolicyBuilder> configurePolicy = null)
     {
-        // Output Caching doesn't provide IResponseCachingFeature. Applications setting VaryByQueryKeys only need it to be present,
-        // since ResponseCachingPolicy varies by all query keys.
-        Action<HttpContext> action = context =>
-        {
-            context.Features.Set<IResponseCachingFeature>(new ResponseCachingFeature());
-            contextAction?.Invoke(context);
-        };
+        Action<HttpContext> action = context => contextAction?.Invoke(context);
 
         return CreateBuildersWithResponseCaching(configureDelegate, options, configurePolicy, new RequestDelegate[]
             {

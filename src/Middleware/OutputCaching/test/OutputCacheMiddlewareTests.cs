@@ -1194,7 +1194,7 @@ public abstract class OutputCacheMiddlewareTests
     }
 
     [Fact]
-    public async Task Locking_VaryByResponseHeaders_DoesNotCoalesceRequests()
+    public async Task Locking_VaryByResponse_DoesNotCoalesceRequests()
     {
         var responseCounter = 0;
 

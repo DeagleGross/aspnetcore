@@ -14,9 +14,9 @@ app.UseOutputCache();
 
 | Scenario | What it shows |
 |---|---|
-| [CacheControlHeaders](Scenarios/CacheControlHeaders.cs) | The endpoint sets `Cache-Control: public, max-age=3`. Clients send `no-cache` or `max-age=0`. |
+| [CacheControlHeaders](Scenarios/CacheControlHeaders.cs) | The endpoint sets `Cache-Control: public, max-age=3`. Clients send `no-cache` or `max-age=0`. The query string isn't part of the key. |
 | [MvcResponseCacheAttribute](Scenarios/MvcResponseCacheAttribute.cs) | MVC actions with `[ResponseCache(Duration = 3)]`, `Location = Client` and `NoStore = true`. Controllers don't change. |
-| [VaryByQueryKeys](Scenarios/VaryByQueryKeys.cs) | `[ResponseCache(VaryByQueryKeys = ["page"])]`. **Known gap**: MVC requires `IResponseCachingFeature`, so Output Caching returns 500. |
+| [VaryByQueryKeys](Scenarios/VaryByQueryKeys.cs) | `[ResponseCache(VaryByQueryKeys = ["page"])]`. One response is cached per `page` value. The default Output Caching policy returns 500, since MVC requires `IResponseCachingFeature`. |
 | [VaryHeader](Scenarios/VaryHeader.cs) | The endpoint sets `Vary: Accept-Language`. One response is cached per language. An extra column also declares the header with `SetVaryByHeader`, with the same result. |
 
 ## Running

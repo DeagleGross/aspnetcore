@@ -142,9 +142,9 @@ internal sealed class OutputCacheMiddleware
 
                     var executed = false;
 
-                    // Response Caching doesn't lock. The cache key doesn't contain the headers listed by the response Vary header,
+                    // Response Caching doesn't lock. The cache key doesn't contain the headers and query keys selected by the response,
                     // so requests sharing it may expect different responses.
-                    if (context.AllowLocking && !context.VaryByResponseHeaders && !string.IsNullOrEmpty(context.CacheKey))
+                    if (context.AllowLocking && !context.VaryByResponse && !string.IsNullOrEmpty(context.CacheKey))
                     {
                         var cacheEntry = await _requestDispatcher.ScheduleAsync(context.CacheKey, key => ExecuteResponseAsync());
 
@@ -377,7 +377,7 @@ internal sealed class OutputCacheMiddleware
     }
 
     private IOutputCacheEntryStrategy GetEntryStrategy(OutputCacheContext context)
-        => context.VaryByResponseHeaders ? _responseCachingEntryStrategy : _defaultEntryStrategy;
+        => context.VaryByResponse ? _responseCachingEntryStrategy : _defaultEntryStrategy;
 
     internal void CreateCacheKey(OutputCacheContext context)
     {

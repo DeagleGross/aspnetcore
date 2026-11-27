@@ -7,15 +7,14 @@ namespace ResponseCachingCompatibility.Scenarios;
 
 /// <summary>
 /// [ResponseCache(VaryByQueryKeys = ...)] caches a response per value of the listed query keys. MVC stores the keys in
-/// IResponseCachingFeature, which only the Response Caching middleware provides.
+/// IResponseCachingFeature, which the Response Caching middleware and UseResponseCachingSemantics() provide.
 /// </summary>
 /// <remarks>
-/// Known gap: with Output Caching the feature is missing, so MVC throws and the request fails with a 500.
-/// Output Caching already varies by all query keys, so the fix only needs MVC to stop requiring the feature.
+/// The default Output Caching policy doesn't provide the feature, so MVC throws and the request fails with a 500.
 /// </remarks>
 public sealed class VaryByQueryKeys : Scenario
 {
-    public override string Description => "MVC action with [ResponseCache(VaryByQueryKeys = [\"page\"])] (known gap: 500)";
+    public override string Description => "MVC action with [ResponseCache(VaryByQueryKeys = [\"page\"])]";
 
     // Before: Response Caching.
     public override WebApplication CreateResponseCachingApp(WebApplicationBuilder builder)
