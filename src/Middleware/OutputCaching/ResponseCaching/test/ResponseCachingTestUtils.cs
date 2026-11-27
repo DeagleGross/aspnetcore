@@ -105,7 +105,8 @@ internal static class ResponseCachingTestUtils
     internal static IEnumerable<IHostBuilder> CreateBuildersWithResponseCaching(
         Action<IApplicationBuilder> configureDelegate = null,
         ResponseCachingOptions options = null,
-        Action<HttpContext> contextAction = null)
+        Action<HttpContext> contextAction = null,
+        Action<OutputCachePolicyBuilder> configurePolicy = null)
     {
         // Output Caching doesn't provide IResponseCachingFeature. Applications setting VaryByQueryKeys only need it to be present,
         // since ResponseCachingPolicy varies by all query keys.
@@ -115,7 +116,7 @@ internal static class ResponseCachingTestUtils
             contextAction?.Invoke(context);
         };
 
-        return CreateBuildersWithResponseCaching(configureDelegate, options, new RequestDelegate[]
+        return CreateBuildersWithResponseCaching(configureDelegate, options, configurePolicy, new RequestDelegate[]
             {
                     context =>
                     {
@@ -138,6 +139,7 @@ internal static class ResponseCachingTestUtils
     private static IEnumerable<IHostBuilder> CreateBuildersWithResponseCaching(
         Action<IApplicationBuilder> configureDelegate,
         ResponseCachingOptions options,
+        Action<OutputCachePolicyBuilder> configurePolicy,
         IEnumerable<RequestDelegate> requestDelegates)
     {
         configureDelegate ??= app => { };
@@ -160,7 +162,11 @@ internal static class ResponseCachingTestUtils
                                 outputCacheOptions.UseCaseSensitivePaths = options.UseCaseSensitivePaths;
                             }
 
-                            outputCacheOptions.AddBasePolicy(policy => policy.UseResponseCachingSemantics());
+                            outputCacheOptions.AddBasePolicy(policy =>
+                            {
+                                policy.UseResponseCachingSemantics();
+                                configurePolicy?.Invoke(policy);
+                            });
                         });
                     })
                     .Configure(app =>
