@@ -1,7 +1,11 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Linq;
+using System.Text;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Primitives;
 using Microsoft.Net.Http.Headers;
 
@@ -12,12 +16,18 @@ namespace Microsoft.AspNetCore.OutputCaching;
 /// request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
 /// </summary>
 /// <remarks>
-/// Unlike Response Caching, the cache key can't be extended by the response <c>Vary</c> header.
-/// Responses varying by headers which are not declared upfront (e.g. with <see cref="OutputCachePolicyBuilder.SetVaryByHeader(string[])"/>) are not stored.
+/// Like Response Caching, the cache key varies by the request headers listed in the response <c>Vary</c> header.
+/// Output Caching computes the lookup key before the response is produced, so the header names are remembered in the
+/// store for the next requests, and the storage key is recomputed once the response is produced.
+/// Header names declared upfront (e.g. with <see cref="OutputCachePolicyBuilder.SetVaryByHeader(string[])"/>) are always added.
 /// </remarks>
 internal sealed class ResponseCachingPolicy : IOutputCachePolicy
 {
     internal static readonly TimeSpan DefaultExpirationTimeSpan = TimeSpan.FromSeconds(10);
+
+    private const char KeyDelimiter = '\x1e';
+    private const char KeySubDelimiter = '\x1f';
+    private const string VaryRulesKeyPrefix = "ResponseCachingVaryRules";
 
     public static readonly ResponseCachingPolicy Instance = new();
 
@@ -26,20 +36,27 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
     }
 
     /// <inheritdoc />
-    ValueTask IOutputCachePolicy.CacheRequestAsync(OutputCacheContext context, CancellationToken cancellationToken)
+    async ValueTask IOutputCachePolicy.CacheRequestAsync(OutputCacheContext context, CancellationToken cancellationToken)
     {
         var attemptResponseCaching = AttemptResponseCaching(context);
         context.EnableOutputCaching = true;
         context.AllowCacheLookup = attemptResponseCaching && AllowCacheLookup(context);
         context.AllowCacheStorage = attemptResponseCaching && AllowCacheStorage(context);
 
-        // A request which bypasses the cache lookup must not be served a response produced by a concurrent request.
-        context.AllowLocking = context.AllowCacheLookup;
+        // Like Response Caching, concurrent requests are not coalesced. They could also vary by headers which are only
+        // known once the response is produced, and must not be served a response produced for different header values.
+        context.AllowLocking = false;
 
         // The cache key is computed before the response is produced, so query keys can't be selected by the response.
         context.CacheVaryByRules.QueryKeys = "*";
 
-        return ValueTask.CompletedTask;
+        // Also read when only storage is allowed: storing a response which no longer varies must forget the header names.
+        var learnedHeaderNames = context.AllowCacheLookup || context.AllowCacheStorage ? await GetLearnedVaryHeaderNamesAsync(context, cancellationToken) : default;
+        context.ResponseCachingLearnedVaryHeaderNames = (context.CacheVaryByRules.HeaderNames.Count, learnedHeaderNames.Count);
+        if (learnedHeaderNames.Count > 0)
+        {
+            context.CacheVaryByRules.HeaderNames = StringValues.Concat(context.CacheVaryByRules.HeaderNames, learnedHeaderNames);
+        }
     }
 
     /// <inheritdoc />
@@ -54,20 +71,19 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
     }
 
     /// <inheritdoc />
-    ValueTask IOutputCachePolicy.ServeResponseAsync(OutputCacheContext context, CancellationToken cancellationToken)
+    async ValueTask IOutputCachePolicy.ServeResponseAsync(OutputCacheContext context, CancellationToken cancellationToken)
     {
         if (!context.AllowCacheStorage)
         {
-            return ValueTask.CompletedTask;
+            return;
         }
 
         var responseTime = context.ResponseTime ?? DateTimeOffset.UtcNow;
 
-        if (!IsResponseCacheable(context, responseTime, out var responseSharedMaxAge, out var responseMaxAge, out var responseExpires)
-            || HasUndeclaredVaryHeaders(context))
+        if (!IsResponseCacheable(context, responseTime, out var responseSharedMaxAge, out var responseMaxAge, out var responseExpires))
         {
             context.AllowCacheStorage = false;
-            return ValueTask.CompletedTask;
+            return;
         }
 
         context.ResponseExpirationTimeSpan = responseSharedMaxAge
@@ -76,7 +92,43 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
             ?? context.ResponseExpirationTimeSpan
             ?? DefaultExpirationTimeSpan;
 
-        return ValueTask.CompletedTask;
+        await ApplyResponseVaryHeaderNamesAsync(context, context.ResponseExpirationTimeSpan.Value, cancellationToken);
+
+        if (HasUndeclaredVaryHeaders(context))
+        {
+            context.AllowCacheStorage = false;
+        }
+    }
+
+    // Replaces the header names learned from a previous response with the ones of the current response, and remembers them
+    // for the next requests. The rest of the header names are unchanged so that lookup and storage keys are computed identically.
+    internal static async ValueTask ApplyResponseVaryHeaderNamesAsync(OutputCacheContext context, TimeSpan validFor, CancellationToken cancellationToken)
+    {
+        var responseHeaderNames = NormalizeHeaderNames(GetVaryHeaders(context.HttpContext.Response));
+        var (index, count) = context.ResponseCachingLearnedVaryHeaderNames;
+        var headerNames = context.CacheVaryByRules.HeaderNames;
+
+        // Another policy could have replaced the header names after they were learned.
+        if (index < 0 || index + count > headerNames.Count)
+        {
+            (index, count) = (headerNames.Count, 0);
+        }
+
+        var allHeaderNames = headerNames.ToArray();
+        if (!allHeaderNames.AsSpan(index, count).SequenceEqual(responseHeaderNames.ToArray()))
+        {
+            string?[] newHeaderNames = [.. allHeaderNames[..index], .. responseHeaderNames, .. allHeaderNames[(index + count)..]];
+            context.CacheVaryByRules.HeaderNames = newHeaderNames;
+            context.ResponseCachingLearnedVaryHeaderNames = (index, responseHeaderNames.Count);
+
+            // The key used for the lookup doesn't contain the new header names, it's recomputed before the response is stored.
+            context.CacheKey = string.Empty;
+        }
+
+        if (responseHeaderNames.Count > 0 || count > 0)
+        {
+            await SetLearnedVaryHeaderNamesAsync(context, responseHeaderNames, validFor, cancellationToken);
+        }
     }
 
     internal static bool AttemptResponseCaching(OutputCacheContext context)
@@ -317,6 +369,72 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
         }
 
         return false;
+    }
+
+    private static async ValueTask<StringValues> GetLearnedVaryHeaderNamesAsync(OutputCacheContext context, CancellationToken cancellationToken)
+    {
+        var store = context.HttpContext.RequestServices?.GetService<IOutputCacheStore>();
+        var key = GetVaryRulesKey(context);
+        if (store is null || key is null)
+        {
+            return default;
+        }
+
+        var value = await store.GetAsync(key, cancellationToken);
+        if (value is null || value.Length == 0)
+        {
+            return default;
+        }
+
+        return new StringValues(Encoding.UTF8.GetString(value).Split(','));
+    }
+
+    private static async ValueTask SetLearnedVaryHeaderNamesAsync(OutputCacheContext context, StringValues headerNames, TimeSpan validFor, CancellationToken cancellationToken)
+    {
+        var store = context.HttpContext.RequestServices?.GetService<IOutputCacheStore>();
+        var key = GetVaryRulesKey(context);
+        if (store is null || key is null || validFor <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        var value = headerNames.Count == 0 ? [] : Encoding.UTF8.GetBytes(string.Join(',', headerNames.ToArray()));
+        await store.SetAsync(key, value, tags: null, validFor, cancellationToken);
+    }
+
+    // Like the Response Caching base key, the Vary header names are remembered per method, scheme, host and path.
+    private static string? GetVaryRulesKey(OutputCacheContext context)
+    {
+        var request = context.HttpContext.Request;
+        var pathBase = request.PathBase.Value ?? string.Empty;
+        var path = request.Path.Value ?? string.Empty;
+
+        // Like the Output Caching keys, paths containing the key delimiters are not cached.
+        if (pathBase.AsSpan().ContainsAny(KeyDelimiter, KeySubDelimiter) || path.AsSpan().ContainsAny(KeyDelimiter, KeySubDelimiter))
+        {
+            return null;
+        }
+
+        var useCaseSensitivePaths = context.HttpContext.RequestServices?.GetService<IOptions<OutputCacheOptions>>()?.Value.UseCaseSensitivePaths ?? false;
+        if (!useCaseSensitivePaths)
+        {
+            pathBase = pathBase.ToUpperInvariant();
+            path = path.ToUpperInvariant();
+        }
+
+        return string.Join(KeyDelimiter, VaryRulesKeyPrefix, request.Method.ToUpperInvariant(), request.Scheme.ToUpperInvariant(), request.Host.Value?.ToUpperInvariant(), pathBase, path);
+    }
+
+    // Like Response Caching, the order and casing of the header names don't matter.
+    private static StringValues NormalizeHeaderNames(IEnumerable<string> headerNames)
+    {
+        var normalized = headerNames
+            .Select(headerName => headerName.ToUpperInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        return new StringValues(normalized);
     }
 
     private static IEnumerable<string> GetVaryHeaders(HttpResponse response)

@@ -749,20 +749,33 @@ public class ResponseCachingPolicyProviderTests
     }
 
     [Theory]
-    [InlineData("From", "From", true)]
-    [InlineData("from", "From", true)]
-    [InlineData("From, Accept-Language", "From", false)]
-    [InlineData("From", null, false)]
-    [InlineData("*", "From", false)]
-    public async Task ResponseWithVaryHeader_IsStoredOnlyIfDeclared(string vary, string declaredHeader, bool isStored)
+    [InlineData("From", null, new[] { "FROM" })]
+    [InlineData("from", "Declared", new[] { "Declared", "FROM" })]
+    [InlineData("From, Accept-Language", null, new[] { "ACCEPT-LANGUAGE", "FROM" })]
+    [InlineData("Accept-Language,From,from", "Declared", new[] { "Declared", "ACCEPT-LANGUAGE", "FROM" })]
+    public async Task ResponseWithVaryHeader_AddsHeaderNamesToStorageKey(string vary, string declaredHeader, string[] expectedHeaderNames)
     {
         var context = CreateCacheableResponseContext(DateTimeOffset.UtcNow, new CacheControlHeaderValue { Public = true, MaxAge = TimeSpan.FromSeconds(10) });
         context.HttpContext.Response.Headers.Vary = vary;
         context.CacheVaryByRules.HeaderNames = declaredHeader;
+        context.CacheKey = "LookupKey";
 
         await ((IOutputCachePolicy)ResponseCachingPolicy.Instance).ServeResponseAsync(context, default);
 
-        Assert.Equal(isStored, context.AllowCacheStorage);
+        Assert.True(context.AllowCacheStorage);
+        Assert.Equal(expectedHeaderNames, context.CacheVaryByRules.HeaderNames.ToArray());
+        Assert.Empty(context.CacheKey);
+    }
+
+    [Fact]
+    public async Task ResponseWithVaryStar_IsNotStored()
+    {
+        var context = CreateCacheableResponseContext(DateTimeOffset.UtcNow, new CacheControlHeaderValue { Public = true, MaxAge = TimeSpan.FromSeconds(10) });
+        context.HttpContext.Response.Headers.Vary = "*";
+
+        await ((IOutputCachePolicy)ResponseCachingPolicy.Instance).ServeResponseAsync(context, default);
+
+        Assert.False(context.AllowCacheStorage);
     }
 
     private static OutputCacheContext CreateCacheableResponseContext(DateTimeOffset responseTime, CacheControlHeaderValue cacheControl)

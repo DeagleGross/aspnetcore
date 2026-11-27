@@ -83,6 +83,9 @@ public sealed class OutputCacheContext
 
     internal bool IsAuthenticatedOnRequest { get; set; }
 
+    // The range of CacheVaryByRules.HeaderNames which ResponseCachingPolicy learned from the Vary header of a previous response.
+    internal (int Index, int Count) ResponseCachingLearnedVaryHeaderNames { get; set; } = (-1, 0);
+
     internal Stream OriginalResponseStream { get; set; } = default!;
 
     internal OutputCacheStream OutputCacheStream { get; set; } = default!;
