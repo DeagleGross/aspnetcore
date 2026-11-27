@@ -25,7 +25,8 @@ internal sealed class OutputCacheMiddleware
     private readonly IOutputCacheStore _store;
     private readonly IOutputCacheKeyProvider _keyProvider;
     private readonly IOutputCachePolicyProvider _policyProvider;
-    private readonly WorkDispatcher<string, OutputCacheEntry?> _outputCacheEntryDispatcher;
+    private readonly IOutputCacheEntryStrategy _defaultEntryStrategy;
+    private readonly IOutputCacheEntryStrategy _responseCachingEntryStrategy;
     private readonly WorkDispatcher<string, OutputCacheEntry?> _requestDispatcher;
 
     /// <summary>
@@ -76,7 +77,8 @@ internal sealed class OutputCacheMiddleware
         _store = cache;
         _policyProvider = policyProvider;
         _keyProvider = keyProvider;
-        _outputCacheEntryDispatcher = new();
+        _defaultEntryStrategy = new DefaultOutputCacheEntryStrategy(_store, _logger);
+        _responseCachingEntryStrategy = new ResponseCachingOutputCacheEntryStrategy(_store, _logger);
         _requestDispatcher = new();
     }
 
@@ -140,7 +142,9 @@ internal sealed class OutputCacheMiddleware
 
                     var executed = false;
 
-                    if (context.AllowLocking && !string.IsNullOrEmpty(context.CacheKey))
+                    // Response Caching doesn't lock. The cache key doesn't contain the headers listed by the response Vary header,
+                    // so requests sharing it may expect different responses.
+                    if (context.AllowLocking && !context.VaryByResponseHeaders && !string.IsNullOrEmpty(context.CacheKey))
                     {
                         var cacheEntry = await _requestDispatcher.ScheduleAsync(context.CacheKey, key => ExecuteResponseAsync());
 
@@ -340,13 +344,10 @@ internal sealed class OutputCacheMiddleware
             return false;
         }
 
-        // Locking cache lookups by default
-        // TODO: should it be part of the cache implementations or can we assume all caches would benefit from it?
-        // It makes sense for caches that use IO (disk, network) or need to deserialize the state but could also be a global option
         OutputCacheEntry? cacheEntry;
         try
         {
-            cacheEntry = await _outputCacheEntryDispatcher.ScheduleAsync(cacheContext.CacheKey, (Store: _store, CacheContext: cacheContext), static async (key, state) => await OutputCacheEntryFormatter.GetAsync(key, state.Store, state.CacheContext.HttpContext.RequestAborted));
+            cacheEntry = await GetEntryStrategy(cacheContext).GetAsync(cacheContext, cacheContext.HttpContext.RequestAborted);
         }
         catch (OperationCanceledException)
         {
@@ -374,6 +375,9 @@ internal sealed class OutputCacheMiddleware
         _logger.NoResponseServed();
         return false;
     }
+
+    private IOutputCacheEntryStrategy GetEntryStrategy(OutputCacheContext context)
+        => context.VaryByResponseHeaders ? _responseCachingEntryStrategy : _defaultEntryStrategy;
 
     internal void CreateCacheKey(OutputCacheContext context)
     {
@@ -448,8 +452,7 @@ internal sealed class OutputCacheMiddleware
                     // ServeResponseAsync policies run after the response headers were finalized and may have updated the expiration.
                     context.CachedResponseValidFor = context.ResponseExpirationTimeSpan ?? _options.DefaultExpirationTimeSpan;
 
-                    await OutputCacheEntryFormatter.StoreAsync(context.CacheKey, context.CachedResponse, context.Tags, context.CachedResponseValidFor,
-                        _store, _logger, context.HttpContext.RequestAborted);
+                    await GetEntryStrategy(context).StoreAsync(context, context.HttpContext.RequestAborted);
 
                     return true;
                 }

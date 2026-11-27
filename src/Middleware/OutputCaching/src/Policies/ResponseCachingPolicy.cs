@@ -12,8 +12,7 @@ namespace Microsoft.AspNetCore.OutputCaching;
 /// request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
 /// </summary>
 /// <remarks>
-/// Unlike Response Caching, the cache key can't be extended by the response <c>Vary</c> header.
-/// Responses varying by headers which are not declared upfront (e.g. with <see cref="OutputCachePolicyBuilder.SetVaryByHeader(string[])"/>) are not stored.
+/// As with Response Caching, the headers listed by the response <c>Vary</c> header extend the cache key, and concurrent requests aren't locked.
 /// </remarks>
 internal sealed class ResponseCachingPolicy : IOutputCachePolicy
 {
@@ -33,8 +32,8 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
         context.AllowCacheLookup = attemptResponseCaching && AllowCacheLookup(context);
         context.AllowCacheStorage = attemptResponseCaching && AllowCacheStorage(context);
 
-        // A request which bypasses the cache lookup must not be served a response produced by a concurrent request.
-        context.AllowLocking = context.AllowCacheLookup;
+        // Response Caching extends the cache key with the headers listed by the response Vary header.
+        context.VaryByResponseHeaders = true;
 
         // The cache key is computed before the response is produced, so query keys can't be selected by the response.
         context.CacheVaryByRules.QueryKeys = "*";
@@ -63,8 +62,7 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
 
         var responseTime = context.ResponseTime ?? DateTimeOffset.UtcNow;
 
-        if (!IsResponseCacheable(context, responseTime, out var responseSharedMaxAge, out var responseMaxAge, out var responseExpires)
-            || HasUndeclaredVaryHeaders(context))
+        if (!IsResponseCacheable(context, responseTime, out var responseSharedMaxAge, out var responseMaxAge, out var responseExpires))
         {
             context.AllowCacheStorage = false;
             return ValueTask.CompletedTask;
@@ -290,33 +288,6 @@ internal sealed class ResponseCachingPolicy : IOutputCachePolicy
         }
 
         return true;
-    }
-
-    // Response Caching adds the request values of the Vary headers to the cache key after the response is produced.
-    // Output Caching computes the cache key before, so responses varying by headers which are not part of it can't be stored.
-    internal static bool HasUndeclaredVaryHeaders(OutputCacheContext context)
-    {
-        var declaredHeaderNames = context.CacheVaryByRules.HeaderNames;
-
-        foreach (var varyHeader in GetVaryHeaders(context.HttpContext.Response))
-        {
-            var isDeclared = false;
-            foreach (var declaredHeaderName in declaredHeaderNames)
-            {
-                if (string.Equals(varyHeader, declaredHeaderName, StringComparison.OrdinalIgnoreCase))
-                {
-                    isDeclared = true;
-                    break;
-                }
-            }
-
-            if (!isDeclared)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static IEnumerable<string> GetVaryHeaders(HttpResponse response)

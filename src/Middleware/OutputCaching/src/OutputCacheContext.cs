@@ -83,6 +83,11 @@ public sealed class OutputCacheContext
 
     internal bool IsAuthenticatedOnRequest { get; set; }
 
+    /// <summary>
+    /// Whether the response <c>Vary</c> header extends the cache key, as with the Response Caching middleware.
+    /// </summary>
+    internal bool VaryByResponseHeaders { get; set; }
+
     internal Stream OriginalResponseStream { get; set; } = default!;
 
     internal OutputCacheStream OutputCacheStream { get; set; } = default!;

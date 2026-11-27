@@ -307,8 +307,8 @@ public sealed class OutputCachePolicyBuilder
     /// Request and response <c>Cache-Control</c> directives decide whether a response is cached, for how long, and whether a cached entry can be served.
     /// Only <c>GET</c> and <c>HEAD</c> requests without an <c>Authorization</c> header, and <c>200</c> responses marked <c>public</c>, are cached.
     /// The expiration is read from the response <c>s-maxage</c>, <c>max-age</c> or <c>Expires</c> headers, and defaults to 10 seconds.
-    /// Responses are varied by all query keys. Responses with a <c>Vary</c> header listing headers which were not declared with
-    /// <see cref="SetVaryByHeader(string[])"/> are not stored.
+    /// Responses are varied by all query keys, and by the request headers listed by the response <c>Vary</c> header.
+    /// Concurrent requests aren't locked.
     /// </remarks>
     /// <example>
     /// <code>

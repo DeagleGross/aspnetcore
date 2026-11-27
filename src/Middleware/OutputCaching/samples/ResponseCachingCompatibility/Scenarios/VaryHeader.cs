@@ -8,13 +8,12 @@ namespace ResponseCachingCompatibility.Scenarios;
 /// "Vary: Accept-Language" response header. Response Caching then stores one response per language.
 /// </summary>
 /// <remarks>
-/// Known difference: Output Caching computes the cache key before the endpoint runs, so it can't learn the vary rules from
-/// the response. With UseResponseCachingSemantics() such responses aren't stored, while the default policy serves the
-/// first language to everyone. Declaring the header upfront with SetVaryByHeader restores the Response Caching behavior.
+/// The default Output Caching policy computes the cache key before the endpoint runs and ignores the Vary header, so it serves
+/// the first language to everyone. UseResponseCachingSemantics() also stores one response per language.
 /// </remarks>
 public sealed class VaryHeader : Scenario
 {
-    public override string Description => "Endpoint sets 'Vary: Accept-Language' (known difference: declare it with SetVaryByHeader)";
+    public override string Description => "Endpoint sets 'Vary: Accept-Language'";
 
     // Before: Response Caching.
     public override WebApplication CreateResponseCachingApp(WebApplicationBuilder builder)
@@ -38,7 +37,7 @@ public sealed class VaryHeader : Scenario
         return app;
     }
 
-    // After, complete migration: the header the response varies by is declared upfront, so it's part of the cache key.
+    // For comparison: the header is also declared upfront, so it's part of the cache key before the endpoint runs.
     public WebApplication CreateOutputCachingWithVaryByHeaderApp(WebApplicationBuilder builder)
     {
         builder.Services.AddOutputCache(options => options.AddBasePolicy(policy => policy.UseResponseCachingSemantics().SetVaryByHeader("Accept-Language")));
