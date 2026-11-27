@@ -3,7 +3,7 @@
 
 using ResponseCachingCompatibility;
 
-// Usage: ResponseCachingCompatibility [scenario] [compare|responsecaching|outputcaching|default]
+// Usage: ResponseCachingCompatibility [scenario] [compare|responsecaching|outputcaching|default|...]
 // Without arguments, the scenario and the mode are selected interactively.
 
 var scenarios = typeof(Scenario).Assembly.GetTypes()
@@ -19,13 +19,11 @@ var scenario = Select(
     s => s.Name,
     args.ElementAtOrDefault(0));
 
-var modes = new Mode[]
-{
-    new("compare", "Send the scenario requests to every application and compare the responses"),
-    new("responsecaching", "Serve the Response Caching application on http://localhost:5000"),
-    new("outputcaching", "Serve the migrated Output Caching application on http://localhost:5000"),
-    new("default", "Serve the default Output Caching application on http://localhost:5000"),
-};
+Mode[] modes =
+[
+    new("compare", "Send the scenario requests to every application and compare the responses", null),
+    .. scenario.Applications.Select(application => new Mode(application.Key, $"Serve '{application.Name}' on http://localhost:5000", application)),
+];
 
 var mode = Select(
     $"{scenario.Name}: select a mode (Enter for compare):",
@@ -35,20 +33,13 @@ var mode = Select(
     args.ElementAtOrDefault(1),
     defaultValue: modes[0]);
 
-switch (mode.Name)
+if (mode.Application is null)
 {
-    case "compare":
-        await ScenarioRunner.CompareAsync(scenario);
-        break;
-    case "responsecaching":
-        await ScenarioRunner.ServeAsync(scenario.CreateResponseCachingApp);
-        break;
-    case "outputcaching":
-        await ScenarioRunner.ServeAsync(scenario.CreateOutputCachingApp);
-        break;
-    case "default":
-        await ScenarioRunner.ServeAsync(scenario.CreateDefaultOutputCachingApp);
-        break;
+    await ScenarioRunner.CompareAsync(scenario);
+}
+else
+{
+    await ScenarioRunner.ServeAsync(mode.Application);
 }
 
 static T Select<T>(string title, IReadOnlyList<T> items, Func<T, string> display, Func<T, string> name, string? argument, T? defaultValue = null) where T : class
@@ -91,4 +82,4 @@ static T Select<T>(string title, IReadOnlyList<T> items, Func<T, string> display
     }
 }
 
-internal sealed record Mode(string Name, string Description);
+internal sealed record Mode(string Name, string Description, ScenarioApplication? Application);

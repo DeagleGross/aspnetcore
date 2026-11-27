@@ -15,6 +15,9 @@ app.UseOutputCache();
 | Scenario | What it shows |
 |---|---|
 | [CacheControlHeaders](Scenarios/CacheControlHeaders.cs) | The endpoint sets `Cache-Control: public, max-age=3`. Clients send `no-cache` or `max-age=0`. |
+| [MvcResponseCacheAttribute](Scenarios/MvcResponseCacheAttribute.cs) | MVC actions with `[ResponseCache(Duration = 3)]`, `Location = Client` and `NoStore = true`. Controllers don't change. |
+| [VaryByQueryKeys](Scenarios/VaryByQueryKeys.cs) | `[ResponseCache(VaryByQueryKeys = ["page"])]`. **Known gap**: MVC requires `IResponseCachingFeature`, so Output Caching returns 500. |
+| [VaryHeader](Scenarios/VaryHeader.cs) | The endpoint sets `Vary: Accept-Language`. **Known difference**: the header must be declared with `SetVaryByHeader`, shown in an extra column. |
 
 ## Running
 
@@ -53,3 +56,4 @@ A scenario implements:
 - `CreateOutputCachingApp`: the same application migrated to Output Caching.
 - `MapEndpoints`: the endpoints, shared by all applications.
 - `Steps`: the requests sent to every application in the `compare` mode.
+- Optionally `ConfigureServices` for services shared by all applications, and `Applications` to compare more variations.

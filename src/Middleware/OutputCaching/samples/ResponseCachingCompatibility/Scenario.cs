@@ -30,12 +30,20 @@ public abstract class Scenario
     /// </summary>
     public virtual WebApplication CreateDefaultOutputCachingApp(WebApplicationBuilder builder)
     {
+        ConfigureServices(builder.Services);
         builder.Services.AddOutputCache(options => options.AddBasePolicy(policy => policy.Cache()));
 
         var app = builder.Build();
         app.UseOutputCache();
         MapEndpoints(app);
         return app;
+    }
+
+    /// <summary>
+    /// The services needed by the endpoints, identical in all applications.
+    /// </summary>
+    public virtual void ConfigureServices(IServiceCollection services)
+    {
     }
 
     /// <summary>
@@ -47,7 +55,25 @@ public abstract class Scenario
     /// The requests sent to every application when comparing them.
     /// </summary>
     public abstract IReadOnlyList<Step> Steps { get; }
+
+    /// <summary>
+    /// The applications compared by the scenario. Override to add variations.
+    /// </summary>
+    public virtual IReadOnlyList<ScenarioApplication> Applications =>
+    [
+        new("responsecaching", "ResponseCaching", CreateResponseCachingApp),
+        new("outputcaching", "OutputCaching + policy", CreateOutputCachingApp),
+        new("default", "OutputCaching default", CreateDefaultOutputCachingApp),
+    ];
 }
+
+/// <summary>
+/// An application compared by a scenario.
+/// </summary>
+/// <param name="Key">The name used to select the application from the command line.</param>
+/// <param name="Name">The column header in the comparison.</param>
+/// <param name="Create">Creates the application.</param>
+public sealed record ScenarioApplication(string Key, string Name, Func<WebApplicationBuilder, WebApplication> Create);
 
 /// <summary>
 /// A request sent to the applications when comparing them.

@@ -9,23 +9,20 @@ internal static class ScenarioRunner
 {
     private const string ServeUrl = "http://localhost:5000";
 
-    public static async Task ServeAsync(Func<WebApplicationBuilder, WebApplication> createApp)
+    public static async Task ServeAsync(ScenarioApplication application)
     {
-        await using var app = createApp(CreateBuilder(ServeUrl));
+        await using var app = application.Create(CreateBuilder(ServeUrl));
         await app.StartAsync();
 
-        Console.WriteLine($"Listening on {ServeUrl}. Press Ctrl+C to stop.");
+        Console.WriteLine($"{application.Name} listening on {ServeUrl}. Press Ctrl+C to stop.");
         await app.WaitForShutdownAsync();
     }
 
     public static async Task CompareAsync(Scenario scenario)
     {
-        var applications = new (string Name, string Url, Func<WebApplicationBuilder, WebApplication> Create)[]
-        {
-            ("ResponseCaching", "http://localhost:5101", scenario.CreateResponseCachingApp),
-            ("OutputCaching + policy", "http://localhost:5102", scenario.CreateOutputCachingApp),
-            ("OutputCaching default", "http://localhost:5103", scenario.CreateDefaultOutputCachingApp),
-        };
+        var applications = scenario.Applications
+            .Select((application, index) => (application.Name, Url: $"http://localhost:{5101 + index}", application.Create))
+            .ToArray();
 
         var apps = new List<WebApplication>();
         try
@@ -73,11 +70,12 @@ internal static class ScenarioRunner
         step.ConfigureRequest?.Invoke(request);
 
         using var response = await client.SendAsync(request);
-        var body = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
         {
-            body = $"{(int)response.StatusCode} {body}";
+            return $"{(int)response.StatusCode} {response.ReasonPhrase}";
         }
+
+        var body = await response.Content.ReadAsStringAsync();
 
         return response.Headers.Age is { } age ? $"{body} (Age: {age.TotalSeconds}s)" : body;
     }
