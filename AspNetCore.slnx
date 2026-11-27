@@ -610,10 +610,13 @@
   </Folder>
   <Folder Name="/src/Middleware/OutputCaching/">
     <Project Path="src/Middleware/OutputCaching/ResponseCaching/test/Microsoft.AspNetCore.NewResponseCaching.Tests.csproj" />
-    <Project Path="src/Middleware/OutputCaching/samples/OutputCachingSample/OutputCachingSample.csproj" />
     <Project Path="src/Middleware/OutputCaching/src/Microsoft.AspNetCore.OutputCaching.csproj" />
     <Project Path="src/Middleware/OutputCaching/test/Microsoft.AspNetCore.OutputCaching.Tests.csproj" />
   </Folder>
+  <Folder Name="/src/Middleware/OutputCaching/samples/">
+    <Project Path="src/Middleware/OutputCaching/samples/OutputCachingSample/OutputCachingSample.csproj" />
+  </Folder>
+  <Folder Name="/src/Middleware/OutputCaching/samples/ResponseCachingCompatibility/" />
   <Folder Name="/src/Middleware/perf/">
     <Project Path="src/Middleware/perf/Microbenchmarks/Microsoft.AspNetCore.WebSockets.Microbenchmarks.csproj" />
     <Project Path="src/Middleware/perf/ResponseCaching.Microbenchmarks/Microsoft.AspNetCore.ResponseCaching.Microbenchmarks.csproj" />
